@@ -99,6 +99,8 @@ go run ./cmd/plex-gateway
 | `METADATA_GUARD_ENABLED` | `false` | 限制单项详细 metadata 请求进入 Plex 的并发量。 |
 | `METADATA_GUARD_GLOBAL_CONCURRENCY` | `8` | 所有客户端共享的详细 metadata 并发上限。 |
 | `METADATA_GUARD_CLIENT_CONCURRENCY` | `4` | 每个 Plex 客户端标识的详细 metadata 并发上限。 |
+| `METADATA_GUARD_BATCH_ENABLED` | `false` | 限制逗号分隔的批量 metadata 读取进入 Plex 的并发量。 |
+| `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | 所有客户端共享的批量 metadata 并发上限。 |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | 等待准入的最长时间，超时返回 `429`。 |
 
 Plex Token 不会保存到配置中。普通 Plex 请求保持透明转发。对于云端播放，客户端的
@@ -121,6 +123,10 @@ Gateway 会在这些单项详细 metadata 请求进入 Plex 前应用全局和�
 该保护不处理媒体库列表、时间线、观看状态、播放决策、`/library/parts` 或其他 Plex
 路径。请求最多排队 `METADATA_GUARD_QUEUE_TIMEOUT`，超时后返回 `429`，不会绕过保护
 继续请求 Plex。此功能不缓存 metadata，也不改变 Plex 响应。
+
+`METADATA_GUARD_BATCH_ENABLED` 使用独立的全局并发池保护
+`GET/HEAD /library/metadata/1,2,...`。批量读取不会占用交互式单项 metadata 的全局或
+单客户端槽位，metadata PUT 等修改请求也不会进入批量池。
 
 ## 通过 Plex 发布 Gateway 地址
 

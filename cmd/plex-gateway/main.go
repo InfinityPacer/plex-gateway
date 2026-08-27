@@ -79,6 +79,8 @@ func run() error {
 			Enabled:              cfg.MetadataGuard.Enabled,
 			GlobalConcurrency:    cfg.MetadataGuard.GlobalConcurrency,
 			PerClientConcurrency: cfg.MetadataGuard.PerClientConcurrency,
+			BatchEnabled:         cfg.MetadataGuard.BatchEnabled,
+			BatchConcurrency:     cfg.MetadataGuard.BatchConcurrency,
 			QueueTimeout:         cfg.MetadataGuard.QueueTimeout,
 		},
 	})
@@ -101,6 +103,7 @@ func run() error {
 			"path_mappings", len(cfg.PathMappings),
 			"trace", cfg.TraceEnabled,
 			"metadata_guard", cfg.MetadataGuard.Enabled,
+			"metadata_batch_guard", cfg.MetadataGuard.BatchEnabled,
 		)
 		serveErrors <- server.ListenAndServe()
 	}()

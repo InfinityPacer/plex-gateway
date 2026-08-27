@@ -24,6 +24,7 @@ const (
 	defaultPartProbeTimeout  = 15 * time.Second
 	defaultMetadataGlobal    = 8
 	defaultMetadataPerClient = 4
+	defaultMetadataBatch     = 3
 	defaultMetadataQueueWait = 10 * time.Second
 )
 
@@ -55,6 +56,8 @@ type MetadataGuardConfig struct {
 	Enabled              bool
 	GlobalConcurrency    int
 	PerClientConcurrency int
+	BatchEnabled         bool
+	BatchConcurrency     int
 	QueueTimeout         time.Duration
 }
 
@@ -134,6 +137,14 @@ func Load() (Config, error) {
 	if metadataPerClient > metadataGlobal {
 		return Config{}, errors.New("METADATA_GUARD_CLIENT_CONCURRENCY must not exceed METADATA_GUARD_GLOBAL_CONCURRENCY")
 	}
+	metadataBatchEnabled, err := envBool("METADATA_GUARD_BATCH_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataBatch, err := envPositiveInt("METADATA_GUARD_BATCH_CONCURRENCY", defaultMetadataBatch)
+	if err != nil {
+		return Config{}, err
+	}
 	metadataQueueWait, err := envDuration("METADATA_GUARD_QUEUE_TIMEOUT", defaultMetadataQueueWait)
 	if err != nil {
 		return Config{}, err
@@ -178,6 +189,8 @@ func Load() (Config, error) {
 			Enabled:              metadataGuardEnabled,
 			GlobalConcurrency:    metadataGlobal,
 			PerClientConcurrency: metadataPerClient,
+			BatchEnabled:         metadataBatchEnabled,
+			BatchConcurrency:     metadataBatch,
 			QueueTimeout:         metadataQueueWait,
 		},
 		LogLevel:          logLevel,

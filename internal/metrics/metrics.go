@@ -15,19 +15,23 @@ import (
 // surface bounded and prevents request credentials or media URLs from being
 // copied into an operational endpoint.
 type Metrics struct {
-	plexRequestsTotal atomic.Uint64
-	cloudPartHits     atomic.Uint64
-	cloudPartMisses   atomic.Uint64
-	redirectSuccess   atomic.Uint64
-	redirectFailure   atomic.Uint64
-	plexFallbackTotal atomic.Uint64
-	activeRequests    atomic.Int64
-	metadataAdmitted  atomic.Uint64
-	metadataTimeouts  atomic.Uint64
-	metadataActive    atomic.Int64
-	metadataQueued    atomic.Int64
-	resolverLatency   latencyMetrics
-	redirectLatency   latencyMetrics
+	plexRequestsTotal     atomic.Uint64
+	cloudPartHits         atomic.Uint64
+	cloudPartMisses       atomic.Uint64
+	redirectSuccess       atomic.Uint64
+	redirectFailure       atomic.Uint64
+	plexFallbackTotal     atomic.Uint64
+	activeRequests        atomic.Int64
+	metadataAdmitted      atomic.Uint64
+	metadataTimeouts      atomic.Uint64
+	metadataActive        atomic.Int64
+	metadataQueued        atomic.Int64
+	metadataBatchAdmitted atomic.Uint64
+	metadataBatchTimeouts atomic.Uint64
+	metadataBatchActive   atomic.Int64
+	metadataBatchQueued   atomic.Int64
+	resolverLatency       latencyMetrics
+	redirectLatency       latencyMetrics
 }
 
 type latencyMetrics struct {
@@ -48,10 +52,14 @@ type Snapshot struct {
 	PlexFallbackTotal uint64 `json:"plex_fallback_total"`
 	ActiveRequests    int64  `json:"active_requests"`
 
-	MetadataGuardAdmittedTotal uint64 `json:"metadata_guard_admitted_total"`
-	MetadataGuardTimeoutsTotal uint64 `json:"metadata_guard_timeouts_total"`
-	MetadataGuardActive        int64  `json:"metadata_guard_active"`
-	MetadataGuardQueued        int64  `json:"metadata_guard_queued"`
+	MetadataGuardAdmittedTotal      uint64 `json:"metadata_guard_admitted_total"`
+	MetadataGuardTimeoutsTotal      uint64 `json:"metadata_guard_timeouts_total"`
+	MetadataGuardActive             int64  `json:"metadata_guard_active"`
+	MetadataGuardQueued             int64  `json:"metadata_guard_queued"`
+	MetadataBatchGuardAdmittedTotal uint64 `json:"metadata_batch_guard_admitted_total"`
+	MetadataBatchGuardTimeoutsTotal uint64 `json:"metadata_batch_guard_timeouts_total"`
+	MetadataBatchGuardActive        int64  `json:"metadata_batch_guard_active"`
+	MetadataBatchGuardQueued        int64  `json:"metadata_batch_guard_queued"`
 
 	ResolverLatencyMSTotal uint64 `json:"resolver_latency_ms_total"`
 	ResolverLatencySamples uint64 `json:"resolver_latency_samples"`
@@ -132,6 +140,38 @@ func (m *Metrics) DecMetadataGuardQueued() {
 	decrementGauge(&m.metadataQueued)
 }
 
+// IncMetadataBatchGuardAdmitted records a comma-separated metadata read that
+// acquired the batch pool before entering Plex.
+func (m *Metrics) IncMetadataBatchGuardAdmitted() {
+	m.metadataBatchAdmitted.Add(1)
+}
+
+// IncMetadataBatchGuardTimeouts records a batch read rejected after its queue
+// wait expired.
+func (m *Metrics) IncMetadataBatchGuardTimeouts() {
+	m.metadataBatchTimeouts.Add(1)
+}
+
+// IncMetadataBatchGuardActive marks one admitted batch read as active.
+func (m *Metrics) IncMetadataBatchGuardActive() {
+	m.metadataBatchActive.Add(1)
+}
+
+// DecMetadataBatchGuardActive marks one admitted batch read as complete.
+func (m *Metrics) DecMetadataBatchGuardActive() {
+	decrementGauge(&m.metadataBatchActive)
+}
+
+// IncMetadataBatchGuardQueued marks one batch read as waiting for admission.
+func (m *Metrics) IncMetadataBatchGuardQueued() {
+	m.metadataBatchQueued.Add(1)
+}
+
+// DecMetadataBatchGuardQueued marks one batch read as no longer waiting.
+func (m *Metrics) DecMetadataBatchGuardQueued() {
+	decrementGauge(&m.metadataBatchQueued)
+}
+
 // ObserveResolverLatency records one MediaVault direct-link lookup without
 // attaching request, client, Part, or URL labels.
 func (m *Metrics) ObserveResolverLatency(duration time.Duration) {
@@ -208,10 +248,14 @@ func (m *Metrics) Snapshot() Snapshot {
 		PlexFallbackTotal: m.plexFallbackTotal.Load(),
 		ActiveRequests:    m.activeRequests.Load(),
 
-		MetadataGuardAdmittedTotal: m.metadataAdmitted.Load(),
-		MetadataGuardTimeoutsTotal: m.metadataTimeouts.Load(),
-		MetadataGuardActive:        m.metadataActive.Load(),
-		MetadataGuardQueued:        m.metadataQueued.Load(),
+		MetadataGuardAdmittedTotal:      m.metadataAdmitted.Load(),
+		MetadataGuardTimeoutsTotal:      m.metadataTimeouts.Load(),
+		MetadataGuardActive:             m.metadataActive.Load(),
+		MetadataGuardQueued:             m.metadataQueued.Load(),
+		MetadataBatchGuardAdmittedTotal: m.metadataBatchAdmitted.Load(),
+		MetadataBatchGuardTimeoutsTotal: m.metadataBatchTimeouts.Load(),
+		MetadataBatchGuardActive:        m.metadataBatchActive.Load(),
+		MetadataBatchGuardQueued:        m.metadataBatchQueued.Load(),
 
 		ResolverLatencyMSTotal: resolverTotal,
 		ResolverLatencySamples: resolverSamples,

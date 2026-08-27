@@ -23,6 +23,10 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.IncMetadataGuardTimeouts()
 	registry.IncMetadataGuardActive()
 	registry.IncMetadataGuardQueued()
+	registry.IncMetadataBatchGuardAdmitted()
+	registry.IncMetadataBatchGuardTimeouts()
+	registry.IncMetadataBatchGuardActive()
+	registry.IncMetadataBatchGuardQueued()
 	registry.ObserveResolverLatency(12 * time.Millisecond)
 	registry.ObserveResolverLatency(7 * time.Millisecond)
 	registry.ObserveRedirectLatency(30 * time.Millisecond)
@@ -51,10 +55,14 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 		PlexFallbackTotal: 1,
 		ActiveRequests:    1,
 
-		MetadataGuardAdmittedTotal: 1,
-		MetadataGuardTimeoutsTotal: 1,
-		MetadataGuardActive:        1,
-		MetadataGuardQueued:        1,
+		MetadataGuardAdmittedTotal:      1,
+		MetadataGuardTimeoutsTotal:      1,
+		MetadataGuardActive:             1,
+		MetadataGuardQueued:             1,
+		MetadataBatchGuardAdmittedTotal: 1,
+		MetadataBatchGuardTimeoutsTotal: 1,
+		MetadataBatchGuardActive:        1,
+		MetadataBatchGuardQueued:        1,
 
 		ResolverLatencyMSTotal: 19,
 		ResolverLatencySamples: 2,
@@ -72,6 +80,8 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	release()
 	registry.DecMetadataGuardActive()
 	registry.DecMetadataGuardQueued()
+	registry.DecMetadataBatchGuardActive()
+	registry.DecMetadataBatchGuardQueued()
 	if got := registry.Snapshot().ActiveRequests; got != 0 {
 		t.Fatalf("active requests after release = %d, want 0", got)
 	}
@@ -121,6 +131,8 @@ func TestActiveRequestReleaseIsIdempotentAndClamped(t *testing.T) {
 	registry.AddActiveRequests(-10)
 	registry.DecMetadataGuardActive()
 	registry.DecMetadataGuardQueued()
+	registry.DecMetadataBatchGuardActive()
+	registry.DecMetadataBatchGuardQueued()
 	if got := registry.Snapshot().ActiveRequests; got != 0 {
 		t.Fatalf("clamped active requests = %d, want 0", got)
 	}
@@ -154,6 +166,12 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 				registry.DecMetadataGuardActive()
 				registry.IncMetadataGuardQueued()
 				registry.DecMetadataGuardQueued()
+				registry.IncMetadataBatchGuardAdmitted()
+				registry.IncMetadataBatchGuardTimeouts()
+				registry.IncMetadataBatchGuardActive()
+				registry.DecMetadataBatchGuardActive()
+				registry.IncMetadataBatchGuardQueued()
+				registry.DecMetadataBatchGuardQueued()
 				registry.ObserveResolverLatency(time.Millisecond)
 				registry.ObserveRedirectLatency(2 * time.Millisecond)
 				release := registry.BeginRequest()
@@ -168,6 +186,8 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 		got.RedirectSuccess != want || got.RedirectFailure != want || got.PlexFallbackTotal != want || got.ActiveRequests != 0 ||
 		got.MetadataGuardAdmittedTotal != want || got.MetadataGuardTimeoutsTotal != want ||
 		got.MetadataGuardActive != 0 || got.MetadataGuardQueued != 0 ||
+		got.MetadataBatchGuardAdmittedTotal != want || got.MetadataBatchGuardTimeoutsTotal != want ||
+		got.MetadataBatchGuardActive != 0 || got.MetadataBatchGuardQueued != 0 ||
 		got.ResolverLatencySamples != want || got.ResolverLatencyMSTotal != want ||
 		got.RedirectLatencySamples != want || got.RedirectLatencyMSTotal != 2*want {
 		t.Fatalf("concurrent snapshot = %#v, want all counters %d and no active requests", got, want)

@@ -15,15 +15,19 @@ import (
 const (
 	defaultMetadataGlobalConcurrency    = 8
 	defaultMetadataPerClientConcurrency = 4
+	defaultMetadataBatchConcurrency     = 3
 	defaultMetadataQueueTimeout         = 10 * time.Second
 )
 
-// MetadataGuardOptions controls admission for detailed metadata requests. The
-// guard does not cover playback, timeline, scrobble, or library listing paths.
+// MetadataGuardOptions controls independent admission pools for single-item
+// and comma-separated batch metadata reads. The guard does not cover playback,
+// timeline, scrobble, mutations, or library listing paths.
 type MetadataGuardOptions struct {
 	Enabled              bool
 	GlobalConcurrency    int
 	PerClientConcurrency int
+	BatchEnabled         bool
+	BatchConcurrency     int
 	QueueTimeout         time.Duration
 }
 
@@ -32,6 +36,7 @@ type metadataGuard struct {
 	logger       *slog.Logger
 	metrics      *metrics.Metrics
 	global       chan struct{}
+	batch        chan struct{}
 	perClientMax int
 	queueTimeout time.Duration
 
@@ -45,7 +50,7 @@ type metadataClientBucket struct {
 }
 
 func newMetadataGuard(options MetadataGuardOptions, next http.Handler, registry *metrics.Metrics, logger *slog.Logger) http.Handler {
-	if !options.Enabled {
+	if !options.Enabled && !options.BatchEnabled {
 		return next
 	}
 	if options.GlobalConcurrency <= 0 {
@@ -57,6 +62,9 @@ func newMetadataGuard(options MetadataGuardOptions, next http.Handler, registry 
 	if options.PerClientConcurrency > options.GlobalConcurrency {
 		options.PerClientConcurrency = options.GlobalConcurrency
 	}
+	if options.BatchConcurrency <= 0 {
+		options.BatchConcurrency = defaultMetadataBatchConcurrency
+	}
 	if options.QueueTimeout <= 0 {
 		options.QueueTimeout = defaultMetadataQueueTimeout
 	}
@@ -66,32 +74,50 @@ func newMetadataGuard(options MetadataGuardOptions, next http.Handler, registry 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &metadataGuard{
+	guard := &metadataGuard{
 		next:         next,
 		logger:       logger,
 		metrics:      registry,
-		global:       make(chan struct{}, options.GlobalConcurrency),
 		perClientMax: options.PerClientConcurrency,
 		queueTimeout: options.QueueTimeout,
 		clients:      make(map[string]*metadataClientBucket),
 	}
+	if options.Enabled {
+		guard.global = make(chan struct{}, options.GlobalConcurrency)
+	}
+	if options.BatchEnabled {
+		guard.batch = make(chan struct{}, options.BatchConcurrency)
+	}
+	return guard
 }
 
 func (g *metadataGuard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !isDetailedMetadataRequest(r) {
+	kind := classifyMetadataRequest(r)
+	if kind == metadataRequestNone || (kind == metadataRequestSingle && g.global == nil) || (kind == metadataRequestBatch && g.batch == nil) {
 		g.next.ServeHTTP(w, r)
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), g.queueTimeout)
 	defer cancel()
-	release, err := g.acquire(ctx, metadataClientKey(r))
+	var release func()
+	var err error
+	switch kind {
+	case metadataRequestSingle:
+		release, err = g.acquireSingle(ctx, metadataClientKey(r))
+	case metadataRequestBatch:
+		release, err = g.acquireBatch(ctx)
+	}
 	if err != nil {
 		if r.Context().Err() != nil {
 			return
 		}
-		g.metrics.IncMetadataGuardTimeouts()
-		g.logger.Warn("metadata_guard_timeout", "method", r.Method)
+		if kind == metadataRequestBatch {
+			g.metrics.IncMetadataBatchGuardTimeouts()
+		} else {
+			g.metrics.IncMetadataGuardTimeouts()
+		}
+		g.logger.Warn("metadata_guard_timeout", "method", r.Method, "request_kind", kind.String())
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
@@ -101,7 +127,7 @@ func (g *metadataGuard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.next.ServeHTTP(w, r)
 }
 
-func (g *metadataGuard) acquire(ctx context.Context, clientKey string) (func(), error) {
+func (g *metadataGuard) acquireSingle(ctx context.Context, clientKey string) (func(), error) {
 	bucket := g.retainClient(clientKey)
 	g.metrics.IncMetadataGuardQueued()
 	defer g.metrics.DecMetadataGuardQueued()
@@ -130,6 +156,27 @@ func (g *metadataGuard) acquire(ctx context.Context, clientKey string) (func(), 
 			<-bucket.tokens
 			g.releaseClient(clientKey, bucket)
 			g.metrics.DecMetadataGuardActive()
+		})
+	}, nil
+}
+
+func (g *metadataGuard) acquireBatch(ctx context.Context) (func(), error) {
+	g.metrics.IncMetadataBatchGuardQueued()
+	defer g.metrics.DecMetadataBatchGuardQueued()
+
+	select {
+	case g.batch <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	g.metrics.IncMetadataBatchGuardAdmitted()
+	g.metrics.IncMetadataBatchGuardActive()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			<-g.batch
+			g.metrics.DecMetadataBatchGuardActive()
 		})
 	}, nil
 }
@@ -178,19 +225,43 @@ func singleValue(values []string) string {
 	return strings.TrimSpace(values[0])
 }
 
-func isDetailedMetadataRequest(r *http.Request) bool {
+type metadataRequestKind uint8
+
+const (
+	metadataRequestNone metadataRequestKind = iota
+	metadataRequestSingle
+	metadataRequestBatch
+)
+
+func (kind metadataRequestKind) String() string {
+	if kind == metadataRequestBatch {
+		return "batch"
+	}
+	return "single"
+}
+
+func classifyMetadataRequest(r *http.Request) metadataRequestKind {
 	if r == nil || r.URL == nil || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
-		return false
+		return metadataRequestNone
 	}
 	const prefix = "/library/metadata/"
 	identifier := strings.TrimPrefix(r.URL.Path, prefix)
 	if identifier == r.URL.Path || identifier == "" {
-		return false
+		return metadataRequestNone
 	}
-	for _, character := range identifier {
-		if character < '0' || character > '9' {
-			return false
+	identifiers := strings.Split(identifier, ",")
+	for _, value := range identifiers {
+		if value == "" {
+			return metadataRequestNone
+		}
+		for _, character := range value {
+			if character < '0' || character > '9' {
+				return metadataRequestNone
+			}
 		}
 	}
-	return true
+	if len(identifiers) == 1 {
+		return metadataRequestSingle
+	}
+	return metadataRequestBatch
 }
