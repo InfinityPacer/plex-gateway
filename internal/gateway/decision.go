@@ -283,21 +283,21 @@ func isMetadataItemPath(value string) bool {
 }
 
 // forceDirectPlay preserves every unrelated raw query component, including
-// repeated client-profile parameters, while replacing all conflicting Direct
-// Play flags with one authoritative value each.
+// repeated client-profile parameters, while replacing the cloud playback
+// decision flags with authoritative values.
 func forceDirectPlay(rawQuery string) string {
 	components := strings.Split(rawQuery, "&")
-	result := make([]string, 0, len(components)+2)
+	result := make([]string, 0, len(components)+3)
 	for _, component := range components {
 		if component == "" {
 			continue
 		}
 		rawName, _, _ := strings.Cut(component, "=")
 		name, err := url.QueryUnescape(rawName)
-		if err == nil && (name == "directPlay" || name == "directStream") {
+		if err == nil && (name == "directPlay" || name == "directStream" || name == "hasMDE") {
 			continue
 		}
 		result = append(result, component)
 	}
-	return strings.Join(append(result, "directPlay=1", "directStream=1"), "&")
+	return strings.Join(append(result, "directPlay=1", "directStream=1", "hasMDE=1"), "&")
 }

@@ -54,8 +54,8 @@ func TestCloudDecisionForcesDirectPlayAndContinuesThroughPartRedirect(t *testing
 			if got := query["directStream"]; len(got) != 1 || got[0] != "1" {
 				t.Fatalf("directStream = %#v", got)
 			}
-			if query.Get("hasMDE") != "0" {
-				t.Fatalf("hasMDE = %q", query.Get("hasMDE"))
+			if got := query["hasMDE"]; len(got) != 1 || got[0] != "1" {
+				t.Fatalf("hasMDE = %#v", got)
 			}
 			if got := query["profileExtra"]; len(got) != 2 || got[0] != "first" || got[1] != "second" {
 				t.Fatalf("profileExtra = %#v", got)
@@ -91,6 +91,7 @@ func TestCloudDecisionForcesDirectPlayAndContinuesThroughPartRedirect(t *testing
 	query.Add("directPlay", "0")
 	query.Set("directStream", "0")
 	query.Set("hasMDE", "0")
+	query.Add("hasMDE", "1")
 	query.Add("profileExtra", "first")
 	query.Add("profileExtra", "second")
 	query.Set("X-Plex-Token", "query-token")
@@ -141,7 +142,7 @@ func TestCloudDecisionInfersOmittedMediaIndexFromUniqueMetadata(t *testing.T) {
 		case "/video/:/transcode/universal/decision":
 			decisionRequests++
 			query := r.URL.Query()
-			if query.Get("mediaIndex") != "0" || query.Get("partIndex") != "0" || query.Get("directPlay") != "1" {
+			if query.Get("mediaIndex") != "0" || query.Get("partIndex") != "0" || query.Get("directPlay") != "1" || query.Get("hasMDE") != "1" {
 				t.Fatalf("adapted decision query = %q", r.URL.RawQuery)
 			}
 			w.Header().Set("Content-Type", "application/xml")
@@ -220,7 +221,7 @@ func TestOmittedMediaIndexWithAmbiguousMetadataRemainsUnchanged(t *testing.T) {
 }
 
 func TestLocalDecisionRemainsUnchanged(t *testing.T) {
-	originalQuery := "path=%2Flibrary%2Fmetadata%2F42&partIndex=0&directPlay=0&directStream=0&hasMDE=1"
+	originalQuery := "path=%2Flibrary%2Fmetadata%2F42&partIndex=0&directPlay=0&directStream=0"
 	var metadataRequests int
 	var decisionQuery string
 	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
