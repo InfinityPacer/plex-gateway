@@ -45,3 +45,30 @@ func TestSelectPartRejectsAmbiguousOrInvalidIndices(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectUniquePartRequiresOneMediaAndOnePart(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		contentType string
+		body        string
+		wantID      string
+	}{
+		{name: "unique XML", contentType: "application/xml", body: `<MediaContainer><Video><Media><Part id="10" key="/parts/10" file="/cloud/A.strm"/></Media></Video></MediaContainer>`, wantID: "10"},
+		{name: "unique JSON", contentType: "application/json", body: `{"MediaContainer":{"Metadata":[{"Media":[{"Part":[{"id":20,"key":"/parts/20","file":"/cloud/B.strm"}]}]}]}}`, wantID: "20"},
+		{name: "multiple media", contentType: "application/xml", body: `<MediaContainer><Video><Media><Part id="10" file="/cloud/A.strm"/></Media><Media><Part id="20" file="/cloud/B.strm"/></Media></Video></MediaContainer>`},
+		{name: "multiple parts", contentType: "application/json", body: `{"MediaContainer":{"Metadata":[{"Media":[{"Part":[{"id":10,"file":"/cloud/A.strm"},{"id":20,"file":"/cloud/B.strm"}]}]}]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			part, err := SelectUniquePart([]byte(test.body), test.contentType)
+			if test.wantID == "" {
+				if err == nil {
+					t.Fatalf("SelectUniquePart() = %#v, want error", part)
+				}
+				return
+			}
+			if err != nil || part.ID != test.wantID {
+				t.Fatalf("SelectUniquePart() = %#v, %v", part, err)
+			}
+		})
+	}
+}
