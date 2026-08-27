@@ -1,0 +1,10 @@
+/bin/
+/dist/
+.workbenchs/
+.env
+.env.*
+!.env.example
+*.log
+*.trace.jsonl
+plex-probe-report*.json
+docs/plex-behavior.local.md

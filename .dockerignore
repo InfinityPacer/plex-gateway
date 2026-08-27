@@ -1,0 +1,11 @@
+.git
+.gitignore
+.workbenchs
+.env
+.env.*
+docs/plex-behavior.local.md
+bin
+dist
+*.log
+*.trace.jsonl
+plex-probe-report*.json
