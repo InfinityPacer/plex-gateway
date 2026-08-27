@@ -37,6 +37,9 @@ func TestLoadDefaults(t *testing.T) {
 	if got.TraceEnabled {
 		t.Fatal("TraceEnabled = true")
 	}
+	if got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 8 || got.MetadataGuard.PerClientConcurrency != 4 || got.MetadataGuard.QueueTimeout != 10*time.Second {
+		t.Fatalf("unexpected metadata guard defaults: %#v", got.MetadataGuard)
+	}
 	if got.MediaVaultURL != nil || len(got.PathMappings) != 0 {
 		t.Fatalf("cloud redirect unexpectedly enabled: %#v", got)
 	}
@@ -60,6 +63,10 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	t.Setenv("RESOLVER_TIMEOUT", "7s")
 	t.Setenv("OBSERVE_MAX_BYTES", "4096")
 	t.Setenv("PART_PROBE_TIMEOUT", "3s")
+	t.Setenv("METADATA_GUARD_ENABLED", "true")
+	t.Setenv("METADATA_GUARD_GLOBAL_CONCURRENCY", "6")
+	t.Setenv("METADATA_GUARD_CLIENT_CONCURRENCY", "3")
+	t.Setenv("METADATA_GUARD_QUEUE_TIMEOUT", "5s")
 
 	got, err := Load()
 	if err != nil {
@@ -73,6 +80,20 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	}
 	if got.PartTTL != 12*time.Hour || got.ResolverTimeout != 7*time.Second || got.ObserveMaxBytes != 4096 || got.PartProbeTimeout != 3*time.Second {
 		t.Fatalf("cloud durations/limit = %#v", got)
+	}
+	if !got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 6 || got.MetadataGuard.PerClientConcurrency != 3 || got.MetadataGuard.QueueTimeout != 5*time.Second {
+		t.Fatalf("metadata guard = %#v", got.MetadataGuard)
+	}
+}
+
+func TestLoadRejectsMetadataClientLimitAboveGlobalLimit(t *testing.T) {
+	t.Setenv("PLEX_URL", "http://plex:32400")
+	t.Setenv("METADATA_GUARD_GLOBAL_CONCURRENCY", "2")
+	t.Setenv("METADATA_GUARD_CLIENT_CONCURRENCY", "3")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "must not exceed") {
+		t.Fatalf("Load() error = %v", err)
 	}
 }
 

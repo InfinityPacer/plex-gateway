@@ -22,6 +22,10 @@ type Metrics struct {
 	redirectFailure   atomic.Uint64
 	plexFallbackTotal atomic.Uint64
 	activeRequests    atomic.Int64
+	metadataAdmitted  atomic.Uint64
+	metadataTimeouts  atomic.Uint64
+	metadataActive    atomic.Int64
+	metadataQueued    atomic.Int64
 	resolverLatency   latencyMetrics
 	redirectLatency   latencyMetrics
 }
@@ -43,6 +47,11 @@ type Snapshot struct {
 	RedirectFailure   uint64 `json:"redirect_failure"`
 	PlexFallbackTotal uint64 `json:"plex_fallback_total"`
 	ActiveRequests    int64  `json:"active_requests"`
+
+	MetadataGuardAdmittedTotal uint64 `json:"metadata_guard_admitted_total"`
+	MetadataGuardTimeoutsTotal uint64 `json:"metadata_guard_timeouts_total"`
+	MetadataGuardActive        int64  `json:"metadata_guard_active"`
+	MetadataGuardQueued        int64  `json:"metadata_guard_queued"`
 
 	ResolverLatencyMSTotal uint64 `json:"resolver_latency_ms_total"`
 	ResolverLatencySamples uint64 `json:"resolver_latency_samples"`
@@ -89,6 +98,38 @@ func (m *Metrics) IncRedirectFailure() {
 // not complete.
 func (m *Metrics) IncPlexFallback() {
 	m.plexFallbackTotal.Add(1)
+}
+
+// IncMetadataGuardAdmitted records a detailed metadata request admitted to
+// Plex after both client and global limits were acquired.
+func (m *Metrics) IncMetadataGuardAdmitted() {
+	m.metadataAdmitted.Add(1)
+}
+
+// IncMetadataGuardTimeouts records a request rejected after its bounded queue
+// wait expired.
+func (m *Metrics) IncMetadataGuardTimeouts() {
+	m.metadataTimeouts.Add(1)
+}
+
+// IncMetadataGuardActive marks one admitted metadata request as active.
+func (m *Metrics) IncMetadataGuardActive() {
+	m.metadataActive.Add(1)
+}
+
+// DecMetadataGuardActive marks one admitted metadata request as complete.
+func (m *Metrics) DecMetadataGuardActive() {
+	decrementGauge(&m.metadataActive)
+}
+
+// IncMetadataGuardQueued marks one metadata request as waiting for admission.
+func (m *Metrics) IncMetadataGuardQueued() {
+	m.metadataQueued.Add(1)
+}
+
+// DecMetadataGuardQueued marks one metadata request as no longer waiting.
+func (m *Metrics) DecMetadataGuardQueued() {
+	decrementGauge(&m.metadataQueued)
 }
 
 // ObserveResolverLatency records one MediaVault direct-link lookup without
@@ -167,6 +208,11 @@ func (m *Metrics) Snapshot() Snapshot {
 		PlexFallbackTotal: m.plexFallbackTotal.Load(),
 		ActiveRequests:    m.activeRequests.Load(),
 
+		MetadataGuardAdmittedTotal: m.metadataAdmitted.Load(),
+		MetadataGuardTimeoutsTotal: m.metadataTimeouts.Load(),
+		MetadataGuardActive:        m.metadataActive.Load(),
+		MetadataGuardQueued:        m.metadataQueued.Load(),
+
 		ResolverLatencyMSTotal: resolverTotal,
 		ResolverLatencySamples: resolverSamples,
 		ResolverLatencyMSLast:  resolverLast,
@@ -176,6 +222,18 @@ func (m *Metrics) Snapshot() Snapshot {
 		RedirectLatencySamples: redirectSamples,
 		RedirectLatencyMSLast:  redirectLast,
 		RedirectLatencyMSMax:   redirectMax,
+	}
+}
+
+func decrementGauge(gauge *atomic.Int64) {
+	for {
+		current := gauge.Load()
+		if current <= 0 {
+			return
+		}
+		if gauge.CompareAndSwap(current, current-1) {
+			return
+		}
 	}
 }
 
