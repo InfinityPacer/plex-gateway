@@ -2,7 +2,9 @@
 
 The project advances only when the preceding evidence gate is satisfied. Each
 phase should remain independently reviewable and must preserve Plex as the sole
-metadata and watch-state authority.
+library, descriptive-metadata, and watch-state authority. Technical MediaInfo
+belongs to a validated producer or the Gateway fallback store and is projected
+to clients or Plex without changing those ownership boundaries.
 
 ## Phase 0: Plex behavior probe
 
@@ -66,22 +68,33 @@ Supporting that path would require a media proxy, packaging service, or client
 modification, each outside the redirect-only data plane. Local Plex Web media,
 manifest segments, and every genuine transcode request remain Plex-owned.
 
-## Deferred research
+## MediaInfo Phase D
 
 MediaInfo is not an active dependency of redirect playback. The production Plex
 snapshot currently exposes STRM Parts without container, codec, resolution, or
 stream elements; the current playback plane does not synthesize those fields.
 
-MediaInfo remains a separate analysis-plane project:
+MediaInfo remains isolated from redirect playback. Phase D prioritizes the
+Gateway fallback while preserving the broader lifecycle design:
 
-1. prefer a stable MediaVault MediaInfo interface if one is published;
-2. otherwise evaluate bounded remote `ffprobe` with timeout, probe-size,
-   concurrency, and persistent result-cache limits;
-3. keep MediaInfo records in gateway-owned storage keyed by a stable Part and
-   STRM fingerprint, never by a short-lived signed CDN URL;
-4. evaluate client-specific metadata response enrichment without Plex storage
-   mutation;
-5. do not read or write Plex SQLite.
+1. use L1 and SQLite for single-instance fallback storage;
+2. accept optional `PLEX_TOKEN` from an ignored deployment `app.env` for
+   discovery and prewarming;
+3. evaluate bounded remote `ffprobe`, with an initial `2s` cold metadata wait
+   ceiling based on the current sample;
+4. support single Part, next episode, season, show, and configured STRM-root
+   tasks without blocking decision, Part, universal start, or 302;
+5. enrich authorized Plex metadata responses first, then evaluate an official
+   Plex API, other supported PMS interfaces, and an isolated database helper
+   without selecting a persistence path in advance;
+6. add Redis or replace SQLite with PostgreSQL only after measured
+   multi-instance or capacity requirements exist.
+
+The complete MoviePilot, MediaVault, 115 share, ownership, seeding, cleanup,
+MediaInfo, and projection design is documented in
+[media-lifecycle-architecture.md](media-lifecycle-architecture.md). Gateway
+fallback is an addition to that design, not a replacement for its Phase A-F
+scope.
 
 Marker experiments remain independent of both playback and MediaInfo. Probe the
 documented Plex marker API before designing marker production, and keep intro

@@ -1,10 +1,12 @@
 # Architecture
 
-`plex-gateway` is a fail-open Plex protocol adapter. Plex remains the
-source of truth for metadata, libraries, authentication, watch state, and
-playback history. The gateway handles only Plex control traffic and redirects
-eligible STRM-backed Direct Play requests; media bytes never pass through the
-gateway.
+`plex-gateway` is a fail-open Plex protocol adapter. Plex remains the source of
+truth for libraries, descriptive metadata, authentication, watch state, and
+playback history. Technical MediaInfo belongs to a validated producer or the
+Gateway fallback store; any enrichment or Plex write is a rebuildable
+projection. The gateway handles only Plex control traffic and redirects eligible
+STRM-backed Direct Play requests. Playback media bytes never pass through the
+gateway; the isolated analysis worker may read a bounded amount for probing.
 
 ## Request ownership
 
@@ -16,9 +18,11 @@ gateway.
   consume interactive metadata slots. Neither pool caches or rewrites Plex
   responses. Library listings, metadata mutations, playback paths, timeline,
   and watch-state traffic do not enter these pools.
-- Successful XML or JSON Plex responses are observed without changing their
-  bytes. Any `Media.Part` values found in those responses populate an in-memory
-  cache keyed by `Part.id`.
+- Successful XML or JSON Plex responses are currently observed without changing
+  their bytes. Any `Media.Part` values found in those responses populate an
+  in-memory cache keyed by `Part.id`. Phase D may enrich a successful single-item
+  metadata response when explicitly enabled; unsupported or failed transforms
+  preserve the original Plex response.
 - `GET` and `HEAD` requests below `/library/parts/{partID}/...` are eligible for
   interception only when the cached `Part.file` has a configured cloud
   extension and maps to a readable local STRM file.
@@ -63,7 +67,8 @@ control-file and metadata readers.
 
 | State | Authority and writer | Invalidation |
 | --- | --- | --- |
-| Plex metadata and watch state | Plex only; the gateway observes response bytes and forwards timeline/scrobble traffic unchanged. | Plex lifecycle. |
+| Plex library, descriptive metadata, and watch state | Plex only; the gateway forwards timeline/scrobble traffic unchanged. | Plex lifecycle. |
+| Technical MediaInfo | A validated producer record, or Gateway SQLite for fallback-probed media; Plex fields and response enrichment are projections. | Source or STRM fingerprint change, schema change, or freshness policy. |
 | Part cache | Derived by metadata observation or an authenticated playback selection, keyed by `Part.id`. | Configured TTL or process restart. |
 | Direct Play grant | Published only after a complete Plex decision explicitly accepts the exact Part; a new related decision revokes the previous grant first. | Five-minute TTL, bounded eviction, or explicit revocation. |
 | MediaVault direct URL | Produced for the active authorized request and copied only to `Location`. | Never persisted or reused by the gateway. |
@@ -163,11 +168,13 @@ renaming feature, and MediaInfoKeeper is Emby-specific. Neither is treated as a
 public MediaInfo API. The gateway does not inspect MediaVault internals or
 duplicate those features in the playback plane.
 
-Future MediaInfo work begins with a provider boundary and prefers a stable
-MediaVault API if one becomes available. Metadata response enrichment may then
-be evaluated per client without changing Plex storage. Intro and credits work
-starts with an isolated Plex marker API probe. Plex SQLite reads or writes are
-not an allowed fallback for either feature.
+MediaInfo Phase D begins with a provider boundary, L1 and SQLite persistence,
+bounded remote probing, proactive prewarming, and metadata response enrichment.
+A stable MediaVault or MoviePilot provider can replace remote probing without
+changing playback. Plex persistence remains a feasibility question across an
+official API, another supported PMS interface, and an isolated database helper.
+Intro and credits work starts with an isolated Plex marker API probe. See
+[media-lifecycle-architecture.md](media-lifecycle-architecture.md).
 
 ## Cache lifecycle
 
@@ -187,8 +194,10 @@ The gateway requires:
 
 - network access to Plex and MediaVault;
 - read-only mounts for each configured STRM tree;
-- no static Plex token, Plex database, MediaVault database, 115 cookie, or
-  cloud-provider API access.
+- no Plex database, MediaVault database, 115 cookie, or cloud-provider API
+  access. Playback requires no static Plex Token; MediaInfo discovery and
+  prewarming may optionally use `PLEX_TOKEN` injected from an ignored
+  deployment `app.env`.
 
 Before listening, the process verifies that a fresh invalid Plex Token is
 rejected by the internal Plex origin. Plex **Allowed Networks** must not include
@@ -197,9 +206,11 @@ would inherit network-level anonymous access and startup fails closed. Cloud
 playback failures after startup remain fail-open to authenticated Plex traffic.
 
 The MediaVault API key documented for `/api/v1` integrations is not required by
-the STRM `/redirect` contract and is not a gateway configuration value. Plex
-authentication comes only from the active client request; users do not provide
-their Plex username or password to the gateway.
+the STRM `/redirect` contract and is not a gateway configuration value. Active
+playback authorization comes only from the client request; the optional
+management Token is used only for background discovery, prewarming, and
+reconciliation. Users do not provide their Plex username or password to the
+gateway.
 
 Client-provided Plex authentication headers and query parameters are forwarded
 unchanged to Plex. Cloud playback headers are additionally forwarded to
