@@ -364,6 +364,37 @@ func TestDolbyVisionDisplayTitleDoesNotAssumeHDR10FromBaseLayer(t *testing.T) {
 	}
 }
 
+func TestEnrichMetadataDoesNotProjectUnknownCodecFieldsFromDolbyVisionProfile(t *testing.T) {
+	media := mediainfo.Media{
+		Complete: true, Container: "mkv", DurationMS: 60000,
+		VideoCodec: "hevc", VideoResolution: "4k", Width: 3840, Height: 2160,
+		Streams: []mediainfo.Stream{
+			{
+				Index: 0, Type: "video", Codec: "hevc", Width: 3840, Height: 2160,
+				HDRFormat: "dolby_vision",
+				DolbyVision: &mediainfo.DolbyVision{
+					VersionMajor: 1, Profile: 5, Level: 6, RPUPresent: 1, BLPresent: 1,
+				},
+			},
+		},
+	}
+	body := []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="7" file="/cloud/movie.strm"/></Media></Video></MediaContainer>`)
+
+	result, changed, err := EnrichMetadata(body, "application/xml", "42", media)
+	if err != nil || !changed {
+		t.Fatalf("EnrichMetadata changed=%v err=%v", changed, err)
+	}
+	attrs := xmlProjectionAttributeSets(t, result)["Stream#1"]
+	if attrs["DOVIProfile"] != "5" || attrs["DOVIPresent"] != "1" || attrs["displayTitle"] != "4K DoVi" {
+		t.Fatalf("Dolby Vision projection = %#v", attrs)
+	}
+	for _, name := range []string{"profile", "bitDepth", "pixelFormat", "colorSpace", "colorRange", "colorPrimaries", "colorTrc"} {
+		if value, present := attrs[name]; present {
+			t.Fatalf("unknown field %q was projected as %q: %#v", name, value, attrs)
+		}
+	}
+}
+
 func TestEnrichMetadataReplacesOnlyObviousSTRMPartSize(t *testing.T) {
 	media := projectionTestMedia()
 	media.Size = 987654321

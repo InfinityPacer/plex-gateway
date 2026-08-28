@@ -19,10 +19,10 @@ const (
 	SchemaVersion = 1
 	// ProviderMediaVaultFFProbe identifies the redirect plus bounded ffprobe path.
 	ProviderMediaVaultFFProbe = "mediavault-ffprobe"
-	// ProviderRevisionFFProbeJSONV2 identifies the normalized ffprobe contract.
-	// It includes pixel-format bit-depth inference and therefore must not reuse
-	// records produced by the earlier interpretation.
-	ProviderRevisionFFProbeJSONV2 = "ffprobe-json-v2"
+	// ProviderRevisionFFProbeJSONV3 identifies the normalized ffprobe contract.
+	// It includes the bounded Content-Range size fallback and therefore must not
+	// reuse records produced by the earlier interpretation.
+	ProviderRevisionFFProbeJSONV3 = "ffprobe-json-v3"
 	maxSTRMFingerprintBytes       = 64 << 10
 )
 

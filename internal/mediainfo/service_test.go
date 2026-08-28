@@ -56,7 +56,7 @@ type fakeProvider struct {
 }
 
 func (*fakeProvider) Descriptor() ProviderDescriptor {
-	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV2}
+	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV3}
 }
 
 func (fake *fakeProvider) Probe(ctx context.Context, request ProviderRequest) (ProviderResult, error) {
@@ -323,7 +323,7 @@ func TestServiceReprobesIncompatibleProviderRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ProviderRevision != ProviderRevisionFFProbeJSONV2 || provider.calls.Load() != 1 {
+	if got.ProviderRevision != ProviderRevisionFFProbeJSONV3 || provider.calls.Load() != 1 {
 		t.Fatalf("Ensure() revision=%q provider_calls=%d", got.ProviderRevision, provider.calls.Load())
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"strconv"
@@ -18,6 +19,7 @@ const (
 	defaultProbeSize        = 8 << 20
 	defaultAnalyzeDuration  = 5 * time.Second
 	defaultProbeOutputLimit = 2 << 20
+	defaultSizeProbeTimeout = 2 * time.Second
 )
 
 var (
@@ -49,6 +51,7 @@ type FFProber struct {
 	probeSize       int64
 	analyzeDuration time.Duration
 	outputLimit     int64
+	sizeClient      *http.Client
 }
 
 // NewFFProber resolves the ffprobe binary and validates all resource limits.
@@ -83,6 +86,7 @@ func NewFFProber(options FFProbeOptions) (*FFProber, error) {
 		probeSize:       probeSize,
 		analyzeDuration: analyzeDuration,
 		outputLimit:     outputLimit,
+		sizeClient:      newSizeProbeClient(),
 	}, nil
 }
 
@@ -111,7 +115,8 @@ func (prober *FFProber) Probe(ctx context.Context, directURL, userAgent string) 
 
 	stdout := &limitedBuffer{limit: prober.outputLimit, cancel: cancelCommand}
 	stderr := &limitedBuffer{limit: 64 << 10, cancel: cancelCommand}
-	command := exec.CommandContext(commandCtx, prober.binary, prober.arguments(parsed.String(), userAgent)...)
+	target := parsed.String()
+	command := exec.CommandContext(commandCtx, prober.binary, prober.arguments(target, userAgent)...)
 	command.Stdout = stdout
 	command.Stderr = stderr
 	if err := command.Run(); err != nil {
@@ -133,7 +138,94 @@ func (prober *FFProber) Probe(ctx context.Context, directURL, userAgent string) 
 	if err != nil {
 		return Media{}, err
 	}
+	if media.Size <= 0 {
+		if size, ok := prober.probeRemoteSize(probeCtx, target, userAgent); ok {
+			media.Size = size
+		}
+	}
 	return media, nil
+}
+
+func newSizeProbeClient() *http.Client {
+	return &http.Client{
+		Timeout: defaultSizeProbeTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// probeRemoteSize asks only for the first byte so a format with missing
+// ffprobe size can still expose its authoritative Content-Range total. The
+// body is deliberately never read because the media path must stay outside
+// the gateway.
+func (prober *FFProber) probeRemoteSize(ctx context.Context, directURL, userAgent string) (int64, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sizeCtx, cancel := context.WithTimeout(ctx, defaultSizeProbeTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(sizeCtx, http.MethodGet, directURL, nil)
+	if err != nil {
+		return 0, false
+	}
+	request.Header.Set("Range", "bytes=0-0")
+	request.Header.Set("User-Agent", userAgent)
+
+	client := prober.sizeClient
+	if client == nil {
+		client = newSizeProbeClient()
+	}
+	response, err := client.Do(request)
+	if err != nil || response == nil || response.Body == nil {
+		return 0, false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusPartialContent {
+		return 0, false
+	}
+	return contentRangeTotal(response.Header.Get("Content-Range"))
+}
+
+func contentRangeTotal(value string) (int64, bool) {
+	fields := strings.Fields(value)
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "bytes") {
+		return 0, false
+	}
+	rangeAndTotal := strings.Split(fields[1], "/")
+	if len(rangeAndTotal) != 2 || rangeAndTotal[1] == "*" {
+		return 0, false
+	}
+	bounds := strings.Split(rangeAndTotal[0], "-")
+	if len(bounds) != 2 {
+		return 0, false
+	}
+	start, ok := nonNegativeInt64(bounds[0])
+	if !ok {
+		return 0, false
+	}
+	end, ok := nonNegativeInt64(bounds[1])
+	if !ok {
+		return 0, false
+	}
+	total, ok := nonNegativeInt64(rangeAndTotal[1])
+	if !ok || total == 0 || start > end || end >= total {
+		return 0, false
+	}
+	return total, true
+}
+
+func nonNegativeInt64(value string) (int64, bool) {
+	if value == "" {
+		return 0, false
+	}
+	for index := 0; index < len(value); index++ {
+		if !isASCIIDigit(value[index]) {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	return parsed, err == nil
 }
 
 func (prober *FFProber) arguments(directURL, userAgent string) []string {

@@ -170,7 +170,7 @@ func TestSQLiteStoreLoadsMostRecentlyAccessedWithinLimit(t *testing.T) {
 }
 
 func testProviderDescriptor() ProviderDescriptor {
-	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV2}
+	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV3}
 }
 
 func TestSQLiteStoreDoesNotRestoreOtherProviderRevision(t *testing.T) {
