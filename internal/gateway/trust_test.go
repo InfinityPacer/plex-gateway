@@ -53,3 +53,37 @@ func TestPlexTrustBoundaryProbeDoesNotUseEnvironmentProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadPlexServerIdentity(t *testing.T) {
+	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/identity" || r.URL.RawQuery != "" || r.Header.Get("X-Plex-Token") != "" ||
+			r.Header.Get("Accept-Encoding") != "identity" {
+			t.Fatalf("unexpected identity request: %#v", r)
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<MediaContainer size="0" machineIdentifier="server-123"/>`))
+	}))
+	defer plex.Close()
+	upstream, _ := url.Parse(plex.URL)
+	identity, err := ReadPlexServerIdentity(t.Context(), upstream, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity != "server-123" {
+		t.Fatalf("identity = %q", identity)
+	}
+}
+
+func TestReadPlexServerIdentityRejectsInvalidResponse(t *testing.T) {
+	for _, body := range []string{`<MediaContainer/>`, `<not-xml`} {
+		plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		upstream, _ := url.Parse(plex.URL)
+		if identity, err := ReadPlexServerIdentity(t.Context(), upstream, time.Second); err == nil || identity != "" {
+			plex.Close()
+			t.Fatalf("ReadPlexServerIdentity() = %q, %v", identity, err)
+		}
+		plex.Close()
+	}
+}

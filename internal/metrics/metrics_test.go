@@ -27,6 +27,14 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.IncMetadataBatchGuardTimeouts()
 	registry.IncMetadataBatchGuardActive()
 	registry.IncMetadataBatchGuardQueued()
+	registry.IncMediaInfoCacheHits()
+	registry.IncMediaInfoCacheMisses()
+	registry.IncMediaInfoProbeQueued()
+	registry.IncMediaInfoProbeSuccess()
+	registry.IncMediaInfoProbeFailure()
+	registry.IncMediaInfoStoreFailure()
+	registry.IncMediaInfoProbeActive()
+	registry.ObserveMediaInfoProbeLatency(44 * time.Millisecond)
 	registry.ObserveResolverLatency(12 * time.Millisecond)
 	registry.ObserveResolverLatency(7 * time.Millisecond)
 	registry.ObserveRedirectLatency(30 * time.Millisecond)
@@ -63,6 +71,13 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 		MetadataBatchGuardTimeoutsTotal: 1,
 		MetadataBatchGuardActive:        1,
 		MetadataBatchGuardQueued:        1,
+		MediaInfoCacheHitsTotal:         1,
+		MediaInfoCacheMissesTotal:       1,
+		MediaInfoProbeQueuedTotal:       1,
+		MediaInfoProbeSuccessTotal:      1,
+		MediaInfoProbeFailureTotal:      1,
+		MediaInfoStoreFailureTotal:      1,
+		MediaInfoProbeActive:            1,
 
 		ResolverLatencyMSTotal: 19,
 		ResolverLatencySamples: 2,
@@ -73,6 +88,11 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 		RedirectLatencySamples: 1,
 		RedirectLatencyMSLast:  30,
 		RedirectLatencyMSMax:   30,
+
+		MediaInfoProbeLatencyMSTotal: 44,
+		MediaInfoProbeLatencySamples: 1,
+		MediaInfoProbeLatencyMSLast:  44,
+		MediaInfoProbeLatencyMSMax:   44,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("snapshot = %#v, want %#v", got, want)
@@ -82,6 +102,7 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.DecMetadataGuardQueued()
 	registry.DecMetadataBatchGuardActive()
 	registry.DecMetadataBatchGuardQueued()
+	registry.DecMediaInfoProbeActive()
 	if got := registry.Snapshot().ActiveRequests; got != 0 {
 		t.Fatalf("active requests after release = %d, want 0", got)
 	}
@@ -133,6 +154,7 @@ func TestActiveRequestReleaseIsIdempotentAndClamped(t *testing.T) {
 	registry.DecMetadataGuardQueued()
 	registry.DecMetadataBatchGuardActive()
 	registry.DecMetadataBatchGuardQueued()
+	registry.DecMediaInfoProbeActive()
 	if got := registry.Snapshot().ActiveRequests; got != 0 {
 		t.Fatalf("clamped active requests = %d, want 0", got)
 	}
@@ -172,6 +194,15 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 				registry.DecMetadataBatchGuardActive()
 				registry.IncMetadataBatchGuardQueued()
 				registry.DecMetadataBatchGuardQueued()
+				registry.IncMediaInfoCacheHits()
+				registry.IncMediaInfoCacheMisses()
+				registry.IncMediaInfoProbeQueued()
+				registry.IncMediaInfoProbeSuccess()
+				registry.IncMediaInfoProbeFailure()
+				registry.IncMediaInfoStoreFailure()
+				registry.IncMediaInfoProbeActive()
+				registry.DecMediaInfoProbeActive()
+				registry.ObserveMediaInfoProbeLatency(3 * time.Millisecond)
 				registry.ObserveResolverLatency(time.Millisecond)
 				registry.ObserveRedirectLatency(2 * time.Millisecond)
 				release := registry.BeginRequest()
@@ -188,8 +219,12 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 		got.MetadataGuardActive != 0 || got.MetadataGuardQueued != 0 ||
 		got.MetadataBatchGuardAdmittedTotal != want || got.MetadataBatchGuardTimeoutsTotal != want ||
 		got.MetadataBatchGuardActive != 0 || got.MetadataBatchGuardQueued != 0 ||
+		got.MediaInfoCacheHitsTotal != want || got.MediaInfoCacheMissesTotal != want ||
+		got.MediaInfoProbeQueuedTotal != want || got.MediaInfoProbeSuccessTotal != want ||
+		got.MediaInfoProbeFailureTotal != want || got.MediaInfoStoreFailureTotal != want || got.MediaInfoProbeActive != 0 ||
 		got.ResolverLatencySamples != want || got.ResolverLatencyMSTotal != want ||
-		got.RedirectLatencySamples != want || got.RedirectLatencyMSTotal != 2*want {
+		got.RedirectLatencySamples != want || got.RedirectLatencyMSTotal != 2*want ||
+		got.MediaInfoProbeLatencySamples != want || got.MediaInfoProbeLatencyMSTotal != 3*want {
 		t.Fatalf("concurrent snapshot = %#v, want all counters %d and no active requests", got, want)
 	}
 }

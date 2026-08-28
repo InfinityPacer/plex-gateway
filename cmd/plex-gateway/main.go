@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/InfinityPacer/plex-gateway/internal/config"
 	"github.com/InfinityPacer/plex-gateway/internal/gateway"
+	"github.com/InfinityPacer/plex-gateway/internal/mediainfo"
 	"github.com/InfinityPacer/plex-gateway/internal/metrics"
 	"github.com/InfinityPacer/plex-gateway/internal/partcache"
 	"github.com/InfinityPacer/plex-gateway/internal/pathmap"
@@ -64,6 +66,13 @@ func run() error {
 			return fmt.Errorf("create MediaVault resolver: %w", err)
 		}
 	}
+	mediaInfoService, mediaInfoStore, mediaInfoReason := initializeMediaInfo(
+		context.Background(), cfg.MediaInfo, cfg.PlexURL, cfg.PartProbeTimeout, strmResolver, registry, logger,
+	)
+	defer closeMediaInfo(mediaInfoService, mediaInfoStore, cfg.ShutdownTimeout, logger)
+	mediaInfoStatus := func() mediainfo.Status {
+		return mediaInfoService.Status()
+	}
 	handler := gateway.New(gateway.Options{
 		Upstream:         cfg.PlexURL,
 		Logger:           logger,
@@ -83,6 +92,8 @@ func run() error {
 			BatchConcurrency:     cfg.MetadataGuard.BatchConcurrency,
 			QueueTimeout:         cfg.MetadataGuard.QueueTimeout,
 		},
+		MediaInfoEnabled: cfg.MediaInfo.Enabled,
+		MediaInfoStatus:  mediaInfoStatus,
 	})
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -104,6 +115,9 @@ func run() error {
 			"trace", cfg.TraceEnabled,
 			"metadata_guard", cfg.MetadataGuard.Enabled,
 			"metadata_batch_guard", cfg.MetadataGuard.BatchEnabled,
+			"mediainfo_enabled", cfg.MediaInfo.Enabled,
+			"mediainfo_available", mediaInfoService != nil,
+			"mediainfo_reason", mediaInfoReason,
 		)
 		serveErrors <- server.ListenAndServe()
 	}()
@@ -125,6 +139,88 @@ func run() error {
 	}
 	logger.Info("gateway_stopped")
 	return nil
+}
+
+func initializeMediaInfo(
+	ctx context.Context,
+	cfg config.MediaInfoConfig,
+	plexURL *url.URL,
+	identityTimeout time.Duration,
+	strmResolver resolver.ControlResolver,
+	registry *metrics.Metrics,
+	logger *slog.Logger,
+) (*mediainfo.Service, *mediainfo.SQLiteStore, string) {
+	if !cfg.Enabled {
+		return nil, nil, "disabled"
+	}
+	if strmResolver == nil {
+		return nil, nil, "cloud_unavailable"
+	}
+	plexServerID, err := gateway.ReadPlexServerIdentity(ctx, plexURL, identityTimeout)
+	if err != nil {
+		logger.Warn("mediainfo_unavailable", "reason", "plex_identity")
+		return nil, nil, "plex_identity_unavailable"
+	}
+	prober, err := mediainfo.NewFFProber(mediainfo.FFProbeOptions{
+		Binary: cfg.FFProbePath, Timeout: cfg.ProbeTimeout, ProbeSize: cfg.ProbeSize,
+		AnalyzeDuration: cfg.AnalyzeDuration, OutputLimit: cfg.OutputMaxBytes,
+	})
+	if err != nil {
+		logger.Warn("mediainfo_unavailable", "reason", "ffprobe")
+		return nil, nil, "ffprobe_unavailable"
+	}
+	provider, err := mediainfo.NewMediaVaultFFProbeProvider(strmResolver, prober)
+	if err != nil {
+		logger.Warn("mediainfo_unavailable", "reason", "provider")
+		return nil, nil, "provider_unavailable"
+	}
+	store, err := mediainfo.OpenSQLite(ctx, cfg.DatabasePath)
+	if err != nil {
+		logger.Warn("mediainfo_unavailable", "reason", "storage")
+		return nil, nil, "storage_unavailable"
+	}
+	now := time.Now().UTC()
+	if _, err := store.DeleteUnretained(ctx, now); err != nil {
+		logger.Warn("mediainfo_store_gc_failed", "error_kind", "storage")
+	}
+	records, err := store.LoadCompatibleRetained(ctx, now, cfg.L1MaxEntries, provider.Descriptor())
+	if err != nil {
+		logger.Warn("mediainfo_unavailable", "reason", "restore")
+		_ = store.Close()
+		return nil, nil, "restore_failed"
+	}
+	cache := mediainfo.NewCacheWithLimit(records, now, cfg.L1MaxEntries)
+	service, err := mediainfo.NewService(mediainfo.ServiceOptions{
+		Cache: cache, Store: store, Janitor: store, Provider: provider, PlexServerID: plexServerID,
+		Logger: logger, Metrics: registry, Concurrency: cfg.Concurrency,
+		InteractiveQueueSize: cfg.InteractiveQueueSize, BackgroundQueueSize: cfg.BackgroundQueueSize,
+		ProbeTimeout: cfg.ProbeTimeout, RecordTTL: cfg.RecordTTL,
+		RecordRetention: cfg.RecordRetention, NegativeTTL: cfg.NegativeTTL,
+		BackgroundUserAgent: cfg.UserAgent,
+	})
+	if err != nil {
+		logger.Warn("mediainfo_unavailable", "reason", "worker")
+		_ = store.Close()
+		return nil, nil, "worker_unavailable"
+	}
+	return service, store, "ready"
+}
+
+func closeMediaInfo(service *mediainfo.Service, store *mediainfo.SQLiteStore, timeout time.Duration, logger *slog.Logger) {
+	serviceClosed := true
+	if service != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		if err := service.Close(ctx); err != nil {
+			serviceClosed = false
+			logger.Warn("mediainfo_shutdown_incomplete", "error_kind", "timeout")
+		}
+		cancel()
+	}
+	if store != nil && serviceClosed {
+		if err := store.Close(); err != nil {
+			logger.Warn("mediainfo_store_close_failed", "error_kind", "storage")
+		}
+	}
 }
 
 func newLogger(level string) *slog.Logger {

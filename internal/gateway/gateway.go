@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/InfinityPacer/plex-gateway/internal/mediainfo"
 	"github.com/InfinityPacer/plex-gateway/internal/metrics"
 	"github.com/InfinityPacer/plex-gateway/internal/observe"
 	"github.com/InfinityPacer/plex-gateway/internal/partcache"
@@ -36,6 +38,8 @@ type Options struct {
 	ObserveMaxBytes  int64
 	PartProbeTimeout time.Duration
 	MetadataGuard    MetadataGuardOptions
+	MediaInfoEnabled bool
+	MediaInfoStatus  func() mediainfo.Status
 }
 
 // New builds the fail-open Plex proxy and optional Direct Play interceptor.
@@ -143,9 +147,25 @@ func New(options Options) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		status := mediainfo.Status{}
+		if options.MediaInfoStatus != nil {
+			status = options.MediaInfoStatus()
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("{\"status\":\"ok\"}\n"))
+		_ = json.NewEncoder(w).Encode(struct {
+			Status    string `json:"status"`
+			MediaInfo struct {
+				Enabled bool `json:"enabled"`
+				mediainfo.Status
+			} `json:"mediainfo"`
+		}{
+			Status: "ok",
+			MediaInfo: struct {
+				Enabled bool `json:"enabled"`
+				mediainfo.Status
+			}{Enabled: options.MediaInfoEnabled, Status: status},
+		})
 	})
 	mux.Handle("GET /metrics", registry.Handler())
 	mux.Handle("GET /video/:/transcode/universal/decision", decision)

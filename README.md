@@ -101,6 +101,9 @@ go run ./cmd/plex-gateway
 | `METADATA_GUARD_BATCH_ENABLED` | `false` | 限制逗号分隔的批量 metadata 读取进入 Plex 的并发量。 |
 | `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | 所有客户端共享的批量 metadata 并发上限。 |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | 等待准入的最长时间，超时返回 `429`。 |
+| `MEDIAINFO_ENABLED` | `true` | 启用可选 MediaInfo 缓存与受限探测子系统；初始化失败不影响透明代理。 |
+| `MEDIAINFO_DB_PATH` | `./data/mediainfo.db` | MediaInfo SQLite 持久缓存路径；容器镜像默认使用 `/app_data/mediainfo.db`。 |
+| `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.4.4` | 没有活动客户端上下文时，后台探测使用的 fallback User-Agent。 |
 
 Plex Token 不会保存到配置中。普通 Plex 请求保持透明转发。对于云端播放，客户端的
 所有请求 header 都会转发到配置的 MediaVault origin，使其能够为相同客户端上下文
@@ -196,7 +199,7 @@ Gateway 重新执行检查。
 
 ## Endpoints
 
-- `GET /health` 返回进程健康状态。
+- `GET /health` 返回进程健康状态，以及不含媒体身份和凭据的 MediaInfo 可用性、缓存和队列摘要。
 - `GET /metrics` 返回固定结构的 JSON 计数器，以及 resolver 和完整重定向链路的
   延迟总计、样本数、最近值和最大值。启用 metadata 保护时还会返回准入、超时、
   活动和排队计数，所有指标都不包含请求标签或凭据。

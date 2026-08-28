@@ -14,18 +14,30 @@ import (
 )
 
 const (
-	defaultListenAddr        = ":32400"
-	defaultReadHeaderTimeout = 15 * time.Second
-	defaultIdleTimeout       = 90 * time.Second
-	defaultShutdownTimeout   = 15 * time.Second
-	defaultPartTTL           = 24 * time.Hour
-	defaultResolverTimeout   = 15 * time.Second
-	defaultObserveMaxBytes   = 8 << 20
-	defaultPartProbeTimeout  = 15 * time.Second
-	defaultMetadataGlobal    = 8
-	defaultMetadataPerClient = 4
-	defaultMetadataBatch     = 3
-	defaultMetadataQueueWait = 10 * time.Second
+	defaultListenAddr         = ":32400"
+	defaultReadHeaderTimeout  = 15 * time.Second
+	defaultIdleTimeout        = 90 * time.Second
+	defaultShutdownTimeout    = 15 * time.Second
+	defaultPartTTL            = 24 * time.Hour
+	defaultResolverTimeout    = 15 * time.Second
+	defaultObserveMaxBytes    = 8 << 20
+	defaultPartProbeTimeout   = 15 * time.Second
+	defaultMetadataGlobal     = 8
+	defaultMetadataPerClient  = 4
+	defaultMetadataBatch      = 3
+	defaultMetadataQueueWait  = 10 * time.Second
+	defaultMediaInfoDatabase  = "./data/mediainfo.db"
+	defaultMediaInfoProbe     = 20 * time.Second
+	defaultMediaInfoSize      = 8 << 20
+	defaultMediaInfoAnalyze   = 5 * time.Second
+	defaultMediaInfoOutput    = 2 << 20
+	defaultMediaInfoWorkers   = 1
+	defaultMediaInfoQueue     = 256
+	defaultMediaInfoTTL       = 30 * 24 * time.Hour
+	defaultMediaInfoRetention = 180 * 24 * time.Hour
+	defaultMediaInfoL1Entries = 10_000
+	defaultMediaInfoNegative  = 15 * time.Minute
+	defaultMediaInfoAgent     = "Infuse-Library/8.4.4"
 )
 
 // Config contains process-level settings for transparent Plex proxying and
@@ -42,11 +54,32 @@ type Config struct {
 	ObserveMaxBytes   int64
 	PartProbeTimeout  time.Duration
 	MetadataGuard     MetadataGuardConfig
+	MediaInfo         MediaInfoConfig
 	LogLevel          string
 	TraceEnabled      bool
 	ReadHeaderTimeout time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
+}
+
+// MediaInfoConfig bounds the optional analysis plane. It is enabled by default
+// but capability initialization remains fail-open for transparent Plex proxying.
+type MediaInfoConfig struct {
+	Enabled              bool
+	DatabasePath         string
+	FFProbePath          string
+	ProbeTimeout         time.Duration
+	ProbeSize            int64
+	AnalyzeDuration      time.Duration
+	OutputMaxBytes       int64
+	Concurrency          int
+	InteractiveQueueSize int
+	BackgroundQueueSize  int
+	RecordTTL            time.Duration
+	RecordRetention      time.Duration
+	L1MaxEntries         int
+	NegativeTTL          time.Duration
+	UserAgent            string
 }
 
 // MetadataGuardConfig bounds detailed metadata fan-out before requests enter
@@ -149,6 +182,72 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mediaInfoEnabled, err := envBool("MEDIAINFO_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoDatabase := strings.TrimSpace(os.Getenv("MEDIAINFO_DB_PATH"))
+	if mediaInfoDatabase == "" {
+		mediaInfoDatabase = defaultMediaInfoDatabase
+	}
+	mediaInfoFFProbe := strings.TrimSpace(os.Getenv("MEDIAINFO_FFPROBE_PATH"))
+	if mediaInfoFFProbe == "" {
+		mediaInfoFFProbe = "ffprobe"
+	}
+	mediaInfoProbeTimeout, err := envDuration("MEDIAINFO_PROBE_TIMEOUT", defaultMediaInfoProbe)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoProbeSize, err := envPositiveInt64("MEDIAINFO_PROBE_SIZE", defaultMediaInfoSize)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoAnalyze, err := envDuration("MEDIAINFO_ANALYZE_DURATION", defaultMediaInfoAnalyze)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoOutput, err := envPositiveInt64("MEDIAINFO_OUTPUT_MAX_BYTES", defaultMediaInfoOutput)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoWorkers, err := envPositiveInt("MEDIAINFO_CONCURRENCY", defaultMediaInfoWorkers)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoInteractiveQueue, err := envPositiveInt("MEDIAINFO_INTERACTIVE_QUEUE_SIZE", defaultMediaInfoQueue)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoBackgroundQueue, err := envPositiveInt("MEDIAINFO_BACKGROUND_QUEUE_SIZE", defaultMediaInfoQueue)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoTTL, err := envDuration("MEDIAINFO_RECORD_TTL", defaultMediaInfoTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoRetention, err := envDuration("MEDIAINFO_RECORD_RETENTION", defaultMediaInfoRetention)
+	if err != nil {
+		return Config{}, err
+	}
+	if mediaInfoRetention < mediaInfoTTL {
+		return Config{}, errors.New("MEDIAINFO_RECORD_RETENTION must not be shorter than MEDIAINFO_RECORD_TTL")
+	}
+	mediaInfoL1Entries, err := envPositiveInt("MEDIAINFO_L1_MAX_ENTRIES", defaultMediaInfoL1Entries)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoNegativeTTL, err := envDuration("MEDIAINFO_NEGATIVE_TTL", defaultMediaInfoNegative)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoUserAgent := strings.TrimSpace(os.Getenv("MEDIAINFO_USER_AGENT"))
+	if mediaInfoUserAgent == "" {
+		mediaInfoUserAgent = defaultMediaInfoAgent
+	}
+	if strings.ContainsAny(mediaInfoUserAgent, "\r\n") {
+		return Config{}, errors.New("MEDIAINFO_USER_AGENT must not contain line breaks")
+	}
 
 	readHeaderTimeout, err := envDuration("READ_HEADER_TIMEOUT", defaultReadHeaderTimeout)
 	if err != nil {
@@ -192,6 +291,15 @@ func Load() (Config, error) {
 			BatchEnabled:         metadataBatchEnabled,
 			BatchConcurrency:     metadataBatch,
 			QueueTimeout:         metadataQueueWait,
+		},
+		MediaInfo: MediaInfoConfig{
+			Enabled: mediaInfoEnabled, DatabasePath: mediaInfoDatabase, FFProbePath: mediaInfoFFProbe,
+			ProbeTimeout: mediaInfoProbeTimeout,
+			ProbeSize:    mediaInfoProbeSize, AnalyzeDuration: mediaInfoAnalyze, OutputMaxBytes: mediaInfoOutput,
+			Concurrency: mediaInfoWorkers, InteractiveQueueSize: mediaInfoInteractiveQueue,
+			BackgroundQueueSize: mediaInfoBackgroundQueue,
+			RecordTTL:           mediaInfoTTL, RecordRetention: mediaInfoRetention, L1MaxEntries: mediaInfoL1Entries,
+			NegativeTTL: mediaInfoNegativeTTL, UserAgent: mediaInfoUserAgent,
 		},
 		LogLevel:          logLevel,
 		TraceEnabled:      traceEnabled,

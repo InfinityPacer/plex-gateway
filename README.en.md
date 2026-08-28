@@ -113,6 +113,9 @@ Important environment variables:
 | `METADATA_GUARD_BATCH_ENABLED` | `false` | Limit comma-separated batch metadata reads before they enter Plex. |
 | `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | Shared batch metadata concurrency limit across all clients. |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | Maximum admission wait before returning `429`. |
+| `MEDIAINFO_ENABLED` | `true` | Enable the optional MediaInfo cache and bounded probe subsystem; initialization failures do not affect transparent proxying. |
+| `MEDIAINFO_DB_PATH` | `./data/mediainfo.db` | MediaInfo SQLite cache path; the container image defaults to `/app_data/mediainfo.db`. |
+| `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.4.4` | Fallback User-Agent for background probes without an active client context. |
 
 Plex tokens are not stored in configuration. Ordinary Plex requests remain
 transparent. For cloud playback, all client request headers are forwarded to
@@ -229,7 +232,8 @@ That topology is outside the exclusive-gateway deployment contract.
 
 ## Endpoints
 
-- `GET /health` returns process health.
+- `GET /health` returns process health plus a credential-free MediaInfo
+  availability, cache, and queue summary.
 - `GET /metrics` returns fixed-shape JSON counters plus resolver and complete
   redirect-path latency totals, samples, last values, and maxima. When metadata
   protection is enabled, it also reports admission, timeout, active, and queued
