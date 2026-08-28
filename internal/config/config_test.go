@@ -47,7 +47,7 @@ func TestLoadDefaults(t *testing.T) {
 	if got.DatabasePath != "./data/plex-gateway.db" {
 		t.Fatalf("DatabasePath = %q", got.DatabasePath)
 	}
-	if !got.MediaInfo.Enabled || got.MediaInfo.ProbeTimeout != 20*time.Second || got.MediaInfo.Concurrency != 1 || got.MediaInfo.UserAgent != "Infuse-Library/8.4.4" || got.MediaInfo.ColdWait != 5*time.Second || got.MediaInfo.ResponseMaxBytes != 8<<20 || got.MediaInfo.EnrichmentWaiters != 4 || got.MediaInfo.PrewarmBefore != 2 || got.MediaInfo.PrewarmAfter != 3 || got.MediaInfo.PrewarmInterval != 5*time.Second {
+	if !got.MediaInfo.Enabled || got.MediaInfo.ProbeTimeout != 20*time.Second || got.MediaInfo.Concurrency != 1 || got.MediaInfo.UserAgent != "Infuse-Library/8.5.1" || got.MediaInfo.ColdWait != 5*time.Second || got.MediaInfo.ResponseMaxBytes != 8<<20 || got.MediaInfo.EnrichmentWaiters != 4 || got.MediaInfo.PrewarmBefore != 2 || got.MediaInfo.PrewarmAfter != 3 || got.MediaInfo.PrewarmInterval != 5*time.Second {
 		t.Fatalf("unexpected MediaInfo defaults: %#v", got.MediaInfo)
 	}
 	if got.MediaVaultURL != nil || len(got.PathMappings) != 0 {

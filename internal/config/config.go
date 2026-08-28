@@ -37,7 +37,7 @@ const (
 	defaultMediaInfoRetention = 180 * 24 * time.Hour
 	defaultMediaInfoL1Entries = 10_000
 	defaultMediaInfoNegative  = 15 * time.Minute
-	defaultMediaInfoAgent     = "Infuse-Library/8.4.4"
+	defaultMediaInfoAgent     = "Infuse-Library/8.5.1"
 	defaultMediaInfoColdWait  = 5 * time.Second
 	defaultMediaInfoBodyLimit = 8 << 20
 	defaultMediaInfoWaiters   = 4

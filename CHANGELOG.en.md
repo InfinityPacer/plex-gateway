@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache records without turning per-item browsing into full-library cold probes.
 - MediaInfo ffprobe records now use a new provider revision so records produced
   by the previous interpretation are not reused.
+- Updated the background-probe fallback User-Agent to the currently verified
+  Infuse Library version.
 
 ## [0.1.1] - 2026-08-28
 

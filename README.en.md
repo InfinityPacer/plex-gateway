@@ -120,7 +120,7 @@ Important environment variables:
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | Maximum admission wait before returning `429`. |
 | `MEDIAINFO_ENABLED` | `true` | Enable the MediaInfo cache, bounded probes, and single-item metadata enrichment; initialization failures do not affect transparent proxying. |
 | `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite database path; the container image defaults to `/app_data/plex-gateway.db`. |
-| `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.4.4` | Fallback User-Agent for background probes without an active client context. |
+| `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.5.1` | Fallback User-Agent for background probes without an active client context. |
 | `MEDIAINFO_COLD_WAIT` | `5s` | Cold-cache wait ceiling for one metadata item; timeout returns the original Plex response while probing continues. |
 | `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | Maximum size of one Plex metadata response buffered for enrichment. |
 | `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `4` | Maximum single-item metadata responses buffered and waiting for MediaInfo concurrently. |
