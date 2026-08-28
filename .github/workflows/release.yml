@@ -1,0 +1,167 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+  workflow_dispatch:
+
+concurrency:
+  group: plex-gateway-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Validate release
+        id: release
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must use X.Y.Z format" >&2
+            exit 1
+          fi
+          version_pattern="${version//./\\.}"
+          if ! grep -Eq "^## \[${version_pattern}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "CHANGELOG.md has no dated ${version} release section" >&2
+            exit 1
+          fi
+          if ! grep -Eq "^## \[${version_pattern}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.en.md; then
+            echo "CHANGELOG.en.md has no dated ${version} release section" >&2
+            exit 1
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=v${version}"
+            echo "target=$(git rev-parse HEAD)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verify source
+        run: go test -race -count=1 ./...
+
+      - name: Extract release notes
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          awk -v version="${VERSION}" '
+            index($0, "## [" version "] - ") == 1 { found = 1; next }
+            found && (/^## \[/ || /^\[[^]]+\]:/) { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "CHANGELOG.md release section is empty" >&2
+            exit 1
+          fi
+
+      - name: Create release tag
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET: ${{ steps.release.outputs.target }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --force --tags origin
+
+          existing=""
+          if git rev-parse -q --verify "${TAG}^{commit}" >/dev/null; then
+            existing="$(git rev-list -n 1 "${TAG}")"
+          fi
+
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            git tag -f -a "${TAG}" "${TARGET}" -m "plex-gateway ${TAG#v}"
+            git push --force origin "refs/tags/${TAG}"
+          elif [ -z "${existing}" ]; then
+            git tag -a "${TAG}" "${TARGET}" -m "plex-gateway ${TAG#v}"
+            git push origin "refs/tags/${TAG}"
+          elif [ "${existing}" != "${TARGET}" ]; then
+            echo "${TAG} already points to ${existing}; bump VERSION or run this workflow manually" >&2
+            exit 1
+          fi
+
+          remote_target="$(git ls-remote origin "refs/tags/${TAG}^{}" | awk '{print $1}')"
+          if [ "${remote_target}" != "${TARGET}" ]; then
+            echo "remote ${TAG} points to ${remote_target:-nothing}, expected ${TARGET}" >&2
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and publish image
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/infinitypacer/plex-gateway:${{ steps.release.outputs.version }}
+            ghcr.io/infinitypacer/plex-gateway:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET: ${{ steps.release.outputs.target }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --tag "${TAG}" --target "${TARGET}" --latest \
+              --title "plex-gateway ${VERSION}" --notes-file release-notes.md
+          else
+            gh release create "${TAG}" --verify-tag --target "${TARGET}" --latest \
+              --title "plex-gateway ${VERSION}" --notes-file release-notes.md
+          fi
+
+      - name: Summarize publication
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET: ${{ steps.release.outputs.target }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          {
+            echo "Version: ${VERSION}"
+            echo "Tag: ${TAG} -> ${TARGET}"
+            echo "Image: ghcr.io/infinitypacer/plex-gateway:${VERSION}"
+            echo "Latest: ghcr.io/infinitypacer/plex-gateway:latest"
+            echo "Digest: ${IMAGE_DIGEST}"
+          } >> "${GITHUB_STEP_SUMMARY}"
