@@ -24,12 +24,17 @@ services:
       METADATA_GUARD_BATCH_ENABLED: "false"
       METADATA_GUARD_BATCH_CONCURRENCY: "3"
       METADATA_GUARD_QUEUE_TIMEOUT: "10s"
+      MEDIAINFO_ENABLED: "true"
+      # Background probes use this only when no active client request supplies a User-Agent.
+      MEDIAINFO_USER_AGENT: "Infuse-Library/8.4.4"
       READ_HEADER_TIMEOUT: "15s"
       IDLE_TIMEOUT: "90s"
       SHUTDOWN_TIMEOUT: "15s"
     volumes:
       - ./strm:/strm:ro
       - ./archive-strm:/archive-strm:ro
+      # The image runs as UID/GID 1000; this directory must be writable by it.
+      - ./app_data:/app_data
     networks:
       - media
 

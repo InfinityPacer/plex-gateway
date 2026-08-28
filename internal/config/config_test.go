@@ -40,6 +40,9 @@ func TestLoadDefaults(t *testing.T) {
 	if got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 8 || got.MetadataGuard.PerClientConcurrency != 4 || got.MetadataGuard.BatchEnabled || got.MetadataGuard.BatchConcurrency != 3 || got.MetadataGuard.QueueTimeout != 10*time.Second {
 		t.Fatalf("unexpected metadata guard defaults: %#v", got.MetadataGuard)
 	}
+	if !got.MediaInfo.Enabled || got.MediaInfo.ProbeTimeout != 20*time.Second || got.MediaInfo.Concurrency != 1 || got.MediaInfo.DatabasePath != "./data/mediainfo.db" || got.MediaInfo.UserAgent != "Infuse-Library/8.4.4" {
+		t.Fatalf("unexpected MediaInfo defaults: %#v", got.MediaInfo)
+	}
 	if got.MediaVaultURL != nil || len(got.PathMappings) != 0 {
 		t.Fatalf("cloud redirect unexpectedly enabled: %#v", got)
 	}
@@ -69,6 +72,21 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	t.Setenv("METADATA_GUARD_BATCH_ENABLED", "true")
 	t.Setenv("METADATA_GUARD_BATCH_CONCURRENCY", "2")
 	t.Setenv("METADATA_GUARD_QUEUE_TIMEOUT", "5s")
+	t.Setenv("MEDIAINFO_ENABLED", "true")
+	t.Setenv("MEDIAINFO_DB_PATH", "/app_data/test.db")
+	t.Setenv("MEDIAINFO_FFPROBE_PATH", "/usr/bin/ffprobe")
+	t.Setenv("MEDIAINFO_PROBE_TIMEOUT", "12s")
+	t.Setenv("MEDIAINFO_PROBE_SIZE", "4194304")
+	t.Setenv("MEDIAINFO_ANALYZE_DURATION", "3s")
+	t.Setenv("MEDIAINFO_OUTPUT_MAX_BYTES", "1048576")
+	t.Setenv("MEDIAINFO_CONCURRENCY", "2")
+	t.Setenv("MEDIAINFO_INTERACTIVE_QUEUE_SIZE", "64")
+	t.Setenv("MEDIAINFO_BACKGROUND_QUEUE_SIZE", "128")
+	t.Setenv("MEDIAINFO_RECORD_TTL", "168h")
+	t.Setenv("MEDIAINFO_RECORD_RETENTION", "720h")
+	t.Setenv("MEDIAINFO_L1_MAX_ENTRIES", "5000")
+	t.Setenv("MEDIAINFO_NEGATIVE_TTL", "10m")
+	t.Setenv("MEDIAINFO_USER_AGENT", "plex-gateway-test")
 
 	got, err := Load()
 	if err != nil {
@@ -85,6 +103,20 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	}
 	if !got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 6 || got.MetadataGuard.PerClientConcurrency != 3 || !got.MetadataGuard.BatchEnabled || got.MetadataGuard.BatchConcurrency != 2 || got.MetadataGuard.QueueTimeout != 5*time.Second {
 		t.Fatalf("metadata guard = %#v", got.MetadataGuard)
+	}
+	if !got.MediaInfo.Enabled || got.MediaInfo.DatabasePath != "/app_data/test.db" || got.MediaInfo.FFProbePath != "/usr/bin/ffprobe" || got.MediaInfo.ProbeTimeout != 12*time.Second || got.MediaInfo.ProbeSize != 4194304 || got.MediaInfo.AnalyzeDuration != 3*time.Second || got.MediaInfo.OutputMaxBytes != 1048576 || got.MediaInfo.Concurrency != 2 || got.MediaInfo.InteractiveQueueSize != 64 || got.MediaInfo.BackgroundQueueSize != 128 || got.MediaInfo.RecordTTL != 168*time.Hour || got.MediaInfo.RecordRetention != 720*time.Hour || got.MediaInfo.L1MaxEntries != 5000 || got.MediaInfo.NegativeTTL != 10*time.Minute || got.MediaInfo.UserAgent != "plex-gateway-test" {
+		t.Fatalf("MediaInfo configuration = %#v", got.MediaInfo)
+	}
+}
+
+func TestLoadRejectsMediaInfoRetentionBelowFreshTTL(t *testing.T) {
+	t.Setenv("PLEX_URL", "http://plex:32400")
+	t.Setenv("MEDIAINFO_RECORD_TTL", "720h")
+	t.Setenv("MEDIAINFO_RECORD_RETENTION", "168h")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "must not be shorter") {
+		t.Fatalf("Load() error = %v", err)
 	}
 }
 

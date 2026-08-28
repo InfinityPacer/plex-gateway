@@ -30,8 +30,16 @@ type Metrics struct {
 	metadataBatchTimeouts atomic.Uint64
 	metadataBatchActive   atomic.Int64
 	metadataBatchQueued   atomic.Int64
+	mediaInfoCacheHits    atomic.Uint64
+	mediaInfoCacheMisses  atomic.Uint64
+	mediaInfoProbeQueued  atomic.Uint64
+	mediaInfoProbeSuccess atomic.Uint64
+	mediaInfoProbeFailure atomic.Uint64
+	mediaInfoStoreFailure atomic.Uint64
+	mediaInfoProbeActive  atomic.Int64
 	resolverLatency       latencyMetrics
 	redirectLatency       latencyMetrics
+	mediaInfoProbeLatency latencyMetrics
 }
 
 type latencyMetrics struct {
@@ -60,6 +68,13 @@ type Snapshot struct {
 	MetadataBatchGuardTimeoutsTotal uint64 `json:"metadata_batch_guard_timeouts_total"`
 	MetadataBatchGuardActive        int64  `json:"metadata_batch_guard_active"`
 	MetadataBatchGuardQueued        int64  `json:"metadata_batch_guard_queued"`
+	MediaInfoCacheHitsTotal         uint64 `json:"mediainfo_cache_hits_total"`
+	MediaInfoCacheMissesTotal       uint64 `json:"mediainfo_cache_misses_total"`
+	MediaInfoProbeQueuedTotal       uint64 `json:"mediainfo_probe_queued_total"`
+	MediaInfoProbeSuccessTotal      uint64 `json:"mediainfo_probe_success_total"`
+	MediaInfoProbeFailureTotal      uint64 `json:"mediainfo_probe_failure_total"`
+	MediaInfoStoreFailureTotal      uint64 `json:"mediainfo_store_failure_total"`
+	MediaInfoProbeActive            int64  `json:"mediainfo_probe_active"`
 
 	ResolverLatencyMSTotal uint64 `json:"resolver_latency_ms_total"`
 	ResolverLatencySamples uint64 `json:"resolver_latency_samples"`
@@ -70,6 +85,11 @@ type Snapshot struct {
 	RedirectLatencySamples uint64 `json:"redirect_latency_samples"`
 	RedirectLatencyMSLast  uint64 `json:"redirect_latency_ms_last"`
 	RedirectLatencyMSMax   uint64 `json:"redirect_latency_ms_max"`
+
+	MediaInfoProbeLatencyMSTotal uint64 `json:"mediainfo_probe_latency_ms_total"`
+	MediaInfoProbeLatencySamples uint64 `json:"mediainfo_probe_latency_samples"`
+	MediaInfoProbeLatencyMSLast  uint64 `json:"mediainfo_probe_latency_ms_last"`
+	MediaInfoProbeLatencyMSMax   uint64 `json:"mediainfo_probe_latency_ms_max"`
 }
 
 // New creates an empty process-local metrics registry.
@@ -106,6 +126,35 @@ func (m *Metrics) IncRedirectFailure() {
 // not complete.
 func (m *Metrics) IncPlexFallback() {
 	m.plexFallbackTotal.Add(1)
+}
+
+// IncMediaInfoCacheHits records a fresh L1 result.
+func (m *Metrics) IncMediaInfoCacheHits() { m.mediaInfoCacheHits.Add(1) }
+
+// IncMediaInfoCacheMisses records an exact key not satisfied by L1.
+func (m *Metrics) IncMediaInfoCacheMisses() { m.mediaInfoCacheMisses.Add(1) }
+
+// IncMediaInfoProbeQueued records a newly scheduled singleflight job.
+func (m *Metrics) IncMediaInfoProbeQueued() { m.mediaInfoProbeQueued.Add(1) }
+
+// IncMediaInfoProbeSuccess records a complete normalized probe result.
+func (m *Metrics) IncMediaInfoProbeSuccess() { m.mediaInfoProbeSuccess.Add(1) }
+
+// IncMediaInfoProbeFailure records a bounded resolver or probe failure.
+func (m *Metrics) IncMediaInfoProbeFailure() { m.mediaInfoProbeFailure.Add(1) }
+
+// IncMediaInfoStoreFailure records a result available in L1 but not persisted.
+func (m *Metrics) IncMediaInfoStoreFailure() { m.mediaInfoStoreFailure.Add(1) }
+
+// IncMediaInfoProbeActive marks one worker as executing a job.
+func (m *Metrics) IncMediaInfoProbeActive() { m.mediaInfoProbeActive.Add(1) }
+
+// DecMediaInfoProbeActive marks one worker job complete.
+func (m *Metrics) DecMediaInfoProbeActive() { decrementGauge(&m.mediaInfoProbeActive) }
+
+// ObserveMediaInfoProbeLatency records the complete resolver and ffprobe job.
+func (m *Metrics) ObserveMediaInfoProbeLatency(duration time.Duration) {
+	m.mediaInfoProbeLatency.observe(duration)
 }
 
 // IncMetadataGuardAdmitted records a detailed metadata request admitted to
@@ -239,6 +288,7 @@ func (m *Metrics) BeginRequest() func() {
 func (m *Metrics) Snapshot() Snapshot {
 	resolverTotal, resolverSamples, resolverLast, resolverMax := m.resolverLatency.snapshot()
 	redirectTotal, redirectSamples, redirectLast, redirectMax := m.redirectLatency.snapshot()
+	mediaInfoTotal, mediaInfoSamples, mediaInfoLast, mediaInfoMax := m.mediaInfoProbeLatency.snapshot()
 	return Snapshot{
 		PlexRequestsTotal: m.plexRequestsTotal.Load(),
 		CloudPartHits:     m.cloudPartHits.Load(),
@@ -256,6 +306,13 @@ func (m *Metrics) Snapshot() Snapshot {
 		MetadataBatchGuardTimeoutsTotal: m.metadataBatchTimeouts.Load(),
 		MetadataBatchGuardActive:        m.metadataBatchActive.Load(),
 		MetadataBatchGuardQueued:        m.metadataBatchQueued.Load(),
+		MediaInfoCacheHitsTotal:         m.mediaInfoCacheHits.Load(),
+		MediaInfoCacheMissesTotal:       m.mediaInfoCacheMisses.Load(),
+		MediaInfoProbeQueuedTotal:       m.mediaInfoProbeQueued.Load(),
+		MediaInfoProbeSuccessTotal:      m.mediaInfoProbeSuccess.Load(),
+		MediaInfoProbeFailureTotal:      m.mediaInfoProbeFailure.Load(),
+		MediaInfoStoreFailureTotal:      m.mediaInfoStoreFailure.Load(),
+		MediaInfoProbeActive:            m.mediaInfoProbeActive.Load(),
 
 		ResolverLatencyMSTotal: resolverTotal,
 		ResolverLatencySamples: resolverSamples,
@@ -266,6 +323,11 @@ func (m *Metrics) Snapshot() Snapshot {
 		RedirectLatencySamples: redirectSamples,
 		RedirectLatencyMSLast:  redirectLast,
 		RedirectLatencyMSMax:   redirectMax,
+
+		MediaInfoProbeLatencyMSTotal: mediaInfoTotal,
+		MediaInfoProbeLatencySamples: mediaInfoSamples,
+		MediaInfoProbeLatencyMSLast:  mediaInfoLast,
+		MediaInfoProbeLatencyMSMax:   mediaInfoMax,
 	}
 }
 

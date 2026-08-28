@@ -2,7 +2,8 @@
 
 FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN go mod download
 COPY VERSION ./
 COPY cmd/plex-gateway ./cmd/plex-gateway
 COPY internal ./internal
@@ -12,11 +13,15 @@ RUN release_version="$(tr -d '[:space:]' < VERSION)" \
         -o /plex-gateway ./cmd/plex-gateway
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates \
-    && adduser -D -H -s /sbin/nologin gateway
+RUN apk add --no-cache ca-certificates ffmpeg \
+    && addgroup -g 1000 gateway \
+    && adduser -D -H -u 1000 -G gateway -s /sbin/nologin gateway \
+    && install -d -o gateway -g gateway /app_data
 COPY --from=build /plex-gateway /usr/local/bin/plex-gateway
+WORKDIR /app_data
 USER gateway
 EXPOSE 32400
 ENV LISTEN_ADDR=:32400
+ENV MEDIAINFO_DB_PATH=/app_data/mediainfo.db
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD ["/usr/local/bin/plex-gateway", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/plex-gateway"]

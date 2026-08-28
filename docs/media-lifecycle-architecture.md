@@ -418,7 +418,7 @@ MoviePilot 本地下载路径应在真实文件仍在本地时执行 ffprobe。�
 
 `MediaInfoRecord` 必须是版本化公开契约，至少包含：
 
-- `schema_version`、记录身份、上游关联和内容 fingerprint；
+- `schema_version`、记录身份、provider revision、上游关联和内容 fingerprint；
 - container、duration、size；
 - 视频、音频和字幕 stream；
 - provider、`probed_at`、`ready|stale|negative` 状态；
@@ -467,7 +467,7 @@ Plex Part / configured STRM root
 Gateway discovery and prewarm queue
         │
         ├── L1 immutable snapshot
-        ├── SQLite WAL result and job store
+        ├── SQLite WAL result store
         └── bounded MediaInfo worker
                     │
                     ▼
@@ -483,33 +483,43 @@ identity、ratingKey、PartID、STRM fingerprint、可用时的 provider/content
 MediaInfo schema 版本和探测实现版本。探测失败不得覆盖已知良好记录；相同指纹使用
 singleflight、负缓存与退避。
 
+Gateway fallback 默认将成功记录视为 `30d` fresh，并将最近使用记录保留 `180d`。
+fresh 到期后可以立即返回仍在 retention 内的已知良好记录，同时在后台低优先级复验；
+活跃访问会按限频机制续租 retention，而不是每次播放执行完整 ffprobe。超过 retention 且
+长期未访问的记录才允许由 GC 删除。
+
 Gateway 支持以下范围：
 
 | 范围 | 触发方式 | 约束 |
 | --- | --- | --- |
 | 单 Part | metadata miss/stale 或成功播放 | 自动、高优先级、去重 |
-| 下一集 | 当前集成功播放后的低优先预取 | 必须精确识别 Part |
-| 单季 | 显式预热或计划任务 | 分页、checkpoint |
-| 整剧 | 显式后台任务 | 按季分页，不由一次播放自动扩散 |
-| STRM 目录 | 管理员扫描或 reconciliation | 限制到配置 mapping root，可取消和恢复 |
+| 下一集 | 当前集确认播放后的低优先预取 | 当前实现范围；必须精确识别 Part，只向前一步 |
+| 单季 | 显式预热或计划任务 | 后续批量能力；分页、checkpoint |
+| 整剧 | 显式后台任务 | 后续批量能力；按季分页，不由一次播放自动扩散 |
+| STRM 目录 | 管理员扫描或 reconciliation | 后续批量能力；限制到配置 mapping root，可取消和恢复 |
 
-播放触发任务优先于批量任务。远程 probe 初始并发候选值为 `1`，经 CDN、CPU、Plex 和
-MediaVault 压测后再决定是否提高。每次播放可以触发 freshness 判断，但不等于每次执行
-完整 ffprobe；未过期记录只更新访问时间，过期记录优先异步校验，可靠指纹变化才重新
-探测。
+当前实现不执行启动全库、单季、整剧或目录批量预热。精确当前项始终高于下一集预取；
+下一集只能在当前集确认播放后进入低优先队列，快速切换产生的新当前项可以提升同一
+singleflight 或抢占尚未完成的纯推测任务。远程 probe 初始并发候选值为 `1`，经 CDN、
+CPU、Plex 和 MediaVault 压测后再决定是否提高。每次播放可以触发 freshness 判断，但
+不等于每次执行完整 ffprobe；未过期记录只更新访问时间，过期记录优先异步校验，可靠
+指纹变化才重新探测。
 
 一次真实 MediaVault/115 环境的匿名初始样本中，六个文件的 `/redirect` 耗时为
 `0.018–0.477s`，受限 ffprobe 耗时为 `0.33–0.46s`，组合约为 `0.46–0.89s`。解析直链和
-ffprobe 必须使用一致的确定性 User-Agent，否则当前 CDN 样本会拒绝请求。该样本只证明
-方案值得实现，仍需覆盖 HDR、Dolby Vision、多音轨、字幕、大型 MKV、尾部索引容器、
-高延迟和失败源。
+MediaVault redirect 与 ffprobe 必须在同一次任务中使用相同 User-Agent，否则当前 CDN
+样本会拒绝请求。交互探测使用触发 metadata 请求的真实客户端 User-Agent；没有活动
+客户端上下文的后台任务使用可配置的稳定 fallback User-Agent。该样本只证明方案值得
+实现，仍需覆盖 HDR、Dolby Vision、多音轨、字幕、大型 MKV、尾部索引容器、高延迟和
+失败源。
 
 首次冷缓存长期返回空 MediaInfo 不可作为正常体验，metadata 请求一直无响应同样不可
-接受。处理顺序为：Gateway 启动时从 SQLite 恢复 L1；使用 Plex 管理 Token 主动发现和
-预热；精确冷 miss 时创建最高优先级任务，并允许当前单项 metadata response 在可配置的
-硬截止时间内等待。当前 PoC 候选上限为 `2s`；窗口内完成就补充当前 response，超时或
-失败必须立即返回原始 Plex response，任务继续在后台完成。提高首次完整率应优先扩大
-预热覆盖，而不是无限增加请求等待。
+接受。处理顺序为：Gateway 启动时从 SQLite 恢复 L1；精确冷 miss 时创建最高优先级
+任务，并允许当前单项 metadata response 在可配置的硬截止时间内等待。当前 PoC 候选
+上限为 `5s`；窗口内完成就补充当前 response，超时或失败必须立即返回原始 Plex
+response，任务继续在后台完成。当前集确认播放后，管理面只发现并低优先预热下一集，
+不扩散为季、整剧或目录扫描。提高首次完整率应优先使用准确的一步预取，而不是无限增加
+请求等待或启动无界批量任务。
 
 ## 11. Plex MediaInfo 投影
 
@@ -587,8 +597,9 @@ Gateway 不应负责：
 - 在播放 decision、Part、universal start 或 302 请求中执行 ffprobe 或数据库访问；
 - 写 Plex 数据库。
 
-Gateway analysis worker 可以执行有界的单 Part、单季、整剧和 STRM 目录探测，但这些
-任务不拥有下载、做种或清理决策，也不能由一次播放无界扩散到整库。
+Gateway analysis worker 当前只执行精确单 Part 和一步下一集探测。单季、整剧和 STRM
+目录探测保留为后续有界批量能力；这些任务不拥有下载、做种或清理决策，也不能由一次
+播放无界扩散到整库。
 
 ### 12.1 Plex 管理凭据与管理面
 
@@ -598,13 +609,15 @@ Gateway 保存一个可选 `PLEX_TOKEN`，用于后台枚举、Part 发现、预
 `env_file: ./app.env` 注入。`.env` 保留给 Compose 默认插值语义。
 
 Token 缺失或失效时，透明代理和客户端播放继续工作，只有后台发现与预热降级。启动时
-验证 Token 和 Plex server identity；日志、metrics、任务、CLI 和管理响应都不得输出
-Token。管理 Token 只允许发送到配置的 Plex origin；MediaVault、CDN 和 ffprobe 请求使用
-独立构造的干净 header，禁止继承 `X-Plex-Token`、Cookie 或 Authorization。
+验证 Token；稳定 Plex server identity 从无需管理 Token 的 PMS `/identity` 获取。日志、
+metrics、任务、CLI 和管理响应都不得输出 Token 或 machine identifier。管理 Token 只允许
+发送到配置的 Plex origin；MediaVault、CDN 和 ffprobe 请求使用独立构造的干净 header，
+禁止继承 `X-Plex-Token`、Cookie 或 Authorization。
 
-Gateway 当前没有后台页面。首版优先提供 CLI 创建单 Part、单季、整剧和目录任务，查询
-进度、取消任务和清理 stale/negative record。以后若增加 HTTP API 或页面，使用默认关闭
-的独立 admin listener 或 Unix socket 和独立认证，不能挂到客户端可访问的 Plex listener。
+Gateway 当前没有后台页面。当前管理面只需要查询状态、验证 Token 和控制一步下一集
+预热；创建单季、整剧和目录任务、批任务 checkpoint 与恢复留到后续。以后若增加 HTTP
+API 或页面，使用默认关闭的独立 admin listener 或 Unix socket 和独立认证，不能挂到
+客户端可访问的 Plex listener。
 
 ### 12.2 云项目分类契约
 
@@ -731,9 +744,10 @@ provider、目标 backing、decision revision、人工确认或策略依据，�
 
 - 优先实现 Gateway L1、SQLite、受限 ffprobe、`PLEX_TOKEN` 主动预热和 response
   enrichment；
-- 实现单 Part、下一集、单季、整剧和 STRM 目录任务，以及优先级、singleflight、取消、
-  checkpoint、重启恢复、负缓存和已知良好保护；
-- 验证 `2s` 冷等待候选上限、首次 metadata 完整率和 metadata p50/p95/p99；
+- 实现精确单 Part 和确认播放后的一步下一集任务，以及优先级、singleflight、推测任务
+  抢占、负缓存和已知良好保护；
+- 将单季、整剧、STRM 目录任务、批任务 checkpoint 和恢复留到后续批量预热能力；
+- 验证 `5s` 冷等待候选上限、首次 metadata 完整率和 metadata p50/p95/p99；
 - 验证 decision、Part、universal start 和 302 不执行分析 I/O，单项 metadata 的有界等待
   单独计入和验收；
 - 比较 Plex 官方 API、其他受支持 PMS 接口和独立 Plex Helper，不提前固定写入方案；
@@ -767,7 +781,7 @@ provider、目标 backing、decision revision、人工确认或策略依据，�
 
 ## 17. 待评估决策
 
-1. `2s` 冷等待能否覆盖 HDR、Dolby Vision、大型 MKV 和高延迟 CDN 的 p95/p99；
+1. `5s` 冷等待能否覆盖 HDR、Dolby Vision、大型 MKV 和高延迟 CDN 的 p95/p99；
 2. L1 启动恢复和 Plex 管理 Token 主动预热能覆盖多少首次请求；
 3. MediaInfo 公开契约使用原子 sidecar、只读 API，还是同时提供；
 4. MediaVault 是否愿意提供版本化的分享任务和 MediaInfo API；
