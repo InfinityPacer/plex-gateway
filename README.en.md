@@ -111,6 +111,8 @@ Important environment variables:
 | `METADATA_GUARD_ENABLED` | `false` | Limit single-item detailed metadata requests before they enter Plex. |
 | `METADATA_GUARD_GLOBAL_CONCURRENCY` | `8` | Shared detailed metadata concurrency limit across all clients. |
 | `METADATA_GUARD_CLIENT_CONCURRENCY` | `4` | Detailed metadata concurrency limit for each Plex client identifier. |
+| `METADATA_GUARD_BATCH_ENABLED` | `false` | Limit comma-separated batch metadata reads before they enter Plex. |
+| `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | Shared batch metadata concurrency limit across all clients. |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | Maximum admission wait before returning `429`. |
 
 Plex tokens are not stored in configuration. Ordinary Plex requests remain
@@ -140,6 +142,12 @@ playback decisions, `/library/parts`, or other Plex paths. Requests wait for at
 most `METADATA_GUARD_QUEUE_TIMEOUT`. A timed-out request receives `429` instead
 of bypassing the guard and reaching Plex. The feature does not cache metadata
 or modify Plex responses.
+
+`METADATA_GUARD_BATCH_ENABLED` protects
+`GET/HEAD /library/metadata/1,2,...` with a separate global concurrency pool.
+Batch reads do not consume the global or per-client slots reserved for
+interactive single-item metadata requests, and metadata mutations do not enter
+the batch pool.
 
 ## Advertise the gateway through Plex
 

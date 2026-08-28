@@ -9,11 +9,13 @@ gateway.
 ## Request ownership
 
 - All requests are transparently proxied to Plex by default.
-- An optional admission guard limits only single-item `GET` and `HEAD`
-  `/library/metadata/{ratingKey}` requests before they enter Plex. It applies
-  global and per-client concurrency limits without caching or rewriting the
-  response. Library listings, playback paths, timeline, and watch-state traffic
-  do not enter this pool.
+- Optional admission guards limit single-item `GET` and `HEAD`
+  `/library/metadata/{ratingKey}` requests and comma-separated batch metadata
+  reads before they enter Plex. Single-item requests use global and per-client
+  limits; batch reads use a separate global pool so maintenance traffic cannot
+  consume interactive metadata slots. Neither pool caches or rewrites Plex
+  responses. Library listings, metadata mutations, playback paths, timeline,
+  and watch-state traffic do not enter these pools.
 - Successful XML or JSON Plex responses are observed without changing their
   bytes. Any `Media.Part` values found in those responses populate an in-memory
   cache keyed by `Part.id`.
@@ -127,11 +129,11 @@ This preserves existing local playback and lets Plex remain available when the
 cloud path is degraded. Fail-open behavior is a non-configurable invariant; a
 partial strict mode would make different playback paths fail inconsistently.
 
-The optional detailed metadata admission guard is the deliberate exception to
-this redirect failure policy. Once enabled, a request that cannot acquire both
-limits within its queue timeout receives `429` instead of bypassing protection
-and increasing Plex load. This protects Plex control-plane availability and
-does not change cloud redirect fallback behavior.
+The optional metadata admission guards are the deliberate exception to this
+redirect failure policy. Once enabled, a request that cannot acquire the
+applicable limits within its queue timeout receives `429` instead of bypassing
+protection and increasing Plex load. This protects Plex control-plane
+availability and does not change cloud redirect fallback behavior.
 
 Cloud STRM support is Direct Play only. The decision adapter opts an eligible
 Part into Plex's own Direct Play decision path; it does not synthesize a

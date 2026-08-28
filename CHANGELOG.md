@@ -9,6 +9,19 @@
 
 ## [未发布]
 
+## [0.1.1] - 2026-08-28
+
+### 新增
+
+- 为单项和批量 Plex metadata 请求提供可配置的并发保护，限制原生客户端
+  metadata 扇出对 Plex Server 的压力。
+- 提供 Metadata Guard 的准入、排队、活动和超时指标。
+
+### 修复
+
+- 支持 Apple TV Plex 客户端对 STRM 媒体的 Direct Play 决策和播放协商，
+  同时保留 Plex 对客户端凭据和媒体 Part 的授权。
+
 ## [0.1.0] - 2026-08-27
 
 ### 新增
@@ -25,5 +38,6 @@
 - Gateway 返回云端播放重定向前，由 Plex 使用当前客户端凭据授权对应 Part。
 - 日志和指标不包含 Plex Token 或完整的签名媒体 URL。
 
-[未发布]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.0...HEAD
+[未发布]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/InfinityPacer/plex-gateway/releases/tag/v0.1.0
