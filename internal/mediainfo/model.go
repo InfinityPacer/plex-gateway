@@ -233,17 +233,24 @@ func FingerprintSTRM(path string) (string, error) {
 		if target == "" {
 			continue
 		}
-		normalized, err := normalizeSTRMTarget(target)
-		if err != nil {
-			return "", err
-		}
-		digest := sha256.Sum256([]byte(normalized))
-		return hex.EncodeToString(digest[:]), nil
+		return FingerprintSTRMTarget(target)
 	}
 	if err := scanner.Err(); err != nil {
 		return "", errors.New("STRM control target exceeds fingerprint limit")
 	}
 	return "", errors.New("STRM control file is empty")
+}
+
+// FingerprintSTRMTarget hashes a target already read and validated from a STRM
+// file. Callers that also need the target can avoid a second filesystem read,
+// keeping the analysis identity bound to the exact control value being probed.
+func FingerprintSTRMTarget(target string) (string, error) {
+	normalized, err := normalizeSTRMTarget(strings.TrimSpace(target))
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func normalizeSTRMTarget(target string) (string, error) {

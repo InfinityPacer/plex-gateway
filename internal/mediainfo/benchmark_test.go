@@ -46,12 +46,9 @@ func BenchmarkMediaInfoL1PutAtCapacity(b *testing.B) {
 func BenchmarkMediaInfoSQLiteGet(b *testing.B) {
 	now := time.Now()
 	record := completeRecord(now)
-	store, err := OpenSQLite(context.Background(), filepath.Join(b.TempDir(), "mediainfo.db"))
-	if err != nil {
-		b.Fatal(err)
-	}
+	store, gatewayDB := openTestSQLiteStore(b, filepath.Join(b.TempDir(), "plex-gateway.db"))
 	b.Cleanup(func() {
-		if err := store.Close(); err != nil {
+		if err := gatewayDB.Close(); err != nil {
 			b.Error(err)
 		}
 	})

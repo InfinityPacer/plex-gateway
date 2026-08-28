@@ -101,9 +101,12 @@ go run ./cmd/plex-gateway
 | `METADATA_GUARD_BATCH_ENABLED` | `false` | 限制逗号分隔的批量 metadata 读取进入 Plex 的并发量。 |
 | `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | 所有客户端共享的批量 metadata 并发上限。 |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | 等待准入的最长时间，超时返回 `429`。 |
-| `MEDIAINFO_ENABLED` | `true` | 启用可选 MediaInfo 缓存与受限探测子系统；初始化失败不影响透明代理。 |
-| `MEDIAINFO_DB_PATH` | `./data/mediainfo.db` | MediaInfo SQLite 持久缓存路径；容器镜像默认使用 `/app_data/mediainfo.db`。 |
+| `MEDIAINFO_ENABLED` | `true` | 启用 MediaInfo 缓存、受限探测和单项 metadata 增强；初始化失败不影响透明代理。 |
+| `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite 持久数据库路径；容器镜像默认使用 `/app_data/plex-gateway.db`。 |
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.4.4` | 没有活动客户端上下文时，后台探测使用的 fallback User-Agent。 |
+| `MEDIAINFO_COLD_WAIT` | `5s` | 单项 metadata 冷缓存等待上限；超时返回原 Plex 响应，探测继续。 |
+| `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | 可以缓冲并尝试增强的单个 Plex metadata 响应上限。 |
+| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `4` | 同时缓冲和等待 MediaInfo 的单项 metadata 响应上限。 |
 
 Plex Token 不会保存到配置中。普通 Plex 请求保持透明转发。对于云端播放，客户端的
 所有请求 header 都会转发到配置的 MediaVault origin，使其能够为相同客户端上下文

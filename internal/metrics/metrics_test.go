@@ -34,6 +34,10 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.IncMediaInfoProbeFailure()
 	registry.IncMediaInfoStoreFailure()
 	registry.IncMediaInfoProbeActive()
+	registry.IncMediaInfoEnriched()
+	registry.IncMediaInfoFailOpen()
+	registry.IncMediaInfoWaitActive()
+	registry.IncMediaInfoWaitRejected()
 	registry.ObserveMediaInfoProbeLatency(44 * time.Millisecond)
 	registry.ObserveResolverLatency(12 * time.Millisecond)
 	registry.ObserveResolverLatency(7 * time.Millisecond)
@@ -78,6 +82,10 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 		MediaInfoProbeFailureTotal:      1,
 		MediaInfoStoreFailureTotal:      1,
 		MediaInfoProbeActive:            1,
+		MediaInfoEnrichedTotal:          1,
+		MediaInfoFailOpenTotal:          1,
+		MediaInfoWaitActive:             1,
+		MediaInfoWaitRejectedTotal:      1,
 
 		ResolverLatencyMSTotal: 19,
 		ResolverLatencySamples: 2,
@@ -103,6 +111,7 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.DecMetadataBatchGuardActive()
 	registry.DecMetadataBatchGuardQueued()
 	registry.DecMediaInfoProbeActive()
+	registry.DecMediaInfoWaitActive()
 	if got := registry.Snapshot().ActiveRequests; got != 0 {
 		t.Fatalf("active requests after release = %d, want 0", got)
 	}
@@ -155,6 +164,7 @@ func TestActiveRequestReleaseIsIdempotentAndClamped(t *testing.T) {
 	registry.DecMetadataBatchGuardActive()
 	registry.DecMetadataBatchGuardQueued()
 	registry.DecMediaInfoProbeActive()
+	registry.DecMediaInfoWaitActive()
 	if got := registry.Snapshot().ActiveRequests; got != 0 {
 		t.Fatalf("clamped active requests = %d, want 0", got)
 	}
@@ -202,6 +212,11 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 				registry.IncMediaInfoStoreFailure()
 				registry.IncMediaInfoProbeActive()
 				registry.DecMediaInfoProbeActive()
+				registry.IncMediaInfoEnriched()
+				registry.IncMediaInfoFailOpen()
+				registry.IncMediaInfoWaitActive()
+				registry.DecMediaInfoWaitActive()
+				registry.IncMediaInfoWaitRejected()
 				registry.ObserveMediaInfoProbeLatency(3 * time.Millisecond)
 				registry.ObserveResolverLatency(time.Millisecond)
 				registry.ObserveRedirectLatency(2 * time.Millisecond)
@@ -222,6 +237,7 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 		got.MediaInfoCacheHitsTotal != want || got.MediaInfoCacheMissesTotal != want ||
 		got.MediaInfoProbeQueuedTotal != want || got.MediaInfoProbeSuccessTotal != want ||
 		got.MediaInfoProbeFailureTotal != want || got.MediaInfoStoreFailureTotal != want || got.MediaInfoProbeActive != 0 ||
+		got.MediaInfoEnrichedTotal != want || got.MediaInfoFailOpenTotal != want || got.MediaInfoWaitActive != 0 || got.MediaInfoWaitRejectedTotal != want ||
 		got.ResolverLatencySamples != want || got.ResolverLatencyMSTotal != want ||
 		got.RedirectLatencySamples != want || got.RedirectLatencyMSTotal != 2*want ||
 		got.MediaInfoProbeLatencySamples != want || got.MediaInfoProbeLatencyMSTotal != 3*want {

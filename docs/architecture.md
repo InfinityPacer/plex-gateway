@@ -18,11 +18,12 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   consume interactive metadata slots. Neither pool caches or rewrites Plex
   responses. Library listings, metadata mutations, playback paths, timeline,
   and watch-state traffic do not enter these pools.
-- Successful XML or JSON Plex responses are currently observed without changing
-  their bytes. Any `Media.Part` values found in those responses populate an
-  in-memory cache keyed by `Part.id`. Phase D may enrich a successful single-item
-  metadata response when explicitly enabled; unsupported or failed transforms
-  preserve the original Plex response.
+- Successful XML or JSON Plex responses are observed to populate the in-memory
+  `Part.id` cache without changing their bytes. When MediaInfo is available, an
+  authenticated single-item metadata response may also fill missing whitelisted
+  technical fields from the exact STRM fingerprint. The transform is bounded,
+  never creates Stream identities, and preserves the original Plex response on
+  timeout, ambiguity, unsupported encoding, or any other failure.
 - `GET` and `HEAD` requests below `/library/parts/{partID}/...` are eligible for
   interception only when the cached `Part.file` has a configured cloud
   extension and maps to a readable local STRM file.
@@ -50,9 +51,11 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
 | Package | Responsibility |
 | --- | --- |
 | `cmd/plex-gateway` | Configuration, dependency assembly, and process lifecycle. |
+| `internal/database` | Gateway SQLite connection lifecycle and independent per-module migrations. |
 | `internal/gateway` | Plex routing, transparent proxying, protocol probes, response capture, 302/fallback output, and request metrics. |
+| `internal/mediainfo` | Bounded analysis scheduling, L1/persistent cache policy, provider contracts, and technical-media records. |
 | `internal/playback` | Shared STRM preparation, normalized playback attempts, Plex authorization/MediaVault resolution sequencing, and decision-grant state. |
-| `internal/plexmeta` | Side-effect-free XML and JSON Part/decision readers. |
+| `internal/plexmeta` | XML and JSON Part/decision readers plus whitelisted metadata projection. |
 | `internal/partcache` | Derived, expiring `Part.id` index; never an authority for access. |
 | `internal/pathmap` | Lexical Plex-to-container path mapping. |
 | `internal/resolver` | STRM target validation and the MediaVault `/redirect` protocol. |

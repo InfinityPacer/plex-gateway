@@ -37,6 +37,10 @@ type Metrics struct {
 	mediaInfoProbeFailure atomic.Uint64
 	mediaInfoStoreFailure atomic.Uint64
 	mediaInfoProbeActive  atomic.Int64
+	mediaInfoEnriched     atomic.Uint64
+	mediaInfoFailOpen     atomic.Uint64
+	mediaInfoWaitActive   atomic.Int64
+	mediaInfoWaitRejected atomic.Uint64
 	resolverLatency       latencyMetrics
 	redirectLatency       latencyMetrics
 	mediaInfoProbeLatency latencyMetrics
@@ -75,6 +79,10 @@ type Snapshot struct {
 	MediaInfoProbeFailureTotal      uint64 `json:"mediainfo_probe_failure_total"`
 	MediaInfoStoreFailureTotal      uint64 `json:"mediainfo_store_failure_total"`
 	MediaInfoProbeActive            int64  `json:"mediainfo_probe_active"`
+	MediaInfoEnrichedTotal          uint64 `json:"mediainfo_enriched_total"`
+	MediaInfoFailOpenTotal          uint64 `json:"mediainfo_fail_open_total"`
+	MediaInfoWaitActive             int64  `json:"mediainfo_wait_active"`
+	MediaInfoWaitRejectedTotal      uint64 `json:"mediainfo_wait_rejected_total"`
 
 	ResolverLatencyMSTotal uint64 `json:"resolver_latency_ms_total"`
 	ResolverLatencySamples uint64 `json:"resolver_latency_samples"`
@@ -156,6 +164,25 @@ func (m *Metrics) DecMediaInfoProbeActive() { decrementGauge(&m.mediaInfoProbeAc
 func (m *Metrics) ObserveMediaInfoProbeLatency(duration time.Duration) {
 	m.mediaInfoProbeLatency.observe(duration)
 }
+
+// IncMediaInfoEnriched records a Plex metadata response that gained technical
+// fields from an identity-matched MediaInfo record.
+func (m *Metrics) IncMediaInfoEnriched() { m.mediaInfoEnriched.Add(1) }
+
+// IncMediaInfoFailOpen records an eligible response returned unchanged after
+// enrichment could not complete safely.
+func (m *Metrics) IncMediaInfoFailOpen() { m.mediaInfoFailOpen.Add(1) }
+
+// IncMediaInfoWaitActive marks one buffered metadata response waiting for an
+// identity-matched record.
+func (m *Metrics) IncMediaInfoWaitActive() { m.mediaInfoWaitActive.Add(1) }
+
+// DecMediaInfoWaitActive releases one metadata enrichment waiter.
+func (m *Metrics) DecMediaInfoWaitActive() { decrementGauge(&m.mediaInfoWaitActive) }
+
+// IncMediaInfoWaitRejected records an eligible response that skipped waiting
+// because the bounded enrichment pool was full.
+func (m *Metrics) IncMediaInfoWaitRejected() { m.mediaInfoWaitRejected.Add(1) }
 
 // IncMetadataGuardAdmitted records a detailed metadata request admitted to
 // Plex after both client and global limits were acquired.
@@ -313,6 +340,10 @@ func (m *Metrics) Snapshot() Snapshot {
 		MediaInfoProbeFailureTotal:      m.mediaInfoProbeFailure.Load(),
 		MediaInfoStoreFailureTotal:      m.mediaInfoStoreFailure.Load(),
 		MediaInfoProbeActive:            m.mediaInfoProbeActive.Load(),
+		MediaInfoEnrichedTotal:          m.mediaInfoEnriched.Load(),
+		MediaInfoFailOpenTotal:          m.mediaInfoFailOpen.Load(),
+		MediaInfoWaitActive:             m.mediaInfoWaitActive.Load(),
+		MediaInfoWaitRejectedTotal:      m.mediaInfoWaitRejected.Load(),
 
 		ResolverLatencyMSTotal: resolverTotal,
 		ResolverLatencySamples: resolverSamples,

@@ -27,23 +27,28 @@ const defaultPartProbeTimeout = 15 * time.Second
 // Options describes the optional cloud playback plane around the transparent
 // Plex proxy. Nil cloud components keep the handler in proxy-only mode.
 type Options struct {
-	Upstream         *url.URL
-	Logger           *slog.Logger
-	Tracer           *trace.Tracer
-	PartCache        *partcache.Cache
-	PathMapper       *pathmap.Mapper
-	Resolver         resolver.ControlResolver
-	Metrics          *metrics.Metrics
-	CloudExtensions  []string
-	ObserveMaxBytes  int64
-	PartProbeTimeout time.Duration
-	MetadataGuard    MetadataGuardOptions
-	MediaInfoEnabled bool
-	MediaInfoStatus  func() mediainfo.Status
+	Upstream                       *url.URL
+	Logger                         *slog.Logger
+	Tracer                         *trace.Tracer
+	PartCache                      *partcache.Cache
+	PathMapper                     *pathmap.Mapper
+	Resolver                       resolver.ControlResolver
+	Metrics                        *metrics.Metrics
+	CloudExtensions                []string
+	ObserveMaxBytes                int64
+	PartProbeTimeout               time.Duration
+	MetadataGuard                  MetadataGuardOptions
+	MediaInfoEnabled               bool
+	MediaInfoStatus                func() mediainfo.Status
+	MediaInfoService               *mediainfo.Service
+	MediaInfoColdWait              time.Duration
+	MediaInfoResponseMaxBytes      int64
+	MediaInfoEnrichmentConcurrency int
 }
 
 // New builds the fail-open Plex proxy and optional Direct Play interceptor.
-// Metadata observation never mutates the Plex response body.
+// Observation only populates caches; optional MediaInfo response enrichment is
+// bounded and returns the original Plex response whenever it cannot act safely.
 func New(options Options) http.Handler {
 	logger := options.Logger
 	if logger == nil {
@@ -180,7 +185,14 @@ func New(options Options) http.Handler {
 	}
 	mux.Handle("GET /library/parts/{partID}/{rest...}", partPlayback)
 	mux.Handle("HEAD /library/parts/{partID}/{rest...}", partPlayback)
-	mux.Handle("/", newMetadataGuard(options.MetadataGuard, plex, registry, logger))
+	metadata := newMetadataGuard(options.MetadataGuard, plex, registry, logger)
+	metadata = newMetadataEnrichmentHandler(metadataEnrichmentOptions{
+		Service: options.MediaInfoService, Mapper: options.PathMapper, Resolver: options.Resolver,
+		CloudExtensions: options.CloudExtensions, ColdWait: options.MediaInfoColdWait,
+		ResponseLimit: options.MediaInfoResponseMaxBytes, Concurrency: options.MediaInfoEnrichmentConcurrency,
+		Metrics: registry,
+	}, metadata)
+	mux.Handle("/", metadata)
 
 	withActiveRequests := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		release := registry.BeginRequest()

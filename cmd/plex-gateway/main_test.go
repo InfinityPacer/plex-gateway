@@ -59,9 +59,9 @@ func TestInitializeMediaInfoDoesNotProbeWithoutTask(t *testing.T) {
 	}
 	control := &countingControlResolver{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	service, store, reason := initializeMediaInfo(t.Context(), config.MediaInfoConfig{
+	databaseStore, databaseReason := initializeDatabase(t.Context(), filepath.Join(directory, "plex-gateway.db"), true, logger)
+	service, reason := initializeMediaInfo(t.Context(), databaseStore, databaseReason, config.MediaInfoConfig{
 		Enabled:              true,
-		DatabasePath:         filepath.Join(directory, "mediainfo.db"),
 		FFProbePath:          ffprobePath,
 		ProbeTimeout:         time.Second,
 		ProbeSize:            1 << 20,
@@ -76,8 +76,8 @@ func TestInitializeMediaInfoDoesNotProbeWithoutTask(t *testing.T) {
 		NegativeTTL:          time.Minute,
 		UserAgent:            "plex-gateway-test",
 	}, plexURL, time.Second, control, metrics.New(), logger)
-	if service == nil || store == nil || reason != "ready" {
-		t.Fatalf("initializeMediaInfo() service=%v store=%v reason=%q", service != nil, store != nil, reason)
+	if service == nil || databaseStore == nil || reason != "ready" {
+		t.Fatalf("initializeMediaInfo() service=%v store=%v reason=%q", service != nil, databaseStore != nil, reason)
 	}
 	if status := service.Status(); !status.Available || status.ActiveProbes != 0 ||
 		status.InteractiveQueued != 0 || status.BackgroundQueued != 0 {
@@ -94,5 +94,5 @@ func TestInitializeMediaInfoDoesNotProbeWithoutTask(t *testing.T) {
 	if _, err := os.Stat(ffprobePath + ".called"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ffprobe process unexpectedly started: %v", err)
 	}
-	closeMediaInfo(service, store, time.Second, logger)
+	closeRuntime(service, databaseStore, time.Second, logger)
 }

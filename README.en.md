@@ -113,9 +113,12 @@ Important environment variables:
 | `METADATA_GUARD_BATCH_ENABLED` | `false` | Limit comma-separated batch metadata reads before they enter Plex. |
 | `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | Shared batch metadata concurrency limit across all clients. |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | Maximum admission wait before returning `429`. |
-| `MEDIAINFO_ENABLED` | `true` | Enable the optional MediaInfo cache and bounded probe subsystem; initialization failures do not affect transparent proxying. |
-| `MEDIAINFO_DB_PATH` | `./data/mediainfo.db` | MediaInfo SQLite cache path; the container image defaults to `/app_data/mediainfo.db`. |
+| `MEDIAINFO_ENABLED` | `true` | Enable the MediaInfo cache, bounded probes, and single-item metadata enrichment; initialization failures do not affect transparent proxying. |
+| `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite database path; the container image defaults to `/app_data/plex-gateway.db`. |
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.4.4` | Fallback User-Agent for background probes without an active client context. |
+| `MEDIAINFO_COLD_WAIT` | `5s` | Cold-cache wait ceiling for one metadata item; timeout returns the original Plex response while probing continues. |
+| `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | Maximum size of one Plex metadata response buffered for enrichment. |
+| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `4` | Maximum single-item metadata responses buffered and waiting for MediaInfo concurrently. |
 
 Plex tokens are not stored in configuration. Ordinary Plex requests remain
 transparent. For cloud playback, all client request headers are forwarded to

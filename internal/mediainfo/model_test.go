@@ -58,6 +58,25 @@ func TestFingerprintSTRMNormalizesFormattingAndMediaVaultOrigin(t *testing.T) {
 	}
 }
 
+func TestFingerprintSTRMTargetMatchesFileFingerprint(t *testing.T) {
+	target := "http://mediavault:7811/redirect/example/file.mkv"
+	path := filepath.Join(t.TempDir(), "sample.strm")
+	if err := os.WriteFile(path, []byte("\n"+target+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fromFile, err := FingerprintSTRM(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromTarget, err := FingerprintSTRMTarget(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromTarget != fromFile {
+		t.Fatalf("target fingerprint = %q, file fingerprint = %q", fromTarget, fromFile)
+	}
+}
+
 func TestCacheReturnsDetachedFreshRecord(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	record := completeRecord(now)
