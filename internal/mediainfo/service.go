@@ -725,7 +725,10 @@ func (service *Service) run(queued *job) {
 		service.finish(queued, Record{}, err)
 		return
 	}
-	if err := probeCtx.Err(); err != nil {
+	// A provider can return a complete result while an optional best-effort
+	// enrichment consumes the final instant of the probe deadline. Preserve that
+	// result unless the service lifecycle itself has already been canceled.
+	if err := service.ctx.Err(); err != nil {
 		service.finish(queued, Record{}, err)
 		return
 	}

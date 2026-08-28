@@ -519,6 +519,12 @@ MediaVault redirect 与 ffprobe 必须在同一次任务中使用相同 User-Age
 实现，仍需覆盖 HDR、Dolby Vision、多音轨、字幕、大型 MKV、尾部索引容器、高延迟和
 失败源。
 
+ffprobe 成功但未返回 format size 时，Gateway 可以在同一 worker 中使用相同 User-Agent
+对同一直链发起一次 `Range: bytes=0-0`。该请求使用独立 `2s` 上限，只接受有效的
+`206 Content-Range` 总大小，不读取响应体，也不跟随重定向。失败只保留 size 为空，不能
+丢弃其他已验证字段或延长 302 路径。成功结果随当前 Provider revision 持久化，缓存命中
+在 fresh 期间不重复访问 CDN，fresh 到期后的 retained 记录仍可触发后台复验。
+
 首次冷缓存长期返回空 MediaInfo 不可作为正常体验，metadata 请求一直无响应同样不可
 接受。处理顺序为：Gateway 启动时按需从 SQLite 回填 L1；精确冷 miss 时创建最高优先级
 任务，并允许当前单项 metadata response 在可配置的硬截止时间内等待。当前 PoC 候选

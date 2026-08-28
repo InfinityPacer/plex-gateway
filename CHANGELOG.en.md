@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache records without turning per-item browsing into full-library cold probes.
 - MediaInfo ffprobe records now use a new provider revision so records produced
   by the previous interpretation are not reused.
+- When ffprobe omits the total media size, a bounded one-byte Range request with
+  the same User-Agent recovers Part size from a valid `Content-Range`. Failures
+  preserve the otherwise valid MediaInfo and fail open.
 - Updated the background-probe fallback User-Agent to the currently verified
   Infuse Library version.
 

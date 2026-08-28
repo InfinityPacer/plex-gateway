@@ -181,6 +181,11 @@ MediaInfo Phase D begins with a provider boundary, L1 and SQLite persistence,
 bounded remote probing, proactive prewarming, and metadata response enrichment.
 A provider revision separates records whenever normalized probe semantics
 change, preventing an old interpretation from being projected after an upgrade.
+A successful ffprobe result that omits format size may perform one same-UA
+`bytes=0-0` request against the same direct URL. Only a valid partial response
+is accepted, the body is not consumed, and every error preserves the other
+probe fields. This fallback remains inside the MediaInfo worker and never enters
+the synchronous 302 path.
 A stable MediaVault or MoviePilot provider can replace remote probing without
 changing playback. Plex persistence remains a feasibility question across an
 official API, another supported PMS interface, and an isolated database helper.

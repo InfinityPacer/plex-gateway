@@ -77,6 +77,25 @@ type blockingProber struct {
 	release chan struct{}
 }
 
+type deadlineResultProber struct {
+	deadlineObserved chan struct{}
+	release          chan struct{}
+}
+
+func (prober deadlineResultProber) Probe(ctx context.Context, _, _ string) (Media, error) {
+	<-ctx.Done()
+	if prober.deadlineObserved != nil {
+		close(prober.deadlineObserved)
+	}
+	if prober.release != nil {
+		<-prober.release
+	}
+	return Media{
+		Complete: true, Container: "mkv", DurationMS: 60_000,
+		Streams: []Stream{{Index: 0, Type: "video", Codec: "hevc", Width: 1920, Height: 1080}},
+	}, nil
+}
+
 func (prober *blockingProber) Probe(ctx context.Context, target, _ string) (Media, error) {
 	prober.calls.Add(1)
 	if prober.started != nil {
@@ -159,6 +178,59 @@ func TestServiceClientWaitCancellationDoesNotCancelBackgroundJob(t *testing.T) {
 		_, ok := service.Get(request.Key)
 		return ok
 	})
+}
+
+func TestServicePreservesSuccessfulResultReturnedAtProbeDeadline(t *testing.T) {
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache(nil, time.Now()), Store: &fakeRecordStore{},
+		Provider:     &fakeProvider{prober: deadlineResultProber{}},
+		PlexServerID: "server", ProbeTimeout: 20 * time.Millisecond,
+	})
+
+	record, err := service.Ensure(t.Context(), testRequest("deadline-success", PriorityInteractive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Media.Complete || len(record.Media.Streams) != 1 || record.Media.Streams[0].Codec != "hevc" {
+		t.Fatalf("record = %#v", record)
+	}
+}
+
+func TestServiceRejectsSuccessfulResultReturnedAfterShutdownCancellation(t *testing.T) {
+	prober := deadlineResultProber{
+		deadlineObserved: make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	store := &fakeRecordStore{}
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache(nil, time.Now()), Store: store,
+		Provider:     &fakeProvider{prober: prober},
+		PlexServerID: "server", ProbeTimeout: 20 * time.Millisecond,
+	})
+	request := testRequest("shutdown-canceled", PriorityBackground)
+	if err := service.Submit(request); err != nil {
+		t.Fatal(err)
+	}
+	<-prober.deadlineObserved
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	closed := make(chan error, 1)
+	go func() { closed <- service.Close(ctx) }()
+	<-service.ctx.Done()
+	close(prober.release)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.cache.GetKnown(request.Key, time.Now()); ok {
+		t.Fatal("result returned after shutdown cancellation was written to L1")
+	}
+	store.mu.Lock()
+	_, persisted := store.records[request.Key.cacheKey()]
+	store.mu.Unlock()
+	if persisted {
+		t.Fatal("result returned after shutdown cancellation was persisted")
+	}
 }
 
 func TestServicePrioritizesRapidInteractiveSwitchesOverPrewarm(t *testing.T) {

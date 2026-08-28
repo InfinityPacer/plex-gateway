@@ -142,6 +142,13 @@ Vision、bit depth、codec、bitrate、声道布局和语言码等字段。合�
 Stream ID，也不生成 `selected`、`default` 或 `decision` 等播放选择字段。Plex 已经存在
 Stream 时只补充身份匹配 Stream 的缺失字段，不创建缺少的其他流，也不覆盖 Plex 值。
 
+当 ffprobe 无法返回媒体总大小时，Gateway 会使用与本次 MediaVault 解析和 ffprobe 相同的
+User-Agent 对同一临时直链发送一次 `Range: bytes=0-0`。该请求最多等待 `2s`，只接受包含有效
+`Content-Range` 总大小的 `206` 响应，并且不读取媒体响应体。超时、重定向、完整 `200`
+响应或字段格式异常都会忽略，不影响已经成功取得的其他 MediaInfo，也不会阻塞 302
+播放路径。成功解析后的大小随 MediaInfo 一起进入 L1 和 SQLite，fresh cache hit 不会
+重复请求 CDN。
+
 Infuse 等客户端的后台媒体库同步可能逐项请求整个库。带 `skipRefresh` 且产品名以
 `-Library` 结尾的后台同步请求只读取现有 MediaInfo 缓存，不创建冷探测。普通单项访问、
 成功的云端 302 和邻近窗口仍可按既定边界提交探测，因此浏览媒体库不会扩散成全库 CDN

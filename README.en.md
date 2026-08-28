@@ -160,6 +160,16 @@ selection fields such as `selected`, `default`, or `decision`. When Plex already
 has Streams, only missing fields on identity-matched Streams are filled. Missing
 sibling Streams are not created and existing Plex values are not overwritten.
 
+When ffprobe cannot report the total media size, the gateway sends one
+`Range: bytes=0-0` request to the same temporary direct URL with the same
+User-Agent used for that MediaVault resolution and ffprobe task. The request is
+capped at two seconds, accepts only a `206` response
+with a valid `Content-Range` total, and never reads the media response body.
+Timeouts, redirects, full `200` responses, and malformed headers are ignored
+without discarding otherwise valid MediaInfo or delaying the 302 playback path.
+The recovered size is persisted with the MediaInfo record, so fresh cache hits
+do not repeat the CDN request.
+
 Background library synchronization can enumerate an entire library one item at
 a time. Requests with `skipRefresh` whose product ends in `-Library` may consume
 an existing MediaInfo cache record but never admit a cold probe. Ordinary

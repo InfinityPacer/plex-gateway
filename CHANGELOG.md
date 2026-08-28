@@ -21,6 +21,8 @@
   字幕 Stream，并补充 HDR10、Dolby Vision、bit depth、bitrate、声道和语言等字段。
 - Infuse 风格的后台媒体库同步只读取现有 MediaInfo 缓存，不再因逐项浏览触发全库冷探测。
 - MediaInfo ffprobe 记录升级到新的 Provider revision，旧解释版本的缓存不会被复用。
+- 当 ffprobe 缺少媒体总大小时，使用同一 User-Agent 发起有界的单字节 Range 请求，
+  并从有效 `Content-Range` 补充 Part size，失败保持已有 MediaInfo 并正常回退。
 - 后台探测 fallback User-Agent 更新为当前已验证的 Infuse Library 版本。
 
 ## [0.1.1] - 2026-08-28
