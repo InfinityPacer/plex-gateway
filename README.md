@@ -39,7 +39,7 @@ Transcoder 或合成 Plex 元数据。
 | Plex 本地媒体 | 透明代理支持 | Gateway 不会重写本地 Part。 |
 | Infuse Direct Play | 已实现；验收矩阵尚未完成 | 使用 Plex Part 重定向路径。 |
 | Plex iOS ExperimentalPlayer | 运行时证据有限 | 一次成功会话不能代表通用兼容性。 |
-| Plex for Apple TV | 尚不支持 | 不在当前版本的兼容范围内。 |
+| Plex for Apple TV | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路，本地媒体保持透明代理。 |
 | Plex Web 云端播放 | 不支持 | 浏览器需要 DASH manifest，并受最终源站 CORS 限制。 |
 | VidHub 和 SenPlayer | 尚未验证 | 计划支持的客户端目标。 |
 

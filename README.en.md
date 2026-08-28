@@ -48,7 +48,7 @@ media in Plex Web remains ordinary proxied Plex traffic.
 | Local Plex media | Supported by transparent proxy | The gateway does not rewrite local Parts. |
 | Infuse Direct Play | Implemented; acceptance matrix incomplete | Uses the Plex Part redirect path. |
 | Plex iOS ExperimentalPlayer | Limited runtime evidence | One successful session is not a general compatibility claim. |
-| Plex for Apple TV | Not supported | Outside the current compatibility scope. |
+| Plex for Apple TV | Direct Play verified | STRM uses the universal decision/start redirect path; local media remains transparent proxy traffic. |
 | Plex Web cloud playback | Unsupported | The browser expects a DASH manifest and enforces final-origin CORS. |
 | VidHub and SenPlayer | Not yet verified | Planned client-compatibility targets. |
 
