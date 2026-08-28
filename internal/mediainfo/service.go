@@ -18,6 +18,7 @@ const (
 	defaultWorkerQueueSize = 256
 	defaultWorkerCount     = 1
 	defaultNegativeLimit   = 4096
+	defaultRetryLimit      = 256
 	defaultTouchQueueSize  = 1024
 	defaultGCInterval      = 24 * time.Hour
 	defaultStoreTimeout    = 5 * time.Second
@@ -25,9 +26,10 @@ const (
 )
 
 var (
-	ErrServiceUnavailable = errors.New("MediaInfo service is unavailable")
-	ErrQueueFull          = errors.New("MediaInfo queue is full")
-	ErrNegativeCache      = errors.New("MediaInfo probe is in backoff")
+	ErrServiceUnavailable    = errors.New("MediaInfo service is unavailable")
+	ErrQueueFull             = errors.New("MediaInfo queue is full")
+	ErrRetryRegistrationFull = errors.New("MediaInfo retry registration is full")
+	ErrNegativeCache         = errors.New("MediaInfo probe is in backoff")
 )
 
 // Priority separates interactive misses from administrator prewarming. A
@@ -47,6 +49,26 @@ type Request struct {
 	Target          string
 	Priority        Priority
 	ClientUserAgent string
+}
+
+// SubmitDisposition explains how a non-blocking Submit request was handled.
+// A joined request may be retried later with its own User-Agent when the
+// shared flight fails.
+type SubmitDisposition string
+
+const (
+	SubmitFreshCache           SubmitDisposition = "fresh_cache"
+	SubmitJoinedExistingFlight SubmitDisposition = "joined_existing_flight"
+	SubmitNewlyQueued          SubmitDisposition = "newly_queued"
+	SubmitRejected             SubmitDisposition = "rejected"
+)
+
+// SubmitResult is the detailed outcome of SubmitDetailed. Err is non-nil only
+// for a rejected request; accepted cache hits, joins, and queue admissions
+// have a nil Err.
+type SubmitResult struct {
+	Disposition SubmitDisposition
+	Err         error
 }
 
 func (request Request) validate() error {
@@ -143,16 +165,20 @@ type Service struct {
 	workerDone chan struct{}
 	touches    chan recordTouch
 
-	mu               sync.Mutex
-	condition        *sync.Cond
-	interactive      []*job
-	background       []*job
-	interactiveLimit int
-	backgroundLimit  int
-	flights          map[string]*flight
-	negative         map[string]time.Time
-	closed           bool
-	active           atomic.Int64
+	mu                 sync.Mutex
+	condition          *sync.Cond
+	interactive        []*job
+	background         []*job
+	retryInteractive   []*job
+	retryBackground    []*job
+	interactiveLimit   int
+	backgroundLimit    int
+	flights            map[string]*flight
+	negative           map[string]time.Time
+	retryRegistrations int
+	retryLimit         int
+	closed             bool
+	active             atomic.Int64
 }
 
 type recordTouch struct {
@@ -163,11 +189,17 @@ type recordTouch struct {
 }
 
 type flight struct {
-	done      chan struct{}
-	job       *job
-	userAgent string
-	record    Record
-	err       error
+	done         chan struct{}
+	job          *job
+	userAgent    string
+	retryWaiters []retryRegistration
+	record       Record
+	err          error
+}
+
+type retryRegistration struct {
+	request      Request
+	userAgentKey string
 }
 
 type job struct {
@@ -248,6 +280,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 		logger: logger, metrics: options.Metrics, probeTimeout: probeTimeout,
 		recordTTL: recordTTL, recordRetention: recordRetention,
 		negativeTTL: negativeTTL, negativeLimit: defaultNegativeLimit,
+		retryLimit:          defaultRetryLimit,
 		backgroundUserAgent: backgroundUserAgent, gcInterval: gcInterval,
 		touchInterval: touchInterval, now: now,
 		ctx: ctx, cancel: cancel, workerDone: make(chan struct{}),
@@ -338,24 +371,38 @@ func (service *Service) Ensure(ctx context.Context, request Request) (Record, er
 	}
 }
 
-// Submit schedules work without creating a request-bound waiter.
+// Submit schedules work without creating a request-bound waiter. It retains
+// the original error-only contract; use SubmitDetailed when the admission
+// disposition is needed.
 func (service *Service) Submit(request Request) error {
+	return service.SubmitDetailed(request).Err
+}
+
+// SubmitDetailed schedules work and reports whether the request used a fresh
+// cache record, joined an existing flight, was newly queued, or was rejected.
+// A request that joins a different-User-Agent flight is registered once, with
+// a bounded per-service budget, so a provider failure can hand the flight to
+// that User-Agent without probing blindly with the same identity.
+func (service *Service) SubmitDetailed(request Request) SubmitResult {
 	if service == nil {
-		return ErrServiceUnavailable
+		return SubmitResult{Disposition: SubmitRejected, Err: ErrServiceUnavailable}
 	}
 	request, err := service.normalizeRequest(request)
 	if err != nil {
-		return err
+		return SubmitResult{Disposition: SubmitRejected, Err: err}
 	}
 	_, found, fresh := service.lookup(service.ctx, request.Key)
 	if found && fresh {
-		return nil
+		return SubmitResult{Disposition: SubmitFreshCache}
 	}
 	if found {
 		request.Priority = PriorityBackground
 	}
-	_, err = service.begin(request)
-	return err
+	_, disposition, err := service.beginDetailed(request, true)
+	if err != nil {
+		return SubmitResult{Disposition: SubmitRejected, Err: err}
+	}
+	return SubmitResult{Disposition: disposition}
 }
 
 func (service *Service) normalizeRequest(request Request) (Request, error) {
@@ -428,13 +475,18 @@ func (service *Service) touchCached(record Record, now time.Time) Record {
 }
 
 func (service *Service) begin(request Request) (*flight, error) {
+	flight, _, err := service.beginDetailed(request, false)
+	return flight, err
+}
+
+func (service *Service) beginDetailed(request Request, registerRetry bool) (*flight, SubmitDisposition, error) {
 	if service == nil {
-		return nil, ErrServiceUnavailable
+		return nil, SubmitRejected, ErrServiceUnavailable
 	}
 	var err error
 	request, err = service.normalizeRequest(request)
 	if err != nil {
-		return nil, err
+		return nil, SubmitRejected, err
 	}
 	key := request.Key.cacheKey()
 	negativeKey := service.negativeKey(request)
@@ -442,12 +494,12 @@ func (service *Service) begin(request Request) (*flight, error) {
 	service.mu.Lock()
 	if service.closed {
 		service.mu.Unlock()
-		return nil, ErrServiceUnavailable
+		return nil, SubmitRejected, ErrServiceUnavailable
 	}
 	if until, exists := service.negative[negativeKey]; exists {
 		if now.Before(until) {
 			service.mu.Unlock()
-			return nil, ErrNegativeCache
+			return nil, SubmitRejected, ErrNegativeCache
 		}
 		delete(service.negative, negativeKey)
 	}
@@ -455,21 +507,47 @@ func (service *Service) begin(request Request) (*flight, error) {
 		if request.Priority == PriorityInteractive {
 			service.promoteLocked(existing.job)
 		}
+		if registerRetry && request.ClientUserAgent != existing.userAgent {
+			if err := service.registerRetryLocked(existing, request); err != nil {
+				service.mu.Unlock()
+				return nil, SubmitRejected, err
+			}
+		}
 		service.mu.Unlock()
-		return existing, nil
+		return existing, SubmitJoinedExistingFlight, nil
 	}
 	flight := &flight{done: make(chan struct{}), userAgent: request.ClientUserAgent}
 	queued := &job{request: request, flight: flight}
 	flight.job = queued
 	if !service.enqueueLocked(queued) {
 		service.mu.Unlock()
-		return nil, ErrQueueFull
+		return nil, SubmitRejected, ErrQueueFull
 	}
 	service.flights[key] = flight
 	service.condition.Signal()
 	service.mu.Unlock()
 	service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoProbeQueued() })
-	return flight, nil
+	return flight, SubmitNewlyQueued, nil
+}
+
+// registerRetryLocked records one distinct waiting User-Agent for an active
+// flight. The caller must hold service.mu. Registration is intentionally
+// bounded because User-Agent is untrusted request input.
+func (service *Service) registerRetryLocked(existing *flight, request Request) error {
+	userAgentKey := retryUserAgentKey(request.ClientUserAgent)
+	for _, registration := range existing.retryWaiters {
+		if registration.userAgentKey == userAgentKey {
+			return nil
+		}
+	}
+	if service.retryRegistrations >= service.retryLimit {
+		return ErrRetryRegistrationFull
+	}
+	existing.retryWaiters = append(existing.retryWaiters, retryRegistration{
+		request: request, userAgentKey: userAgentKey,
+	})
+	service.retryRegistrations++
+	return nil
 }
 
 func (service *Service) enqueueLocked(queued *job) bool {
@@ -488,22 +566,38 @@ func (service *Service) enqueueLocked(queued *job) bool {
 }
 
 func (service *Service) promoteLocked(queued *job) {
-	if queued == nil || queued.claimed || queued.request.Priority == PriorityInteractive ||
-		len(service.interactive) >= service.interactiveLimit {
+	if queued == nil || queued.claimed || queued.request.Priority == PriorityInteractive {
 		return
 	}
-	for index, candidate := range service.background {
-		if candidate != queued {
-			continue
-		}
-		copy(service.background[index:], service.background[index+1:])
-		service.background[len(service.background)-1] = nil
-		service.background = service.background[:len(service.background)-1]
+	if removeQueuedJob(&service.retryBackground, queued) {
 		queued.request.Priority = PriorityInteractive
-		service.interactive = append(service.interactive, queued)
+		service.retryInteractive = append(service.retryInteractive, queued)
 		service.condition.Signal()
 		return
 	}
+	if len(service.interactive) >= service.interactiveLimit {
+		return
+	}
+	if !removeQueuedJob(&service.background, queued) {
+		return
+	}
+	queued.request.Priority = PriorityInteractive
+	service.interactive = append(service.interactive, queued)
+	service.condition.Signal()
+}
+
+func removeQueuedJob(queue *[]*job, target *job) bool {
+	for index, candidate := range *queue {
+		if candidate != target {
+			continue
+		}
+		copy((*queue)[index:], (*queue)[index+1:])
+		last := len(*queue) - 1
+		(*queue)[last] = nil
+		*queue = (*queue)[:last]
+		return true
+	}
+	return false
 }
 
 func (service *Service) worker() {
@@ -561,17 +655,25 @@ func (service *Service) janitorWorker() {
 func (service *Service) nextJob() (*job, bool) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	for !service.closed && len(service.interactive) == 0 && len(service.background) == 0 {
+	for !service.closed && service.queuedJobsLocked() == 0 {
 		service.condition.Wait()
 	}
 	if service.closed {
 		return nil, false
 	}
 	var queued *job
-	if len(service.interactive) > 0 {
+	if len(service.retryInteractive) > 0 {
+		queued = service.retryInteractive[0]
+		service.retryInteractive[0] = nil
+		service.retryInteractive = service.retryInteractive[1:]
+	} else if len(service.interactive) > 0 {
 		queued = service.interactive[0]
 		service.interactive[0] = nil
 		service.interactive = service.interactive[1:]
+	} else if len(service.retryBackground) > 0 {
+		queued = service.retryBackground[0]
+		service.retryBackground[0] = nil
+		service.retryBackground = service.retryBackground[1:]
 	} else {
 		queued = service.background[0]
 		service.background[0] = nil
@@ -579,6 +681,19 @@ func (service *Service) nextJob() (*job, bool) {
 	}
 	queued.claimed = true
 	return queued, true
+}
+
+func (service *Service) queuedJobsLocked() int {
+	return len(service.retryInteractive) + len(service.interactive) +
+		len(service.retryBackground) + len(service.background)
+}
+
+func (service *Service) enqueueRetryLocked(queued *job) {
+	if queued.request.Priority == PriorityInteractive {
+		service.retryInteractive = append(service.retryInteractive, queued)
+		return
+	}
+	service.retryBackground = append(service.retryBackground, queued)
 }
 
 func (service *Service) run(queued *job) {
@@ -636,6 +751,7 @@ func (service *Service) run(queued *job) {
 
 func (service *Service) finish(queued *job, record Record, err error) {
 	key := queued.request.Key.cacheKey()
+	var retry *flight
 	service.mu.Lock()
 	flight := service.flights[key]
 	if flight != queued.flight {
@@ -644,12 +760,19 @@ func (service *Service) finish(queued *job, record Record, err error) {
 	}
 	delete(service.flights, key)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		service.rememberNegativeLocked(service.negativeKey(queued.request), service.now())
+		now := service.now()
+		service.rememberNegativeLocked(service.negativeKey(queued.request), now)
+		retry = service.scheduleRetryLocked(flight, queued.request.ClientUserAgent, now)
+	} else {
+		service.releaseRetryRegistrationsLocked(flight)
 	}
 	flight.record = record
 	flight.err = err
 	close(flight.done)
 	service.mu.Unlock()
+	if retry != nil {
+		service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoProbeQueued() })
+	}
 	if err != nil {
 		service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoProbeFailure() })
 		service.logger.Info("mediainfo_probe_failed", "part", queued.request.Key.PartID, "error_kind", probeErrorKind(err))
@@ -658,9 +781,75 @@ func (service *Service) finish(queued *job, record Record, err error) {
 	service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoProbeSuccess() })
 }
 
+// scheduleRetryLocked promotes the first eligible Submit registration to a
+// new flight and carries the remaining registrations forward. The caller must
+// hold service.mu. A failed User-Agent is already in negative backoff, so it
+// cannot be selected for an immediate blind retry.
+func (service *Service) scheduleRetryLocked(failed *flight, failedUserAgent string, now time.Time) *flight {
+	var selected *retryRegistration
+	remaining := make([]retryRegistration, 0, len(failed.retryWaiters))
+	for index := range failed.retryWaiters {
+		registration := failed.retryWaiters[index]
+		service.retryRegistrations--
+		if registration.request.ClientUserAgent == failedUserAgent ||
+			service.negativeActiveLocked(registration.request, now) {
+			continue
+		}
+		if selected == nil {
+			candidate := registration
+			selected = &candidate
+			continue
+		}
+		remaining = append(remaining, registration)
+	}
+	failed.retryWaiters = nil
+	if selected == nil {
+		return nil
+	}
+
+	next := &flight{done: make(chan struct{}), userAgent: selected.request.ClientUserAgent}
+	next.retryWaiters = remaining
+	service.retryRegistrations += len(remaining)
+	next.job = &job{request: selected.request, flight: next}
+	service.enqueueRetryLocked(next.job)
+	service.flights[next.job.request.Key.cacheKey()] = next
+	service.condition.Signal()
+	return next
+}
+
+func (service *Service) releaseRetryRegistrationsLocked(flight *flight) {
+	service.retryRegistrations -= len(flight.retryWaiters)
+	if service.retryRegistrations < 0 {
+		service.retryRegistrations = 0
+	}
+	flight.retryWaiters = nil
+}
+
+func (service *Service) negativeActiveLocked(request Request, now time.Time) bool {
+	key := service.negativeKey(request)
+	until, exists := service.negative[key]
+	if !exists {
+		return false
+	}
+	if now.Before(until) {
+		return true
+	}
+	delete(service.negative, key)
+	return false
+}
+
 func (service *Service) negativeKey(request Request) string {
-	digest := sha256.Sum256([]byte(request.ClientUserAgent))
+	digest := userAgentDigest(request.ClientUserAgent)
 	return request.Key.cacheKey() + "\x00" + string(digest[:])
+}
+
+func retryUserAgentKey(userAgent string) string {
+	digest := userAgentDigest(userAgent)
+	return string(digest[:])
+}
+
+func userAgentDigest(userAgent string) [sha256.Size]byte {
+	return sha256.Sum256([]byte(userAgent))
 }
 
 func (service *Service) rememberNegativeLocked(key string, now time.Time) {
@@ -702,8 +891,9 @@ func (service *Service) Status() Status {
 	available := !service.closed
 	status := Status{
 		Available: available, CacheEntries: service.cache.Len(), ActiveProbes: service.active.Load(),
-		InteractiveQueued: len(service.interactive), BackgroundQueued: len(service.background),
-		NegativeEntries: len(service.negative),
+		InteractiveQueued: len(service.retryInteractive) + len(service.interactive),
+		BackgroundQueued:  len(service.retryBackground) + len(service.background),
+		NegativeEntries:   len(service.negative),
 	}
 	service.mu.Unlock()
 	return status
@@ -731,10 +921,13 @@ func (service *Service) Close(ctx context.Context) error {
 		for key, flight := range service.flights {
 			delete(service.flights, key)
 			flight.err = ErrServiceUnavailable
+			service.releaseRetryRegistrationsLocked(flight)
 			close(flight.done)
 		}
 		service.interactive = nil
 		service.background = nil
+		service.retryInteractive = nil
+		service.retryBackground = nil
 		service.condition.Broadcast()
 	}
 	service.mu.Unlock()

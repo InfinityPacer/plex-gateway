@@ -83,6 +83,10 @@ The gateway remains a transparent proxy when `MEDIAVAULT_URL` and
 `PATH_MAPPINGS` are both unset. Configure them together to enable cloud
 redirect handling.
 
+Before using `docker-compose.example.yml`, copy `app.env.example` to `app.env`
+and set the deployment addresses, path mappings, and optional token. The
+Compose example reads it through `env_file: ./app.env`.
+
 ```sh
 PLEX_URL=http://plex:32400 \
 MEDIAVAULT_URL=http://mediavault:7811 \
@@ -98,6 +102,7 @@ Important environment variables:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PLEX_URL` | required | Internal Plex origin; credentials are rejected. |
+| `PLEX_TOKEN` | disabled | Optional Plex management token used only for startup validation and nearby-item discovery. Current-item prewarming remains available without it. |
 | `MEDIAVAULT_URL` | disabled | Internal MediaVault HTTP(S) origin. |
 | `PATH_MAPPINGS` | disabled | JSON array of Plex-to-container STRM prefixes. |
 | `LISTEN_ADDR` | `:32400` | Gateway listener. |
@@ -119,9 +124,19 @@ Important environment variables:
 | `MEDIAINFO_COLD_WAIT` | `5s` | Cold-cache wait ceiling for one metadata item; timeout returns the original Plex response while probing continues. |
 | `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | Maximum size of one Plex metadata response buffered for enrichment. |
 | `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `4` | Maximum single-item metadata responses buffered and waiting for MediaInfo concurrently. |
+| `MEDIAINFO_PREWARM_BEFORE` | `2` | Number of nearby items before the current item to prewarm. |
+| `MEDIAINFO_PREWARM_AFTER` | `3` | Number of nearby items after the current item to prewarm. |
+| `MEDIAINFO_PREWARM_INTERVAL` | `5s` | Delay between nearby-item submissions; the current item does not wait. |
 
-Plex tokens are not stored in configuration. Ordinary Plex requests remain
-transparent. For cloud playback, all client request headers are forwarded to
+Ordinary Plex requests remain transparent, while cloud playback sends client
+headers to the trusted MediaVault origin under the contract below. The optional
+management `PLEX_TOKEN` is injected through the environment and sent only to the
+configured Plex origin for nearby-item discovery. It is not written to the
+database, logs, or tasks and is never sent to MediaVault, the CDN, or ffprobe.
+Compose deployments can place
+it in an ignored `app.env`; see [app.env.example](app.env.example).
+
+For cloud playback, all client request headers are forwarded to
 the configured MediaVault origin so it can generate a direct URL for the same
 client context. The internal lookup always uses `GET`, allowing a client `HEAD`
 request to receive the same 302 even when MediaVault does not support `HEAD`.
@@ -129,9 +144,42 @@ Deploy MediaVault as a trusted upstream and keep resolver requests and headers
 out of logs.
 
 Clients connect to the gateway as they would connect to Plex and authenticate
-through Plex. The gateway does not need a Plex username, password, or static
-token. MediaVault's API key for `/api/v1` integrations is also not required for
+through Plex. The gateway does not need a Plex username or password, and
+playback does not depend on the management token. MediaVault's API key for `/api/v1` integrations is also not required for
 the STRM `/redirect` playback contract.
+
+### Nearby-item MediaInfo prewarming
+
+The gateway performs one bounded in-memory enqueue only after Plex has
+authorized the cloud Part, MediaVault has returned the final direct URL, and the
+gateway has written the 302. This signal means that the cloud redirect is ready;
+it does not claim that the client followed the redirect or actually started
+playback. Current-item prewarming does not require a management token. A valid
+`PLEX_TOKEN` additionally enables nearby-item discovery.
+
+The current item is submitted immediately at interactive priority. The
+background coordinator prefers explicit Plex playQueue order and permits movie,
+cross-show, and multi-Media/Part entries. Every candidate is stored under its
+own PartID and STRM fingerprint. Without a usable queue, Plex episode and season
+response order is used, including specials and entries with missing indices.
+
+The default window is two items before and three after, with following items
+submitted first. The combined configurable window is capped at 50. Nearby items
+enter the low-priority queue every five seconds by default, while the MediaInfo
+worker defaults to one concurrent probe to avoid MediaVault/CDN bursts. A rapid
+A/B/C switch submits each new current item immediately and cancels only the old
+window entries that were not submitted. Submitted work retains its own identity
+and is deduplicated by singleflight.
+
+The gateway persists parsed MediaInfo, not short-lived CDN URLs or raw head/tail
+bytes. MediaVault upload precaching applies only to files uploaded through
+MediaVault. A future stable MediaInfo or precache API can become the preferred
+provider, with CDN ffprobe as fallback. `MEDIAINFO_NEGATIVE_TTL` suppresses
+repeated failures; the coordinator does not perform blind retries without the
+final probe error class. Plex discovery, STRM reads, fingerprinting, and SQLite
+access all run after the 302 path. A missing or invalid token disables only
+nearby-item discovery, not current-item prewarming, transparent proxying,
+metadata enrichment, or playback redirects.
 
 ### Metadata concurrency protection
 
@@ -235,8 +283,8 @@ That topology is outside the exclusive-gateway deployment contract.
 
 ## Endpoints
 
-- `GET /health` returns process health plus a credential-free MediaInfo
-  availability, cache, and queue summary.
+- `GET /health` returns process health plus credential-free MediaInfo cache,
+  probe-queue, and nearby-item prewarm summaries.
 - `GET /metrics` returns fixed-shape JSON counters plus resolver and complete
   redirect-path latency totals, samples, last values, and maxima. When metadata
   protection is enabled, it also reports admission, timeout, active, and queued

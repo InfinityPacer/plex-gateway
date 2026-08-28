@@ -41,15 +41,21 @@ const (
 	defaultMediaInfoColdWait  = 5 * time.Second
 	defaultMediaInfoBodyLimit = 8 << 20
 	defaultMediaInfoWaiters   = 4
+	defaultPrewarmBefore      = 2
+	defaultPrewarmAfter       = 3
+	defaultPrewarmInterval    = 5 * time.Second
+	maxPrewarmWindow          = 50
 )
 
 // Config contains process-level settings for transparent Plex proxying and
-// optional STRM redirect handling. Credentials remain request-scoped and are
-// never loaded into this structure.
+// optional STRM redirect handling. PlexToken is an isolated management
+// credential for nearby-item discovery and is never mixed into client playback
+// context.
 type Config struct {
 	ListenAddr        string
 	DatabasePath      string
 	PlexURL           *url.URL
+	PlexToken         string
 	MediaVaultURL     *url.URL
 	PathMappings      []pathmap.Mapping
 	CloudExtensions   []string
@@ -86,6 +92,11 @@ type MediaInfoConfig struct {
 	ColdWait             time.Duration
 	ResponseMaxBytes     int64
 	EnrichmentWaiters    int
+	// PrewarmBefore and PrewarmAfter bound speculative neighbors around a
+	// cloud redirect. PrewarmInterval spaces their background submissions.
+	PrewarmBefore   int
+	PrewarmAfter    int
+	PrewarmInterval time.Duration
 }
 
 // MetadataGuardConfig bounds detailed metadata fan-out before requests enter
@@ -123,6 +134,10 @@ func Load() (Config, error) {
 	}
 	plexURL.RawQuery = ""
 	plexURL.Fragment = ""
+	plexToken := strings.TrimSpace(os.Getenv("PLEX_TOKEN"))
+	if strings.ContainsAny(plexToken, "\r\n") {
+		return Config{}, errors.New("PLEX_TOKEN must not contain line breaks")
+	}
 
 	mediaVaultURL, err := optionalHTTPURL("MEDIAVAULT_URL")
 	if err != nil {
@@ -266,6 +281,21 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mediaInfoPrewarmBefore, err := envNonNegativeInt("MEDIAINFO_PREWARM_BEFORE", defaultPrewarmBefore)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoPrewarmAfter, err := envNonNegativeInt("MEDIAINFO_PREWARM_AFTER", defaultPrewarmAfter)
+	if err != nil {
+		return Config{}, err
+	}
+	if mediaInfoPrewarmBefore+mediaInfoPrewarmAfter > maxPrewarmWindow {
+		return Config{}, fmt.Errorf("MEDIAINFO_PREWARM_BEFORE and MEDIAINFO_PREWARM_AFTER must total at most %d", maxPrewarmWindow)
+	}
+	mediaInfoPrewarmInterval, err := envDuration("MEDIAINFO_PREWARM_INTERVAL", defaultPrewarmInterval)
+	if err != nil {
+		return Config{}, err
+	}
 
 	readHeaderTimeout, err := envDuration("READ_HEADER_TIMEOUT", defaultReadHeaderTimeout)
 	if err != nil {
@@ -296,6 +326,7 @@ func Load() (Config, error) {
 		ListenAddr:       listenAddr,
 		DatabasePath:     databasePath,
 		PlexURL:          plexURL,
+		PlexToken:        plexToken,
 		MediaVaultURL:    mediaVaultURL,
 		PathMappings:     pathMappings,
 		CloudExtensions:  cloudExtensions,
@@ -320,6 +351,8 @@ func Load() (Config, error) {
 			RecordTTL:           mediaInfoTTL, RecordRetention: mediaInfoRetention, L1MaxEntries: mediaInfoL1Entries,
 			NegativeTTL: mediaInfoNegativeTTL, UserAgent: mediaInfoUserAgent,
 			ColdWait: mediaInfoColdWait, ResponseMaxBytes: mediaInfoBodyLimit, EnrichmentWaiters: mediaInfoWaiters,
+			PrewarmBefore: mediaInfoPrewarmBefore, PrewarmAfter: mediaInfoPrewarmAfter,
+			PrewarmInterval: mediaInfoPrewarmInterval,
 		},
 		LogLevel:          logLevel,
 		TraceEnabled:      traceEnabled,
@@ -441,6 +474,21 @@ func envPositiveInt(name string, fallback int) (int, error) {
 	}
 	if value <= 0 {
 		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return value, nil
+}
+
+func envNonNegativeInt(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("%s must not be negative", name)
 	}
 	return value, nil
 }

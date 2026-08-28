@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added bounded remote ffprobe, an L1 LRU plus SQLite MediaInfo cache, and
+  single-item Plex metadata response enrichment. Cold-wait timeouts preserve the
+  original response while probing continues in the background.
+- Current-Part prewarming now starts after a cloud redirect is ready. An isolated
+  Plex management token can additionally discover and rate-limit a configurable
+  nearby window, defaulting to two previous and three following items. Missing or
+  invalid management credentials disable only nearby discovery.
+- Added per-client rapid-switch coordination, cross-User-Agent failure handoff,
+  and distinct prewarm metrics for fresh cache hits, joined work, new queue
+  admissions, and rejections.
+
 ## [0.1.1] - 2026-08-28
 
 ### Added

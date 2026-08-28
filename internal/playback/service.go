@@ -29,8 +29,9 @@ const (
 // PreparedPart binds the Plex identity used for authorization to the exact
 // control target read from its mapped STRM file.
 type PreparedPart struct {
-	Part   plexmeta.Part
-	Target string
+	Part      plexmeta.Part
+	RatingKey string
+	Target    string
 }
 
 // Preparation is a typed result so HTTP adapters can preserve transparent
@@ -104,22 +105,35 @@ type Options struct {
 // Service prepares, authorizes, and resolves cloud Parts. It never writes an
 // HTTP response; protocol adapters remain responsible for redirect or fallback.
 type Service struct {
-	cache           *partcache.Cache
+	cache         *partcache.Cache
+	resolver      resolver.ControlResolver
+	authorizePart AuthorizePartFunc
+	preparer      *PartPreparer
+}
+
+// PartPreparer owns the pure cloud-file classification, path mapping, and STRM
+// target read shared by live playback and speculative analysis.
+type PartPreparer struct {
 	mapper          *pathmap.Mapper
 	resolver        resolver.ControlResolver
-	authorizePart   AuthorizePartFunc
 	cloudExtensions map[string]struct{}
+}
+
+// NewPartPreparer creates the side-effect-bounded preparation boundary. It
+// never contacts Plex, MediaVault, or the media origin.
+func NewPartPreparer(mapper *pathmap.Mapper, controlResolver resolver.ControlResolver, cloudExtensions []string) *PartPreparer {
+	return &PartPreparer{
+		mapper: mapper, resolver: controlResolver,
+		cloudExtensions: normalizeExtensions(cloudExtensions),
+	}
 }
 
 // New creates a playback service. Missing cloud collaborators intentionally
 // produce PreparationUnavailable so a proxy-only deployment remains valid.
 func New(options Options) *Service {
 	return &Service{
-		cache:           options.Cache,
-		mapper:          options.Mapper,
-		resolver:        options.Resolver,
-		authorizePart:   options.AuthorizePart,
-		cloudExtensions: normalizeExtensions(options.CloudExtensions),
+		cache: options.Cache, resolver: options.Resolver, authorizePart: options.AuthorizePart,
+		preparer: NewPartPreparer(options.Mapper, options.Resolver, options.CloudExtensions),
 	}
 }
 
@@ -133,27 +147,38 @@ func (s *Service) PrepareCached(partID string) Preparation {
 	if !found {
 		return Preparation{State: PreparationMissing, Reason: "cache_miss"}
 	}
-	return s.Prepare(plexmeta.Part{ID: info.PartID, Key: info.PartKey, File: info.PlexFilePath})
+	preparation := s.Prepare(plexmeta.Part{ID: info.PartID, Key: info.PartKey, File: info.PlexFilePath})
+	preparation.Part.RatingKey = info.RatingKey
+	return preparation
 }
 
 // Prepare maps a cloud Part to its local STRM file and reads one validated
 // control target without contacting Plex, MediaVault, or the media origin.
 func (s *Service) Prepare(partInfo plexmeta.Part) Preparation {
-	if !s.enabled() {
+	if s == nil || s.preparer == nil {
+		return Preparation{State: PreparationUnavailable, Reason: "cloud_disabled"}
+	}
+	return s.preparer.Prepare(partInfo)
+}
+
+// Prepare applies cloud Part rules without playback authorization or direct
+// URL resolution.
+func (preparer *PartPreparer) Prepare(partInfo plexmeta.Part) Preparation {
+	if preparer == nil || preparer.mapper == nil || preparer.resolver == nil {
 		return Preparation{State: PreparationUnavailable, Reason: "cloud_disabled"}
 	}
 	prepared := PreparedPart{Part: partInfo}
 	if partInfo.ID == "" || partInfo.File == "" {
 		return Preparation{State: PreparationFailed, Part: prepared, Reason: "invalid_part"}
 	}
-	if _, ok := s.cloudExtensions[strings.ToLower(path.Ext(partInfo.File))]; !ok {
+	if _, ok := preparer.cloudExtensions[strings.ToLower(path.Ext(partInfo.File))]; !ok {
 		return Preparation{State: PreparationLocal, Part: prepared}
 	}
-	localPath, err := s.mapper.Resolve(partInfo.File)
+	localPath, err := preparer.mapper.Resolve(partInfo.File)
 	if err != nil {
 		return Preparation{State: PreparationFailed, Part: prepared, Reason: "path_mapping", Cloud: true}
 	}
-	target, err := s.resolver.ReadTarget(localPath)
+	target, err := preparer.resolver.ReadTarget(localPath)
 	if err != nil {
 		return Preparation{State: PreparationFailed, Part: prepared, Reason: "strm_target", Cloud: true}
 	}
@@ -170,6 +195,7 @@ func (s *Service) Remember(part PreparedPart) {
 	}
 	s.cache.Put(partcache.PartInfo{
 		PartID:       partInfo.ID,
+		RatingKey:    part.RatingKey,
 		PlexFilePath: partInfo.File,
 		PartKey:      partInfo.Key,
 		UpdatedAt:    time.Now().UTC(),
@@ -203,7 +229,8 @@ func (s *Service) Play(input PlayInput) (PlayResult, error) {
 }
 
 func (s *Service) enabled() bool {
-	return s != nil && s.cache != nil && s.mapper != nil && s.resolver != nil && s.authorizePart != nil
+	return s != nil && s.cache != nil && s.preparer != nil && s.preparer.mapper != nil &&
+		s.preparer.resolver != nil && s.resolver != nil && s.authorizePart != nil
 }
 
 // resolverRequest preserves every client header and promotes query-carried

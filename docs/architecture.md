@@ -166,10 +166,12 @@ proxied and retains Plex's normal Web compatibility.
 
 ## Analysis-plane boundary
 
-MediaVault's documented ffprobe assistance is an internal recognition and
-renaming feature, and MediaInfoKeeper is Emby-specific. Neither is treated as a
-public MediaInfo API. The gateway does not inspect MediaVault internals or
-duplicate those features in the playback plane.
+MediaVault's documented ffprobe assistance and upload-time head/tail precache
+are internal recognition and scan optimizations, and MediaInfoKeeper is
+Emby-specific. None is treated as a public MediaInfo API. The precache covers
+only files uploaded through MediaVault and cannot be consumed by the gateway
+without a stable interface. The gateway does not inspect MediaVault internals,
+mount its private cache, or duplicate those features in the playback plane.
 
 MediaInfo Phase D begins with a provider boundary, L1 and SQLite persistence,
 bounded remote probing, proactive prewarming, and metadata response enrichment.
@@ -184,9 +186,9 @@ Intro and credits work starts with an isolated Plex marker API probe. See
 The Part cache is in memory and has a configurable TTL. Metadata responses
 refresh entries by stable `Part.id`; the full `Part.key` is retained only as
 observed metadata because its change stamp may vary. A restart begins with an
-empty cache; normal metadata, decision, start, and play queue traffic repopulate
-it. A direct cold-start Part request falls back to Plex until one of those
-authenticated metadata paths observes the Part.
+empty cache; normal metadata, decision, and play queue traffic repopulate it. A
+direct cold-start Part request falls back to Plex until one of those authenticated
+metadata paths observes the Part.
 
 Direct URLs are intentionally not persisted. They are short-lived credentials
 owned by MediaVault and the cloud provider.
@@ -198,9 +200,9 @@ The gateway requires:
 - network access to Plex and MediaVault;
 - read-only mounts for each configured STRM tree;
 - no Plex database, MediaVault database, 115 cookie, or cloud-provider API
-  access. Playback requires no static Plex Token; MediaInfo discovery and
-  prewarming may optionally use `PLEX_TOKEN` injected from an ignored
-  deployment `app.env`.
+  access. Playback and current-item MediaInfo prewarming require no static Plex
+  Token; nearby-item discovery may optionally use `PLEX_TOKEN` injected from an
+  ignored deployment `app.env`.
 
 Before listening, the process verifies that a fresh invalid Plex Token is
 rejected by the internal Plex origin. Plex **Allowed Networks** must not include
@@ -211,9 +213,9 @@ playback failures after startup remain fail-open to authenticated Plex traffic.
 The MediaVault API key documented for `/api/v1` integrations is not required by
 the STRM `/redirect` contract and is not a gateway configuration value. Active
 playback authorization comes only from the client request; the optional
-management Token is used only for background discovery, prewarming, and
-reconciliation. Users do not provide their Plex username or password to the
-gateway.
+management Token is used only to validate and discover nearby Plex items.
+Current-item prewarming does not require it. Users do not provide their Plex
+username or password to the gateway.
 
 Client-provided Plex authentication headers and query parameters are forwarded
 unchanged to Plex. Cloud playback headers are additionally forwarded to

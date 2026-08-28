@@ -92,6 +92,7 @@ func (h *decisionHandler) selectCloudPart(r *http.Request, attempt playback.Atte
 	if preparation.State != playback.PreparationReady {
 		return playback.PreparedPart{}, decisionSelectionPassthrough
 	}
+	preparation.Part.RatingKey = strings.TrimPrefix(attempt.MetadataPath, "/library/metadata/")
 	return preparation.Part, decisionSelectionCloud
 }
 

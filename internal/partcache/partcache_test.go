@@ -60,6 +60,17 @@ func TestPutSweepsExpiredUnrelatedEntries(t *testing.T) {
 	}
 }
 
+func TestObservationWithoutRatingKeyDoesNotEraseKnownAssociation(t *testing.T) {
+	cache := New(time.Minute)
+	cache.Put(PartInfo{PartID: "123", RatingKey: "42", PlexFilePath: "/cloud/episode.strm"})
+	cache.Put(PartInfo{PartID: "123", PlexFilePath: "/cloud/episode.strm", PartKey: "/library/parts/123/file"})
+
+	got, ok := cache.Get("123")
+	if !ok || got.RatingKey != "42" || got.PartKey != "/library/parts/123/file" {
+		t.Fatalf("PartInfo = %#v, found = %v", got, ok)
+	}
+}
+
 func TestEmptyPartIDIsIgnored(t *testing.T) {
 	cache := New(time.Minute)
 	cache.Put(PartInfo{PlexFilePath: "/media/cloud/empty.strm"})

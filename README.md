@@ -71,6 +71,10 @@ MediaVault URL 输入会被重写为配置的内部 MediaVault origin。同源�
 当 `MEDIAVAULT_URL` 和 `PATH_MAPPINGS` 都未设置时，Gateway 仍作为透明代理运行。
 要启用云端重定向处理，请同时配置这两个变量。
 
+使用 `docker-compose.example.yml` 前，先将 `app.env.example` 复制为 `app.env`，
+再按部署环境填写地址、路径映射和可选 Token。Compose 示例会通过
+`env_file: ./app.env` 读取该文件。
+
 ```sh
 PLEX_URL=http://plex:32400 \
 MEDIAVAULT_URL=http://mediavault:7811 \
@@ -86,6 +90,7 @@ go run ./cmd/plex-gateway
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `PLEX_URL` | 必填 | Plex 内部 origin；配置中的凭据会被拒绝。 |
+| `PLEX_TOKEN` | 禁用 | 可选 Plex 管理 Token，仅用于启动验证和邻近媒体发现。缺失时仍预热当前播放项。 |
 | `MEDIAVAULT_URL` | 禁用 | MediaVault 内部 HTTP(S) origin。 |
 | `PATH_MAPPINGS` | 禁用 | Plex 到容器内 STRM 路径的 JSON 映射数组。 |
 | `LISTEN_ADDR` | `:32400` | Gateway 监听地址。 |
@@ -107,16 +112,50 @@ go run ./cmd/plex-gateway
 | `MEDIAINFO_COLD_WAIT` | `5s` | 单项 metadata 冷缓存等待上限；超时返回原 Plex 响应，探测继续。 |
 | `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | 可以缓冲并尝试增强的单个 Plex metadata 响应上限。 |
 | `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `4` | 同时缓冲和等待 MediaInfo 的单项 metadata 响应上限。 |
+| `MEDIAINFO_PREWARM_BEFORE` | `2` | 当前项之前的邻近媒体预热数量。 |
+| `MEDIAINFO_PREWARM_AFTER` | `3` | 当前项之后的邻近媒体预热数量。 |
+| `MEDIAINFO_PREWARM_INTERVAL` | `5s` | 邻近项提交到后台探测队列的间隔；当前项不等待。 |
 
-Plex Token 不会保存到配置中。普通 Plex 请求保持透明转发。对于云端播放，客户端的
+普通 Plex 请求保持透明转发，云端播放请求按下文契约将客户端 header 发送给可信
+MediaVault。可选管理 `PLEX_TOKEN` 通过环境变量注入，只发送到配置的 Plex origin，
+用于邻近媒体发现；不会写入数据库、日志或任务，也不会发送给 MediaVault、CDN 或
+ffprobe。Compose 部署可将它放在不纳入
+Git 的 `app.env` 中。推荐让 Compose 只通过 `env_file: ./app.env` 加载运行配置，完整的
+中文变量说明和默认值参考 [app.env.example](app.env.example)。
+
+对于云端播放，客户端的
 所有请求 header 都会转发到配置的 MediaVault origin，使其能够为相同客户端上下文
 生成直链。内部查找始终使用 `GET`，因此即使 MediaVault 不支持 `HEAD`，客户端的
 `HEAD` 请求也能收到相同的 302。请将 MediaVault 部署为可信上游，并避免将解析请求
 及其 header 写入日志。
 
 客户端像连接 Plex 一样连接 Gateway，并通过 Plex 完成身份认证。Gateway 不需要
-单独配置 Plex 用户名、密码或静态 Token。STRM `/redirect` 播放协议也不需要
+单独配置 Plex 用户名或密码，播放也不依赖管理 Token。STRM `/redirect` 播放协议不需要
 MediaVault 用于 `/api/v1` 集成的 API key。
+
+### 邻近媒体 MediaInfo 预热
+
+Gateway 在云端 Part 已通过 Plex 授权、MediaVault 已返回最终直链且 Gateway 已写出
+302 后，只向有界内存协调器投递一次事件。该信号表示“云端重定向已就绪”，不宣称
+客户端已经跟随 302 或真实起播。当前项预热不需要管理 Token；配置有效
+`PLEX_TOKEN` 后才会额外发现邻近媒体。
+
+当前项会立即以交互优先级提交。后台优先使用明确的 Plex playQueue 顺序，并允许其中的
+电影、跨剧条目和多 Media/Part；候选始终采用自身的 PartID 与 STRM fingerprint 落库，
+不会写入当前项。没有可靠 playQueue 时，按 Plex 返回的剧集和季顺序查找邻近项，包括
+S00 和缺失索引的条目。
+
+默认窗口为前 `2`、后 `3`，后续项先提交；两个方向合计最多配置 `50`。邻近项默认每隔
+`5s` 进入低优先级队列，MediaInfo worker 默认并发为 `1`，用于避免 MediaVault/CDN
+请求突发。快速切换 A、B、C 时，新当前项立即进入交互队列，旧窗口中尚未提交的候选会被
+取消；已经提交的任务仍按自己的身份完成并由 singleflight 去重。整个发现、STRM 读取、
+指纹计算和 SQLite 查询均在 302 响应之后执行。
+
+Gateway 只持久化解析后的 MediaInfo，不缓存短期 CDN URL 或原始文件头尾。MediaVault 的
+上传预缓存只覆盖经其上传的新文件；若未来提供稳定 MediaInfo/预缓存读取 API，可作为优先
+Provider，未命中时再回退 CDN ffprobe。探测失败由 `MEDIAINFO_NEGATIVE_TTL` 抑制重复请求；
+协调器不执行无法感知最终错误类型的盲目重试。Token 缺失或失效只禁用邻近媒体发现，
+不影响当前项预热、透明代理、metadata 增强或播放重定向。
 
 ### Metadata 并发保护
 
@@ -202,7 +241,7 @@ Gateway 重新执行检查。
 
 ## Endpoints
 
-- `GET /health` 返回进程健康状态，以及不含媒体身份和凭据的 MediaInfo 可用性、缓存和队列摘要。
+- `GET /health` 返回进程健康状态，以及不含媒体身份和凭据的 MediaInfo 缓存、探测队列和邻近媒体预热摘要。
 - `GET /metrics` 返回固定结构的 JSON 计数器，以及 resolver 和完整重定向链路的
   延迟总计、样本数、最近值和最大值。启用 metadata 保护时还会返回准入、超时、
   活动和排队计数，所有指标都不包含请求标签或凭据。

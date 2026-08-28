@@ -19,6 +19,7 @@ import (
 	"github.com/InfinityPacer/plex-gateway/internal/metrics"
 	"github.com/InfinityPacer/plex-gateway/internal/partcache"
 	"github.com/InfinityPacer/plex-gateway/internal/pathmap"
+	"github.com/InfinityPacer/plex-gateway/internal/prewarm"
 	"github.com/InfinityPacer/plex-gateway/internal/resolver"
 	"github.com/InfinityPacer/plex-gateway/internal/trace"
 )
@@ -143,11 +144,14 @@ func TestMetadataObservationEnablesCloudPartRedirect(t *testing.T) {
 	}))
 	defer plex.Close()
 
-	handler, registry, _ := newCloudHandler(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{PlexPrefix: plexRoot, LocalPrefix: localRoot}})
+	handler, registry, cache := newCloudHandler(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{PlexPrefix: plexRoot, LocalPrefix: localRoot}})
 	metadata := httptest.NewRecorder()
 	handler.ServeHTTP(metadata, httptest.NewRequest(http.MethodGet, "/library/metadata/42", nil))
 	if metadata.Code != http.StatusOK {
 		t.Fatalf("metadata status = %d", metadata.Code)
+	}
+	if observed, ok := cache.Get("123"); !ok || observed.RatingKey != "42" {
+		t.Fatalf("observed Part = %#v, found = %v", observed, ok)
 	}
 
 	playback := httptest.NewRecorder()
@@ -173,6 +177,63 @@ func TestMetadataObservationEnablesCloudPartRedirect(t *testing.T) {
 	snapshot := registry.Snapshot()
 	if snapshot.CloudPartHits != 1 || snapshot.RedirectSuccess != 1 || snapshot.PlexRequestsTotal != 1 {
 		t.Fatalf("metrics = %#v", snapshot)
+	}
+}
+
+func TestSuccessfulCloudRedirectEnqueuesCredentialFreePlaybackContext(t *testing.T) {
+	localRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localRoot, "Episode.strm"), []byte("http://public.invalid/redirect/pickcode\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://public.invalid/redirect/pickcode")
+		w.WriteHeader(http.StatusMovedPermanently)
+	}))
+	defer plex.Close()
+	mediaVault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://cdn.invalid/Episode.mkv")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer mediaVault.Close()
+	upstream, _ := url.Parse(plex.URL)
+	mapper, err := pathmap.New([]pathmap.Mapping{{PlexPrefix: "/media/cloud", LocalPrefix: localRoot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := resolver.NewMediaVaultSTRMResolver(mediaVault.URL, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := partcache.New(time.Hour)
+	cache.Put(partcache.PartInfo{
+		PartID: "123", RatingKey: "42", PlexFilePath: "/media/cloud/Episode.strm",
+		PartKey: "/library/parts/123/7/file",
+	})
+	events := make(chan prewarm.PlaybackContext, 1)
+	handler := New(Options{
+		Upstream: upstream, PartCache: cache, PathMapper: mapper, Resolver: control,
+		CloudExtensions: []string{".strm"}, MediaInfoPrewarmer: recordingPrewarmer{events: events},
+	})
+	request := httptest.NewRequest(http.MethodGet, "/library/parts/123/7/file?playQueueID=5&playQueueItemID=99&X-Plex-Token=client-secret", nil)
+	request.Header.Set("User-Agent", "Client-Test/1.0")
+	request.Header.Set("X-Plex-Client-Identifier", "client-device")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d", response.Code)
+	}
+	select {
+	case event := <-events:
+		want := prewarm.PlaybackContext{
+			RatingKey: "42", PartID: "123", Target: "http://public.invalid/redirect/pickcode",
+			WindowKey:   "X-Plex-Client-Identifier\x00client-device",
+			PlayQueueID: "5", PlayQueueItemID: "99", UserAgent: "Client-Test/1.0",
+		}
+		if event != want {
+			t.Fatalf("event = %#v, want %#v", event, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prewarm event was not enqueued")
 	}
 }
 
@@ -881,6 +942,15 @@ func newCloudHandler(t *testing.T, plexURL, mediaVaultURL string, mappings []pat
 
 type cancelingResolver struct {
 	cancel context.CancelFunc
+}
+
+type recordingPrewarmer struct {
+	events chan<- prewarm.PlaybackContext
+}
+
+func (prewarmer recordingPrewarmer) TryEnqueue(event prewarm.PlaybackContext) bool {
+	prewarmer.events <- event
+	return true
 }
 
 func (r cancelingResolver) ReadTarget(string) (string, error) {

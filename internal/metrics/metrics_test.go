@@ -38,6 +38,15 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.IncMediaInfoFailOpen()
 	registry.IncMediaInfoWaitActive()
 	registry.IncMediaInfoWaitRejected()
+	registry.IncMediaInfoPrewarmTriggered()
+	registry.IncMediaInfoPrewarmReplaced()
+	registry.IncMediaInfoPrewarmDiscoverySuccess()
+	registry.IncMediaInfoPrewarmDiscoveryFailure()
+	registry.IncMediaInfoPrewarmFreshCache()
+	registry.IncMediaInfoPrewarmJoinedFlight()
+	registry.IncMediaInfoPrewarmQueued()
+	registry.IncMediaInfoPrewarmRejected()
+	registry.IncMediaInfoPrewarmSkipped()
 	registry.ObserveMediaInfoProbeLatency(44 * time.Millisecond)
 	registry.ObserveResolverLatency(12 * time.Millisecond)
 	registry.ObserveResolverLatency(7 * time.Millisecond)
@@ -67,25 +76,34 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 		PlexFallbackTotal: 1,
 		ActiveRequests:    1,
 
-		MetadataGuardAdmittedTotal:      1,
-		MetadataGuardTimeoutsTotal:      1,
-		MetadataGuardActive:             1,
-		MetadataGuardQueued:             1,
-		MetadataBatchGuardAdmittedTotal: 1,
-		MetadataBatchGuardTimeoutsTotal: 1,
-		MetadataBatchGuardActive:        1,
-		MetadataBatchGuardQueued:        1,
-		MediaInfoCacheHitsTotal:         1,
-		MediaInfoCacheMissesTotal:       1,
-		MediaInfoProbeQueuedTotal:       1,
-		MediaInfoProbeSuccessTotal:      1,
-		MediaInfoProbeFailureTotal:      1,
-		MediaInfoStoreFailureTotal:      1,
-		MediaInfoProbeActive:            1,
-		MediaInfoEnrichedTotal:          1,
-		MediaInfoFailOpenTotal:          1,
-		MediaInfoWaitActive:             1,
-		MediaInfoWaitRejectedTotal:      1,
+		MetadataGuardAdmittedTotal:            1,
+		MetadataGuardTimeoutsTotal:            1,
+		MetadataGuardActive:                   1,
+		MetadataGuardQueued:                   1,
+		MetadataBatchGuardAdmittedTotal:       1,
+		MetadataBatchGuardTimeoutsTotal:       1,
+		MetadataBatchGuardActive:              1,
+		MetadataBatchGuardQueued:              1,
+		MediaInfoCacheHitsTotal:               1,
+		MediaInfoCacheMissesTotal:             1,
+		MediaInfoProbeQueuedTotal:             1,
+		MediaInfoProbeSuccessTotal:            1,
+		MediaInfoProbeFailureTotal:            1,
+		MediaInfoStoreFailureTotal:            1,
+		MediaInfoProbeActive:                  1,
+		MediaInfoEnrichedTotal:                1,
+		MediaInfoFailOpenTotal:                1,
+		MediaInfoWaitActive:                   1,
+		MediaInfoWaitRejectedTotal:            1,
+		MediaInfoPrewarmTriggeredTotal:        1,
+		MediaInfoPrewarmReplacedTotal:         1,
+		MediaInfoPrewarmDiscoverySuccessTotal: 1,
+		MediaInfoPrewarmDiscoveryFailureTotal: 1,
+		MediaInfoPrewarmFreshCacheTotal:       1,
+		MediaInfoPrewarmJoinedFlightTotal:     1,
+		MediaInfoPrewarmQueuedTotal:           1,
+		MediaInfoPrewarmRejectedTotal:         1,
+		MediaInfoPrewarmSkippedTotal:          1,
 
 		ResolverLatencyMSTotal: 19,
 		ResolverLatencySamples: 2,
@@ -217,6 +235,15 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 				registry.IncMediaInfoWaitActive()
 				registry.DecMediaInfoWaitActive()
 				registry.IncMediaInfoWaitRejected()
+				registry.IncMediaInfoPrewarmTriggered()
+				registry.IncMediaInfoPrewarmReplaced()
+				registry.IncMediaInfoPrewarmDiscoverySuccess()
+				registry.IncMediaInfoPrewarmDiscoveryFailure()
+				registry.IncMediaInfoPrewarmFreshCache()
+				registry.IncMediaInfoPrewarmJoinedFlight()
+				registry.IncMediaInfoPrewarmQueued()
+				registry.IncMediaInfoPrewarmRejected()
+				registry.IncMediaInfoPrewarmSkipped()
 				registry.ObserveMediaInfoProbeLatency(3 * time.Millisecond)
 				registry.ObserveResolverLatency(time.Millisecond)
 				registry.ObserveRedirectLatency(2 * time.Millisecond)
@@ -238,6 +265,10 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 		got.MediaInfoProbeQueuedTotal != want || got.MediaInfoProbeSuccessTotal != want ||
 		got.MediaInfoProbeFailureTotal != want || got.MediaInfoStoreFailureTotal != want || got.MediaInfoProbeActive != 0 ||
 		got.MediaInfoEnrichedTotal != want || got.MediaInfoFailOpenTotal != want || got.MediaInfoWaitActive != 0 || got.MediaInfoWaitRejectedTotal != want ||
+		got.MediaInfoPrewarmTriggeredTotal != want || got.MediaInfoPrewarmReplacedTotal != want ||
+		got.MediaInfoPrewarmDiscoverySuccessTotal != want || got.MediaInfoPrewarmDiscoveryFailureTotal != want ||
+		got.MediaInfoPrewarmFreshCacheTotal != want || got.MediaInfoPrewarmJoinedFlightTotal != want ||
+		got.MediaInfoPrewarmQueuedTotal != want || got.MediaInfoPrewarmRejectedTotal != want || got.MediaInfoPrewarmSkippedTotal != want ||
 		got.ResolverLatencySamples != want || got.ResolverLatencyMSTotal != want ||
 		got.RedirectLatencySamples != want || got.RedirectLatencyMSTotal != 2*want ||
 		got.MediaInfoProbeLatencySamples != want || got.MediaInfoProbeLatencyMSTotal != 3*want {

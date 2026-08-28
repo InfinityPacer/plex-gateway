@@ -16,6 +16,8 @@ import (
 
 	"github.com/InfinityPacer/plex-gateway/internal/config"
 	"github.com/InfinityPacer/plex-gateway/internal/metrics"
+	"github.com/InfinityPacer/plex-gateway/internal/pathmap"
+	"github.com/InfinityPacer/plex-gateway/internal/playback"
 	"github.com/InfinityPacer/plex-gateway/internal/resolver"
 )
 
@@ -36,15 +38,23 @@ func (control *countingControlResolver) ResolveTarget(context.Context, string, r
 func TestInitializeMediaInfoDoesNotProbeWithoutTask(t *testing.T) {
 	unexpectedPlexPath := make(chan string, 1)
 	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/identity" {
+		switch r.URL.Path {
+		case "/identity":
+			_, _ = io.WriteString(w, `<MediaContainer machineIdentifier="test-server"/>`)
+		case "/library/sections":
+			if r.Header.Get("X-Plex-Token") != "management-token" {
+				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"MediaContainer":{"Metadata":[]}}`)
+		default:
 			select {
 			case unexpectedPlexPath <- r.URL.Path:
 			default:
 			}
 			http.NotFound(w, r)
-			return
 		}
-		_, _ = io.WriteString(w, `<MediaContainer machineIdentifier="test-server"/>`)
 	}))
 	defer plex.Close()
 	plexURL, err := url.Parse(plex.URL)
@@ -94,5 +104,31 @@ func TestInitializeMediaInfoDoesNotProbeWithoutTask(t *testing.T) {
 	if _, err := os.Stat(ffprobePath + ".called"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ffprobe process unexpectedly started: %v", err)
 	}
-	closeRuntime(service, databaseStore, time.Second, logger)
+	mapper, err := pathmap.New([]pathmap.Mapping{{PlexPrefix: "/media/cloud", LocalPrefix: directory}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partPreparer := playback.NewPartPreparer(mapper, control, []string{".strm"})
+	invalidTokenService, reason := initializePrewarm(
+		t.Context(), "invalid-token", plexURL, time.Second, partPreparer, service,
+		2, 3, time.Millisecond, metrics.New(), logger,
+	)
+	if invalidTokenService == nil || reason != "current_only_plex_token_invalid" ||
+		!invalidTokenService.Status().Available || invalidTokenService.Status().NeighborAvailable {
+		t.Fatalf("invalid token prewarm service=%v reason=%q status=%#v", invalidTokenService != nil, reason, invalidTokenService.Status())
+	}
+	closeContext, closeCancel := context.WithTimeout(t.Context(), time.Second)
+	if err := invalidTokenService.Close(closeContext); err != nil {
+		closeCancel()
+		t.Fatal(err)
+	}
+	closeCancel()
+	prewarmService, reason := initializePrewarm(
+		t.Context(), "management-token", plexURL, time.Second, partPreparer, service,
+		2, 3, time.Millisecond, metrics.New(), logger,
+	)
+	if prewarmService == nil || reason != "ready" || !prewarmService.Status().Available {
+		t.Fatalf("prewarm service=%v reason=%q", prewarmService != nil, reason)
+	}
+	closeRuntime(prewarmService, service, databaseStore, time.Second, logger)
 }

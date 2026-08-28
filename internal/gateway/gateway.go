@@ -18,6 +18,7 @@ import (
 	"github.com/InfinityPacer/plex-gateway/internal/partcache"
 	"github.com/InfinityPacer/plex-gateway/internal/pathmap"
 	"github.com/InfinityPacer/plex-gateway/internal/playback"
+	"github.com/InfinityPacer/plex-gateway/internal/prewarm"
 	"github.com/InfinityPacer/plex-gateway/internal/resolver"
 	"github.com/InfinityPacer/plex-gateway/internal/trace"
 )
@@ -44,6 +45,12 @@ type Options struct {
 	MediaInfoColdWait              time.Duration
 	MediaInfoResponseMaxBytes      int64
 	MediaInfoEnrichmentConcurrency int
+	MediaInfoPrewarmer             cloudRedirectPrewarmer
+	MediaInfoPrewarmStatus         func() prewarm.Status
+}
+
+type cloudRedirectPrewarmer interface {
+	TryEnqueue(prewarm.PlaybackContext) bool
 }
 
 // New builds the fail-open Plex proxy and optional Direct Play interceptor.
@@ -75,9 +82,10 @@ func New(options Options) http.Handler {
 			},
 			MaxBodyBytes: options.ObserveMaxBytes,
 			OnParts: func(observation observe.Observation) {
+				ratingKey := observedRatingKey(observation.Request)
 				for _, part := range observation.Parts {
 					if cloudPlayback != nil {
-						cloudPlayback.Remember(playback.PreparedPart{Part: part})
+						cloudPlayback.Remember(playback.PreparedPart{Part: part, RatingKey: ratingKey})
 					}
 				}
 			},
@@ -126,10 +134,11 @@ func New(options Options) http.Handler {
 		CloudExtensions: options.CloudExtensions,
 	})
 	partPlayback := &playbackHandler{
-		service: cloudPlayback,
-		plex:    plex,
-		logger:  logger,
-		metrics: registry,
+		service:   cloudPlayback,
+		plex:      plex,
+		logger:    logger,
+		metrics:   registry,
+		prewarmer: options.MediaInfoPrewarmer,
 	}
 	decision := &decisionHandler{
 		plex:    plex,
@@ -153,8 +162,12 @@ func New(options Options) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		status := mediainfo.Status{}
+		prewarmStatus := prewarm.Status{}
 		if options.MediaInfoStatus != nil {
 			status = options.MediaInfoStatus()
+		}
+		if options.MediaInfoPrewarmStatus != nil {
+			prewarmStatus = options.MediaInfoPrewarmStatus()
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -163,13 +176,15 @@ func New(options Options) http.Handler {
 			MediaInfo struct {
 				Enabled bool `json:"enabled"`
 				mediainfo.Status
+				Prewarm prewarm.Status `json:"prewarm"`
 			} `json:"mediainfo"`
 		}{
 			Status: "ok",
 			MediaInfo: struct {
 				Enabled bool `json:"enabled"`
 				mediainfo.Status
-			}{Enabled: options.MediaInfoEnabled, Status: status},
+				Prewarm prewarm.Status `json:"prewarm"`
+			}{Enabled: options.MediaInfoEnabled, Status: status, Prewarm: prewarmStatus},
 		})
 	})
 	mux.Handle("GET /metrics", registry.Handler())
@@ -203,10 +218,11 @@ func New(options Options) http.Handler {
 }
 
 type playbackHandler struct {
-	service *playback.Service
-	plex    http.Handler
-	logger  *slog.Logger
-	metrics *metrics.Metrics
+	service   *playback.Service
+	plex      http.Handler
+	logger    *slog.Logger
+	metrics   *metrics.Metrics
+	prewarmer cloudRedirectPrewarmer
 }
 
 func (h *playbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -279,7 +295,7 @@ func (h *playbackHandler) servePrepared(
 		return
 	}
 	h.metrics.ObserveResolverLatency(result.ResolverLatency)
-	h.redirect(w, part.Part.ID, result.DirectURL, started, source)
+	h.redirect(w, r, part, result.DirectURL, started, source)
 }
 
 // requestCanceled separates downstream disconnects from failures in Plex or
@@ -297,20 +313,68 @@ func requestFinished(r *http.Request) bool {
 	return r != nil && r.Context().Err() != nil
 }
 
-func (h *playbackHandler) redirect(w http.ResponseWriter, partID string, directURL resolver.DirectURL, started time.Time, source string) {
+func (h *playbackHandler) redirect(w http.ResponseWriter, request *http.Request, part playback.PreparedPart, directURL resolver.DirectURL, started time.Time, source string) {
 	latency := time.Since(started)
 	h.metrics.IncRedirectSuccess()
 	h.metrics.ObserveRedirectLatency(latency)
 	w.Header().Set("Location", directURL.String())
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusFound)
+	if h.prewarmer != nil {
+		h.prewarmer.TryEnqueue(prewarm.PlaybackContext{
+			RatingKey: part.RatingKey, PartID: part.Part.ID, Target: part.Target,
+			WindowKey:       playbackWindowKey(request),
+			PlayQueueID:     playbackRequestValue(request, "playQueueID"),
+			PlayQueueItemID: playbackRequestValue(request, "playQueueItemID"),
+			UserAgent:       request.UserAgent(),
+		})
+	}
 	h.logger.Info("play",
-		"part", partID,
+		"part", part.Part.ID,
 		"source", source,
 		"resolver", "mediavault",
 		"result", http.StatusFound,
 		"latency_ms", latency.Milliseconds(),
 	)
+}
+
+func observedRatingKey(request *http.Request) string {
+	if request == nil || request.URL == nil || !isMetadataItemPath(request.URL.Path) {
+		return ""
+	}
+	return strings.TrimPrefix(request.URL.Path, "/library/metadata/")
+}
+
+func playbackRequestValue(request *http.Request, name string) string {
+	if request == nil || request.URL == nil {
+		return ""
+	}
+	value, ok := singleQueryValue(request.URL.Query(), name)
+	if !ok {
+		return ""
+	}
+	return value
+}
+
+// playbackWindowKey chooses a stable non-credential client identity so rapid
+// item changes replace only that client's speculative window. Ambiguous values
+// are ignored and the coordinator assigns an isolated anonymous window.
+func playbackWindowKey(request *http.Request) string {
+	if request == nil || request.URL == nil {
+		return ""
+	}
+	for _, name := range []string{
+		"X-Plex-Client-Identifier",
+		"X-Plex-Session-Identifier",
+		"X-Plex-Session-Id",
+		"X-Plex-Playback-Session-Id",
+	} {
+		value, present, valid := requestIdentity(request, name)
+		if valid && present {
+			return name + "\x00" + value
+		}
+	}
+	return ""
 }
 
 func (h *playbackHandler) fallback(w http.ResponseWriter, r *http.Request, partID, reason string) {

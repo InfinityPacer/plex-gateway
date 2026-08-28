@@ -70,20 +70,23 @@ manifest segments, and every genuine transcode request remain Plex-owned.
 
 ## MediaInfo Phase D
 
-MediaInfo is not an active dependency of redirect playback. The production Plex
-snapshot currently exposes STRM Parts without container, codec, resolution, or
-stream elements; the current playback plane does not synthesize those fields.
+MediaInfo is not a dependency of redirect playback. Eligible single-item
+metadata responses can now be enriched from the fail-open L1 and SQLite cache;
+missing, slow, or failed probes preserve the original Plex response and do not
+change the 302 path.
 
 MediaInfo remains isolated from redirect playback. Phase D prioritizes the
 Gateway fallback while preserving the broader lifecycle design:
 
 1. use L1 and SQLite for single-instance fallback storage;
 2. accept optional `PLEX_TOKEN` from an ignored deployment `app.env` for
-   discovery and prewarming;
+   nearby-item discovery; current-item prewarming remains token-independent;
 3. evaluate bounded remote `ffprobe`, with an initial `5s` cold metadata wait
    ceiling based on the current sample;
-4. support exact single-Part analysis and one-step next-episode prefetch after
-   confirmed playback without blocking decision, Part, universal start, or 302;
+4. support exact current-Part analysis and a configurable nearby-item window
+   after a cloud redirect is ready, with immediate current-item submission and
+   rate-limited background neighbors, without blocking decision, Part,
+   universal start, or 302;
    defer season, show, and configured STRM-root batch tasks;
 5. enrich authorized Plex metadata responses first, then evaluate an official
    Plex API, other supported PMS interfaces, and an isolated database helper
