@@ -101,6 +101,25 @@ func TestParseFFProbePreservesPlexRelevantFields(t *testing.T) {
 	}
 }
 
+func TestParseFFProbeInfersBitDepthFromPixelFormat(t *testing.T) {
+	body := []byte(`{
+  "streams": [
+    {"index":0,"codec_name":"hevc","codec_type":"video","width":3840,"height":2160,"pix_fmt":"yuv420p10le"},
+    {"index":1,"codec_name":"hevc","codec_type":"video","width":1920,"height":1080,"pix_fmt":"p010le"},
+    {"index":2,"codec_name":"h264","codec_type":"video","width":1280,"height":720,"pix_fmt":"yuv420p"}
+  ],
+  "format":{"format_name":"matroska","duration":"60"}
+}`)
+
+	media, err := parseFFProbe(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(media.Streams) != 3 || media.Streams[0].BitDepth != 10 || media.Streams[1].BitDepth != 10 || media.Streams[2].BitDepth != 8 {
+		t.Fatalf("inferred bit depths = %#v", media.Streams)
+	}
+}
+
 func TestParseFFProbeRejectsIncompleteVideo(t *testing.T) {
 	_, err := parseFFProbe([]byte(`{
       "streams":[{"index":0,"codec_type":"video","codec_name":"hevc"}],

@@ -21,9 +21,13 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
 - Successful XML or JSON Plex responses are observed to populate the in-memory
   `Part.id` cache without changing their bytes. When MediaInfo is available, an
   authenticated single-item metadata response may also fill missing whitelisted
-  technical fields from the exact STRM fingerprint. The transform is bounded,
-  never creates Stream identities, and preserves the original Plex response on
-  timeout, ambiguity, unsupported encoding, or any other failure.
+  technical fields from the exact STRM fingerprint. A Part with no Stream
+  elements may receive descriptive Streams identified only by ffprobe stream
+  type and source index. The gateway never invents Plex Stream IDs or playback
+  selection state, and an existing Stream set is never expanded. The transform
+  is bounded and preserves the original Plex response on timeout, ambiguity,
+  unsupported encoding, or any other failure. Background library crawlers
+  identified by `skipRefresh` and a `-Library` product consume cache only.
 - `GET` and `HEAD` requests below `/library/parts/{partID}/...` are eligible for
   interception only when the cached `Part.file` has a configured cloud
   extension and maps to a readable local STRM file.
@@ -175,6 +179,8 @@ mount its private cache, or duplicate those features in the playback plane.
 
 MediaInfo Phase D begins with a provider boundary, L1 and SQLite persistence,
 bounded remote probing, proactive prewarming, and metadata response enrichment.
+A provider revision separates records whenever normalized probe semantics
+change, preventing an old interpretation from being projected after an upgrade.
 A stable MediaVault or MoviePilot provider can replace remote probing without
 changing playback. Plex persistence remains a feasibility question across an
 official API, another supported PMS interface, and an isolated database helper.

@@ -26,9 +26,19 @@ import (
 
 type fakeMediaInfoEnsurer struct {
 	calls atomic.Int64
+	gets  atomic.Int64
 	mu    sync.Mutex
 	seen  []mediainfo.Request
+	getFn func(mediainfo.Key) (mediainfo.Record, bool)
 	fn    func(context.Context, mediainfo.Request) (mediainfo.Record, error)
+}
+
+func (ensurer *fakeMediaInfoEnsurer) Get(key mediainfo.Key) (mediainfo.Record, bool) {
+	ensurer.gets.Add(1)
+	if ensurer.getFn == nil {
+		return mediainfo.Record{}, false
+	}
+	return ensurer.getFn(key)
 }
 
 func (ensurer *fakeMediaInfoEnsurer) Ensure(ctx context.Context, request mediainfo.Request) (mediainfo.Record, error) {
@@ -115,6 +125,71 @@ func TestMetadataEnrichmentPreservesGzipJSON(t *testing.T) {
 	}
 	if !bytes.Contains(decoded, []byte(`"container":"mkv"`)) || !bytes.Contains(decoded, []byte(`"codec":"hevc"`)) {
 		t.Fatalf("enriched JSON missing expected fields: %s", decoded)
+	}
+}
+
+func TestMetadataEnrichmentKeepsBackgroundLibrarySyncCacheOnly(t *testing.T) {
+	fixture := newMetadataEnrichmentFixture(t)
+	raw := fixture.xmlBody()
+	ensurer := &fakeMediaInfoEnsurer{fn: func(context.Context, mediainfo.Request) (mediainfo.Record, error) {
+		t.Fatal("background library sync must not admit a cold probe")
+		return mediainfo.Record{}, nil
+	}}
+	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(raw, "application/xml"))
+	request := authenticatedRequest(http.MethodGet, "/library/metadata/42?skipRefresh=1")
+	request.Header.Set("X-Plex-Product", "Infuse-Library")
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), raw) {
+		t.Fatalf("response = %d %q", response.Code, response.Body.Bytes())
+	}
+	if ensurer.gets.Load() != 1 || ensurer.calls.Load() != 0 {
+		t.Fatalf("Get calls = %d, Ensure calls = %d", ensurer.gets.Load(), ensurer.calls.Load())
+	}
+}
+
+func TestMetadataEnrichmentUsesCachedRecordForBackgroundLibrarySync(t *testing.T) {
+	fixture := newMetadataEnrichmentFixture(t)
+	ensurer := &fakeMediaInfoEnsurer{getFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
+		return mediainfo.Record{Key: key, Media: completeProjectionMedia()}, true
+	}}
+	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(fixture.xmlBody(), "application/xml"))
+	request := authenticatedRequest(http.MethodGet, "/library/metadata/42?skipRefresh=1")
+	request.Header.Set("X-Plex-Product", "Infuse-Library")
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `container="mkv"`) {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	if ensurer.gets.Load() != 1 || ensurer.calls.Load() != 0 {
+		t.Fatalf("Get calls = %d, Ensure calls = %d", ensurer.gets.Load(), ensurer.calls.Load())
+	}
+}
+
+func TestMediaInfoCacheOnlyRequestRequiresLibraryProductAndSkipRefresh(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		product string
+		want    bool
+	}{
+		{name: "background library sync", path: "/library/metadata/42?skipRefresh=1", product: "Infuse-Library", want: true},
+		{name: "case insensitive product", path: "/library/metadata/42?skipRefresh=1", product: "INFUSE-LIBRARY", want: true},
+		{name: "interactive library request", path: "/library/metadata/42", product: "Infuse-Library", want: false},
+		{name: "ordinary client with skip refresh", path: "/library/metadata/42?skipRefresh=1", product: "Plex for iOS", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			request.Header.Set("X-Plex-Product", test.product)
+			if got := mediaInfoCacheOnlyRequest(request); got != test.want {
+				t.Fatalf("mediaInfoCacheOnlyRequest() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -254,6 +329,58 @@ func TestMetadataEnrichmentBypassesIneligibleAndUnbufferableResponses(t *testing
 	}
 }
 
+func TestMetadataEnrichmentAdmitsExistingStreamHDRAndSTRMControlSize(t *testing.T) {
+	fixture := newMetadataEnrichmentFixture(t)
+	media := completeProjectionMedia()
+	media.Size = 987654321
+	media.Bitrate = 29430119
+	media.Streams[0] = mediainfo.Stream{
+		Index: 0, Type: "video", Codec: "hevc", Profile: "Main 10", Bitrate: 27510000,
+		Width: 3840, Height: 2160, FrameRate: "24000/1001", PixelFormat: "yuv420p10le", BitDepth: 10,
+		ColorSpace: "bt2020nc", ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084",
+		HDRFormat: "dolby_vision",
+		DolbyVision: &mediainfo.DolbyVision{
+			VersionMajor: 1, Profile: 7, Level: 6, RPUPresent: 1,
+			ELPresent: 1, BLPresent: 1, BLCompatID: 6,
+		},
+	}
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+		want        [][]byte
+	}{
+		{
+			name: "XML", contentType: "application/xml",
+			body: []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="16:9" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="23.976" videoProfile="Main 10" audioProfile="LC"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="301" container="mkv" videoProfile="Main 10" audioProfile="LC"><Stream id="101" streamType="1" index="0" codec="hevc" profile="Main 10" level="153" bitrate="8000" languageCode="eng" title="Video" width="3840" height="2160" frameRate="23.976" refFrames="4" pixelFormat="yuv420p10le" bitDepth="10" colorSpace="bt2020nc" colorRange="tv" colorPrimaries="bt2020" colorTrc="smpte2084" chromaLocation="left" sampleAspectRatio="1:1" displayAspectRatio="16:9"/></Part></Media></Video></MediaContainer>`),
+			want: [][]byte{[]byte(`size="987654321"`), []byte(`displayTitle="4K DoVi/HDR10"`), []byte(`DOVIPresent="1"`)},
+		},
+		{
+			name: "JSON", contentType: "application/json",
+			body: []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":60000,"bitrate":8000,"width":3840,"height":2160,"aspectRatio":"16:9","audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"23.976","videoProfile":"Main 10","audioProfile":"LC","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":60000,"size":301,"container":"mkv","videoProfile":"Main 10","audioProfile":"LC","Stream":[{"id":101,"streamType":1,"index":0,"codec":"hevc","profile":"Main 10","level":153,"bitrate":8000,"languageCode":"eng","title":"Video","width":3840,"height":2160,"frameRate":23.976,"refFrames":4,"pixelFormat":"yuv420p10le","bitDepth":10,"colorSpace":"bt2020nc","colorRange":"tv","colorPrimaries":"bt2020","colorTrc":"smpte2084","chromaLocation":"left","sampleAspectRatio":"1:1","displayAspectRatio":"16:9"}]}]}]}]}}`),
+			want: [][]byte{[]byte(`"size":987654321`), []byte(`"displayTitle":"4K DoVi/HDR10"`), []byte(`"DOVIPresent":true`)},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
+				return mediainfo.Record{Key: request.Key, Media: media}, nil
+			}}
+			handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(test.body, test.contentType))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, authenticatedMetadataRequest(http.MethodGet))
+			if ensurer.calls.Load() != 1 {
+				t.Fatalf("Ensure calls = %d", ensurer.calls.Load())
+			}
+			for _, expected := range test.want {
+				if !bytes.Contains(response.Body.Bytes(), expected) {
+					t.Fatalf("response missing %q: %s", expected, response.Body.Bytes())
+				}
+			}
+		})
+	}
+}
+
 func TestMetadataEnrichmentSkipsLocalAndCompleteCloudParts(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
 	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, _ mediainfo.Request) (mediainfo.Record, error) {
@@ -269,7 +396,7 @@ func TestMetadataEnrichmentSkipsLocalAndCompleteCloudParts(t *testing.T) {
 		},
 		{
 			name: "complete cloud Part",
-			body: []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="16:9" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="23.976" videoProfile="Main 10" audioProfile="LC"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="1000000" container="mkv" videoProfile="Main 10" audioProfile="LC"><Stream id="101" streamType="1" index="0" codec="hevc" profile="Main 10" level="153" bitrate="8000" language="eng" title="Video" width="3840" height="2160" frameRate="23.976" refFrames="4" pixelFormat="yuv420p10le" bitDepth="10" colorSpace="bt2020nc" colorRange="tv" colorPrimaries="bt2020" colorTrc="smpte2084" chromaLocation="left" sampleAspectRatio="1:1" displayAspectRatio="16:9"/></Part></Media></Video></MediaContainer>`),
+			body: []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="16:9" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="23.976" videoProfile="Main 10" audioProfile="LC"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="2000000" container="mkv" videoProfile="Main 10" audioProfile="LC"><Stream id="101" streamType="1" index="0" codec="hevc" profile="Main 10" level="153" bitrate="8000" language="eng" title="Video" width="3840" height="2160" frameRate="23.976" refFrames="4" pixelFormat="yuv420p10le" bitDepth="10" colorSpace="bt2020nc" colorRange="tv" colorPrimaries="bt2020" colorTrc="smpte2084" chromaLocation="left" sampleAspectRatio="1:1" displayAspectRatio="16:9" displayTitle="4K HDR10" extendedDisplayTitle="4K HDR10 (HEVC Main 10)"/></Part></Media></Video></MediaContainer>`),
 		},
 	}
 	for _, test := range tests {

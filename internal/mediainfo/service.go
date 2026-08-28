@@ -306,15 +306,21 @@ func NewService(options ServiceOptions) (*Service, error) {
 	return service, nil
 }
 
-// Get returns one exact fresh L1 record and renews its retention asynchronously.
+// Get returns one exact retained record from L1 or the durable store without
+// scheduling analysis or revalidation. Cache-only consumers can therefore use
+// known-good stale data without turning enumeration into remote probe work.
 func (service *Service) Get(key Key) (Record, bool) {
 	if service == nil {
 		return Record{}, false
 	}
-	now := service.now().UTC()
-	record, ok := service.cache.Get(key, now)
+	if strings.TrimSpace(key.PlexServerID) == "" {
+		key.PlexServerID = service.plexServerID
+	}
+	if key.PlexServerID != service.plexServerID {
+		return Record{}, false
+	}
+	record, ok, _ := service.lookup(service.ctx, key)
 	if ok {
-		record = service.touchCached(record, now)
 		service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoCacheHits() })
 	} else {
 		service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoCacheMisses() })

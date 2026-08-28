@@ -90,7 +90,10 @@ Gateway fallback while preserving the broader lifecycle design:
    defer season, show, and configured STRM-root batch tasks;
 5. enrich authorized Plex metadata responses first, then evaluate an official
    Plex API, other supported PMS interfaces, and an isolated database helper
-   without selecting a persistence path in advance;
+   without selecting a persistence path in advance. Parts without Plex Streams
+   may receive descriptive ffprobe-indexed Streams, while existing Stream sets
+   are never expanded and Plex IDs or playback-selection state are never
+   synthesized. Background `-Library` synchronization remains cache-only;
 6. add Redis or replace SQLite with PostgreSQL only after measured
    multi-instance or capacity requirements exist.
 

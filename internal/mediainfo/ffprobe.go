@@ -333,6 +333,9 @@ func normalizeStream(raw ffprobeStream) Stream {
 	if raw.BitsPerRawSample.integer() > int64(bitDepth) {
 		bitDepth = int(raw.BitsPerRawSample.integer())
 	}
+	if bitDepth == 0 {
+		bitDepth = pixelFormatBitDepth(raw.PixelFormat)
+	}
 	stream := Stream{
 		Index:              raw.Index,
 		Type:               strings.ToLower(raw.CodecType),
@@ -376,6 +379,60 @@ func normalizeStream(raw ffprobeStream) Stream {
 	stream.Atmos = strings.Contains(searchableAudio, "atmos")
 	stream.DTSX = strings.Contains(searchableAudio, "dts:x") || strings.Contains(searchableAudio, "dts-x")
 	return stream
+}
+
+// pixelFormatBitDepth recovers the nominal component depth from common
+// ffmpeg pixel-format spellings when ffprobe omits both bits_per_sample and
+// bits_per_raw_sample. It intentionally returns zero for ambiguous formats.
+func pixelFormatBitDepth(value string) int {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return 0
+	}
+	if strings.HasPrefix(value, "gray") {
+		if depth := pixelFormatDigits(value[len("gray"):]); depth > 0 {
+			return depth
+		}
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] != 'p' {
+			continue
+		}
+		if index+1 == len(value) {
+			if strings.HasPrefix(value, "yuv") || strings.HasPrefix(value, "gbr") || strings.HasPrefix(value, "rgb") {
+				return 8
+			}
+			continue
+		}
+		if value[index+1] == '0' && index+3 < len(value) && isASCIIDigit(value[index+2]) && isASCIIDigit(value[index+3]) {
+			if depth := pixelFormatDigits(value[index+1 : index+4]); depth > 0 {
+				return depth
+			}
+		}
+		if depth := pixelFormatDigits(value[index+1:]); depth > 0 {
+			return depth
+		}
+	}
+	return 0
+}
+
+func pixelFormatDigits(value string) int {
+	end := 0
+	for end < len(value) && isASCIIDigit(value[end]) {
+		end++
+	}
+	if end == 0 {
+		return 0
+	}
+	depth, err := strconv.Atoi(value[:end])
+	if err != nil || depth < 8 || depth > 32 {
+		return 0
+	}
+	return depth
+}
+
+func isASCIIDigit(value byte) bool {
+	return value >= '0' && value <= '9'
 }
 
 func normalizeDisposition(raw ffprobeDisposition) Disposition {
@@ -436,7 +493,7 @@ func hdrFormat(stream Stream) string {
 }
 
 func applyMediaSummary(media *Media, stream Stream) {
-	if media == nil {
+	if media == nil || !primaryStream(stream) {
 		return
 	}
 	switch stream.Type {
@@ -465,6 +522,9 @@ func mediaComplete(media Media) bool {
 	}
 	mediaStreams := 0
 	for _, stream := range media.Streams {
+		if !primaryStream(stream) {
+			continue
+		}
 		switch stream.Type {
 		case "video":
 			mediaStreams++
@@ -483,6 +543,18 @@ func mediaComplete(media Media) bool {
 		}
 	}
 	return mediaStreams > 0
+}
+
+func primaryStream(stream Stream) bool {
+	if stream.Disposition.AttachedPicture {
+		return false
+	}
+	switch stream.Type {
+	case "video", "audio", "subtitle":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeContainer(formatName string) string {

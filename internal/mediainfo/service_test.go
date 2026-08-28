@@ -56,7 +56,7 @@ type fakeProvider struct {
 }
 
 func (*fakeProvider) Descriptor() ProviderDescriptor {
-	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV1}
+	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV2}
 }
 
 func (fake *fakeProvider) Probe(ctx context.Context, request ProviderRequest) (ProviderResult, error) {
@@ -323,8 +323,36 @@ func TestServiceReprobesIncompatibleProviderRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ProviderRevision != ProviderRevisionFFProbeJSONV1 || provider.calls.Load() != 1 {
+	if got.ProviderRevision != ProviderRevisionFFProbeJSONV2 || provider.calls.Load() != 1 {
 		t.Fatalf("Ensure() revision=%q provider_calls=%d", got.ProviderRevision, provider.calls.Load())
+	}
+}
+
+func TestServiceGetNormalizesPlexServerIdentity(t *testing.T) {
+	now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+	record := completeRecord(now.Add(-31 * 24 * time.Hour))
+	record.Key.PlexServerID = "server"
+	store := &fakeRecordStore{records: map[string]Record{record.Key.cacheKey(): record}}
+	provider := &fakeProvider{prober: &blockingProber{}}
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache(nil, now), Store: store,
+		Provider:     provider,
+		PlexServerID: "server", Now: func() time.Time { return now },
+	})
+
+	key := record.Key
+	key.PlexServerID = ""
+	got, found := service.Get(key)
+	if !found || got.Key != record.Key || got.Fresh(now) {
+		t.Fatalf("Get() found=%v key=%#v, want %#v", found, got.Key, record.Key)
+	}
+	if provider.calls.Load() != 0 {
+		t.Fatalf("cache-only Get scheduled %d provider calls", provider.calls.Load())
+	}
+
+	key.PlexServerID = "other-server"
+	if _, found := service.Get(key); found {
+		t.Fatal("Get() returned a record for another Plex server")
 	}
 }
 

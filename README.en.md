@@ -148,6 +148,26 @@ through Plex. The gateway does not need a Plex username or password, and
 playback does not depend on the management token. MediaVault's API key for `/api/v1` integrations is also not required for
 the STRM `/redirect` playback contract.
 
+### MediaInfo response enrichment
+
+For an authenticated single-item STRM metadata request, the gateway can fill
+missing Media, Part, and Stream technical fields from its L1 or SQLite record.
+When a Plex Part has no Stream elements, ffprobe stream types and source indexes
+are used to create descriptive video, audio, and subtitle Streams with fields
+such as HDR10, Dolby Vision, bit depth, codec, bitrate, channel layout, and
+language code. Generated Streams never contain Plex Stream IDs or playback
+selection fields such as `selected`, `default`, or `decision`. When Plex already
+has Streams, only missing fields on identity-matched Streams are filled. Missing
+sibling Streams are not created and existing Plex values are not overwritten.
+
+Background library synchronization can enumerate an entire library one item at
+a time. Requests with `skipRefresh` whose product ends in `-Library` may consume
+an existing MediaInfo cache record but never admit a cold probe. Ordinary
+single-item access, a successful cloud 302, and the nearby window retain their
+bounded probe behavior, so browsing a library cannot expand into full-library
+CDN ffprobe work. Any cache miss, timeout, unsupported structure, or projection
+failure returns the original Plex response.
+
 ### Nearby-item MediaInfo prewarming
 
 The gateway performs one bounded in-memory enqueue only after Plex has

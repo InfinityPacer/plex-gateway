@@ -17,6 +17,10 @@
   的窗口限速预热邻近媒体。Token 缺失或失效只禁用邻近发现。
 - 增加按客户端隔离的快速切换协调、跨 User-Agent 失败接力，以及缓存命中、加入现有
   任务、新入队和拒绝的预热指标。
+- 为没有 Stream 的 STRM Part 创建不含 Plex ID 或播放选择状态的描述性视频、音频和
+  字幕 Stream，并补充 HDR10、Dolby Vision、bit depth、bitrate、声道和语言等字段。
+- Infuse 风格的后台媒体库同步只读取现有 MediaInfo 缓存，不再因逐项浏览触发全库冷探测。
+- MediaInfo ffprobe 记录升级到新的 Provider revision，旧解释版本的缓存不会被复用。
 
 ## [0.1.1] - 2026-08-28
 

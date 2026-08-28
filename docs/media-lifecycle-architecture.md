@@ -564,9 +564,14 @@ Gateway response enrichment 先用于验证 Plex 字段映射和客户端消费�
 打开 Plex 数据库。如果不启用 helper，Gateway 仍需保留 metadata 请求准入、缓存与
 熔断，并可在已确认的 STRM 项目上做客户端响应 enrichment。
 
-response enrichment 只修改当前已认证 Plex response 中已经存在的精确 Media 和 Part，
-Plex 已有字段不覆盖。首版只处理成功的单项 `GET /library/metadata/{ratingKey}`；XML、
-JSON、gzip、body 大小或结构不支持，以及转换失败时，都必须原样返回 Plex response。
+response enrichment 只修改当前已认证 Plex response 中的精确 Media 和 Part，Plex 已有
+字段不覆盖。Part 完全没有 Stream 时，可以按 ffprobe 的流类型和源索引创建描述性
+Stream，但不生成 Plex Stream ID、`selected`、`default`、`decision` 等播放选择状态。
+Plex 已有 Stream 时只补充身份匹配项的缺失字段，不创建缺少的其他流。首版只处理成功的
+单项 `GET /library/metadata/{ratingKey}`；XML、JSON、gzip、body 大小或结构不支持，以及
+转换失败时，都必须原样返回 Plex response。带 `skipRefresh` 且产品名以 `-Library`
+结尾的后台媒体库同步只消费现有缓存，不准入冷探测，避免一次媒体库同步扩散为全库 CDN
+ffprobe。
 修改成功后同步更新 Content-Length，并移除失效的 ETag、Content-MD5 或 Digest。HDR 和
 Dolby Vision 映射必须使用同一片源的本地文件与 STRM Plex response 建立 fixture，不能
 仅按 ffprobe 字段名猜测。

@@ -170,7 +170,7 @@ func TestSQLiteStoreLoadsMostRecentlyAccessedWithinLimit(t *testing.T) {
 }
 
 func testProviderDescriptor() ProviderDescriptor {
-	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV1}
+	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV2}
 }
 
 func TestSQLiteStoreDoesNotRestoreOtherProviderRevision(t *testing.T) {
@@ -181,7 +181,7 @@ func TestSQLiteStoreDoesNotRestoreOtherProviderRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := store.LoadCompatibleRetained(t.Context(), now, 100, ProviderDescriptor{
-		Name: ProviderMediaVaultFFProbe, Revision: "ffprobe-json-v2",
+		Name: ProviderMediaVaultFFProbe, Revision: "ffprobe-json-v1",
 	})
 	if err != nil {
 		t.Fatal(err)

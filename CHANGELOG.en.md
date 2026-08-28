@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added per-client rapid-switch coordination, cross-User-Agent failure handoff,
   and distinct prewarm metrics for fresh cache hits, joined work, new queue
   admissions, and rejections.
+- Parts without Plex Streams now receive descriptive video, audio, and subtitle
+  Streams without Plex IDs or playback-selection state, including HDR10, Dolby
+  Vision, bit depth, bitrate, channel, and language fields.
+- Infuse-style background library synchronization consumes existing MediaInfo
+  cache records without turning per-item browsing into full-library cold probes.
+- MediaInfo ffprobe records now use a new provider revision so records produced
+  by the previous interpretation are not reused.
 
 ## [0.1.1] - 2026-08-28
 

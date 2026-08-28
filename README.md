@@ -133,6 +133,20 @@ Git 的 `app.env` 中。推荐让 Compose 只通过 `env_file: ./app.env` 加载
 单独配置 Plex 用户名或密码，播放也不依赖管理 Token。STRM `/redirect` 播放协议不需要
 MediaVault 用于 `/api/v1` 集成的 API key。
 
+### MediaInfo 响应增强
+
+对于已认证的单项 STRM metadata 请求，Gateway 可以从 L1 或 SQLite 记录补充缺失的
+Media、Part 和 Stream 技术字段。若 Plex 的 Part 完全没有 Stream，Gateway 会使用
+ffprobe 的流类型和源索引创建描述性的视频、音频和字幕 Stream，并投影 HDR10、Dolby
+Vision、bit depth、codec、bitrate、声道布局和语言码等字段。合成 Stream 不包含 Plex
+Stream ID，也不生成 `selected`、`default` 或 `decision` 等播放选择字段。Plex 已经存在
+Stream 时只补充身份匹配 Stream 的缺失字段，不创建缺少的其他流，也不覆盖 Plex 值。
+
+Infuse 等客户端的后台媒体库同步可能逐项请求整个库。带 `skipRefresh` 且产品名以
+`-Library` 结尾的后台同步请求只读取现有 MediaInfo 缓存，不创建冷探测。普通单项访问、
+成功的云端 302 和邻近窗口仍可按既定边界提交探测，因此浏览媒体库不会扩散成全库 CDN
+ffprobe。任何缓存 miss、超时、结构不支持或投影失败都会返回原始 Plex response。
+
 ### 邻近媒体 MediaInfo 预热
 
 Gateway 在云端 Part 已通过 Plex 授权、MediaVault 已返回最终直链且 Gateway 已写出

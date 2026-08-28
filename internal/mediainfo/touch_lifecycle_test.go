@@ -179,8 +179,10 @@ func TestServiceCloseCancelsPendingTouches(t *testing.T) {
 	const touchInterval = time.Hour
 	now := time.Unix(1_800_000_000, 0).UTC()
 	first := completeRecord(now.Add(-2 * touchInterval))
+	first.Key.PlexServerID = "server"
 	first.Key.PartID = "close-first"
 	second := completeRecord(now.Add(-2 * touchInterval))
+	second.Key.PlexServerID = "server"
 	second.Key.PartID = "close-second"
 	store := &cancelAwareTouchStore{
 		started:  make(chan struct{}, 2),

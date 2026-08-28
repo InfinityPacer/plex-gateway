@@ -26,6 +26,7 @@ const (
 )
 
 type mediaInfoEnsurer interface {
+	Get(mediainfo.Key) (mediainfo.Record, bool)
 	Ensure(context.Context, mediainfo.Request) (mediainfo.Record, error)
 }
 
@@ -136,16 +137,26 @@ func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, reque
 		handler.failOpen(capture, rawBody)
 		return
 	}
-	waitContext, cancel := context.WithTimeout(request.Context(), handler.coldWait)
-	record, err := handler.service.Ensure(waitContext, mediainfo.Request{
-		Key:       mediainfo.Key{PartID: target.Part.ID, STRMFingerprint: fingerprint},
-		RatingKey: ratingKey, Target: strmTarget, Priority: mediainfo.PriorityInteractive,
-		ClientUserAgent: request.UserAgent(),
-	})
-	cancel()
-	if err != nil {
-		handler.failOpen(capture, rawBody)
-		return
+	key := mediainfo.Key{PartID: target.Part.ID, STRMFingerprint: fingerprint}
+	var record mediainfo.Record
+	if mediaInfoCacheOnlyRequest(request) {
+		var found bool
+		record, found = handler.service.Get(key)
+		if !found {
+			handler.replay(capture, rawBody)
+			return
+		}
+	} else {
+		waitContext, cancel := context.WithTimeout(request.Context(), handler.coldWait)
+		record, err = handler.service.Ensure(waitContext, mediainfo.Request{
+			Key: key, RatingKey: ratingKey, Target: strmTarget,
+			Priority: mediainfo.PriorityInteractive, ClientUserAgent: request.UserAgent(),
+		})
+		cancel()
+		if err != nil {
+			handler.failOpen(capture, rawBody)
+			return
+		}
 	}
 	currentTarget, err := handler.resolver.ReadTarget(localPath)
 	if err != nil {
@@ -202,6 +213,18 @@ func mediaInfoMetadataRequest(request *http.Request) (string, bool) {
 		return "", false
 	}
 	return strings.TrimPrefix(request.URL.Path, "/library/metadata/"), true
+}
+
+// mediaInfoCacheOnlyRequest identifies background library crawlers that may
+// enumerate every item. They can consume an existing record, while active
+// playback remains responsible for admitting new remote analysis work.
+func mediaInfoCacheOnlyRequest(request *http.Request) bool {
+	if request == nil || request.URL == nil {
+		return false
+	}
+	product := strings.ToLower(strings.TrimSpace(request.Header.Get("X-Plex-Product")))
+	_, skipsRefresh := request.URL.Query()["skipRefresh"]
+	return skipsRefresh && strings.HasSuffix(product, "-library")
 }
 
 func normalizedExtensionSet(extensions []string) map[string]struct{} {
