@@ -6,18 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/InfinityPacer/plex-gateway/internal/database"
 )
 
 const (
-	sqliteDatabaseVersion = 1
-	sqliteSchemaV1        = `
-CREATE TABLE IF NOT EXISTS media_info_records (
+	mediaInfoMigrationModule = "mediainfo"
+	mediaInfoSchemaV1        = `
+	CREATE TABLE IF NOT EXISTS media_info_records (
     plex_server_id TEXT NOT NULL,
     part_id TEXT NOT NULL,
 	strm_fingerprint TEXT NOT NULL,
@@ -39,87 +37,24 @@ CREATE INDEX IF NOT EXISTS media_info_records_retain_until
 `
 )
 
-// SQLiteStore persists successful MediaInfo results. It uses one database
-// connection because SQLite is the single-instance writer in this design.
+// SQLiteStore persists successful MediaInfo results in the shared Gateway
+// database without owning the connection lifecycle.
 type SQLiteStore struct {
 	db *sql.DB
 }
 
-// OpenSQLite creates or opens a private SQLite database, enables WAL mode, and
-// applies versioned migrations. The path is a filesystem path, not a
-// caller-controlled SQLite URI.
-func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
-	path = strings.TrimSpace(path)
-	if path == "" || strings.IndexByte(path, 0) >= 0 || strings.HasPrefix(path, "file:") {
-		return nil, errors.New("MediaInfo database path is invalid")
+// NewSQLiteStore attaches the MediaInfo domain to an open Gateway database and
+// applies only the migrations owned by this domain.
+func NewSQLiteStore(ctx context.Context, gatewayDB *database.SQLite) (*SQLiteStore, error) {
+	if gatewayDB == nil || gatewayDB.SQLDB() == nil {
+		return nil, errors.New("Gateway database is unavailable")
 	}
-	cleanPath := filepath.Clean(path)
-	directory := filepath.Dir(cleanPath)
-	if err := os.MkdirAll(directory, 0o750); err != nil {
-		return nil, fmt.Errorf("create MediaInfo database directory: %w", err)
-	}
-	file, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("create MediaInfo database: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return nil, fmt.Errorf("close MediaInfo database file: %w", err)
-	}
-
-	db, err := sql.Open("sqlite", cleanPath)
-	if err != nil {
-		return nil, fmt.Errorf("open MediaInfo database: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	store := &SQLiteStore{db: db}
-	if err := store.initialize(ctx); err != nil {
-		_ = db.Close()
+	if err := gatewayDB.ApplyMigrations(ctx, mediaInfoMigrationModule, []database.Migration{
+		{Version: 1, SQL: mediaInfoSchemaV1},
+	}); err != nil {
 		return nil, err
 	}
-	return store, nil
-}
-
-func (store *SQLiteStore) initialize(ctx context.Context) error {
-	for _, statement := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA synchronous=NORMAL",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA busy_timeout=5000",
-	} {
-		if _, err := store.db.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("configure MediaInfo database: %w", err)
-		}
-	}
-	return store.migrate(ctx)
-}
-
-func (store *SQLiteStore) migrate(ctx context.Context) error {
-	transaction, err := store.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin MediaInfo database migration: %w", err)
-	}
-	defer transaction.Rollback()
-
-	var version int
-	if err := transaction.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("read MediaInfo database version: %w", err)
-	}
-	if version > sqliteDatabaseVersion {
-		return fmt.Errorf("MediaInfo database version %d is newer than supported version %d", version, sqliteDatabaseVersion)
-	}
-	if version < 1 {
-		if _, err := transaction.ExecContext(ctx, sqliteSchemaV1); err != nil {
-			return fmt.Errorf("apply MediaInfo database schema v1: %w", err)
-		}
-		if _, err := transaction.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
-			return fmt.Errorf("record MediaInfo database schema v1: %w", err)
-		}
-	}
-	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("commit MediaInfo database migration: %w", err)
-	}
-	return nil
+	return &SQLiteStore{db: gatewayDB.SQLDB()}, nil
 }
 
 // Put inserts or refreshes one complete record. A late older probe cannot
@@ -304,14 +239,6 @@ WHERE plex_server_id = ? AND part_id = ? AND strm_fingerprint = ?
 		return fmt.Errorf("touch MediaInfo record: %w", err)
 	}
 	return nil
-}
-
-// Close flushes and closes the SQLite database.
-func (store *SQLiteStore) Close() error {
-	if store == nil || store.db == nil {
-		return nil
-	}
-	return store.db.Close()
 }
 
 type rowScanner interface {

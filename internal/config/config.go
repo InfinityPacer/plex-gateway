@@ -26,7 +26,7 @@ const (
 	defaultMetadataPerClient  = 4
 	defaultMetadataBatch      = 3
 	defaultMetadataQueueWait  = 10 * time.Second
-	defaultMediaInfoDatabase  = "./data/mediainfo.db"
+	defaultDatabasePath       = "./data/plex-gateway.db"
 	defaultMediaInfoProbe     = 20 * time.Second
 	defaultMediaInfoSize      = 8 << 20
 	defaultMediaInfoAnalyze   = 5 * time.Second
@@ -38,6 +38,9 @@ const (
 	defaultMediaInfoL1Entries = 10_000
 	defaultMediaInfoNegative  = 15 * time.Minute
 	defaultMediaInfoAgent     = "Infuse-Library/8.4.4"
+	defaultMediaInfoColdWait  = 5 * time.Second
+	defaultMediaInfoBodyLimit = 8 << 20
+	defaultMediaInfoWaiters   = 4
 )
 
 // Config contains process-level settings for transparent Plex proxying and
@@ -45,6 +48,7 @@ const (
 // never loaded into this structure.
 type Config struct {
 	ListenAddr        string
+	DatabasePath      string
 	PlexURL           *url.URL
 	MediaVaultURL     *url.URL
 	PathMappings      []pathmap.Mapping
@@ -66,7 +70,6 @@ type Config struct {
 // but capability initialization remains fail-open for transparent Plex proxying.
 type MediaInfoConfig struct {
 	Enabled              bool
-	DatabasePath         string
 	FFProbePath          string
 	ProbeTimeout         time.Duration
 	ProbeSize            int64
@@ -80,6 +83,9 @@ type MediaInfoConfig struct {
 	L1MaxEntries         int
 	NegativeTTL          time.Duration
 	UserAgent            string
+	ColdWait             time.Duration
+	ResponseMaxBytes     int64
+	EnrichmentWaiters    int
 }
 
 // MetadataGuardConfig bounds detailed metadata fan-out before requests enter
@@ -186,9 +192,9 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	mediaInfoDatabase := strings.TrimSpace(os.Getenv("MEDIAINFO_DB_PATH"))
-	if mediaInfoDatabase == "" {
-		mediaInfoDatabase = defaultMediaInfoDatabase
+	databasePath := strings.TrimSpace(os.Getenv("DATABASE_PATH"))
+	if databasePath == "" {
+		databasePath = defaultDatabasePath
 	}
 	mediaInfoFFProbe := strings.TrimSpace(os.Getenv("MEDIAINFO_FFPROBE_PATH"))
 	if mediaInfoFFProbe == "" {
@@ -248,6 +254,18 @@ func Load() (Config, error) {
 	if strings.ContainsAny(mediaInfoUserAgent, "\r\n") {
 		return Config{}, errors.New("MEDIAINFO_USER_AGENT must not contain line breaks")
 	}
+	mediaInfoColdWait, err := envDuration("MEDIAINFO_COLD_WAIT", defaultMediaInfoColdWait)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoBodyLimit, err := envPositiveInt64("MEDIAINFO_RESPONSE_MAX_BYTES", defaultMediaInfoBodyLimit)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoWaiters, err := envPositiveInt("MEDIAINFO_ENRICHMENT_CONCURRENCY", defaultMediaInfoWaiters)
+	if err != nil {
+		return Config{}, err
+	}
 
 	readHeaderTimeout, err := envDuration("READ_HEADER_TIMEOUT", defaultReadHeaderTimeout)
 	if err != nil {
@@ -276,6 +294,7 @@ func Load() (Config, error) {
 
 	return Config{
 		ListenAddr:       listenAddr,
+		DatabasePath:     databasePath,
 		PlexURL:          plexURL,
 		MediaVaultURL:    mediaVaultURL,
 		PathMappings:     pathMappings,
@@ -293,13 +312,14 @@ func Load() (Config, error) {
 			QueueTimeout:         metadataQueueWait,
 		},
 		MediaInfo: MediaInfoConfig{
-			Enabled: mediaInfoEnabled, DatabasePath: mediaInfoDatabase, FFProbePath: mediaInfoFFProbe,
+			Enabled: mediaInfoEnabled, FFProbePath: mediaInfoFFProbe,
 			ProbeTimeout: mediaInfoProbeTimeout,
 			ProbeSize:    mediaInfoProbeSize, AnalyzeDuration: mediaInfoAnalyze, OutputMaxBytes: mediaInfoOutput,
 			Concurrency: mediaInfoWorkers, InteractiveQueueSize: mediaInfoInteractiveQueue,
 			BackgroundQueueSize: mediaInfoBackgroundQueue,
 			RecordTTL:           mediaInfoTTL, RecordRetention: mediaInfoRetention, L1MaxEntries: mediaInfoL1Entries,
 			NegativeTTL: mediaInfoNegativeTTL, UserAgent: mediaInfoUserAgent,
+			ColdWait: mediaInfoColdWait, ResponseMaxBytes: mediaInfoBodyLimit, EnrichmentWaiters: mediaInfoWaiters,
 		},
 		LogLevel:          logLevel,
 		TraceEnabled:      traceEnabled,

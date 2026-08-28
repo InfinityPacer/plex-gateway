@@ -2,6 +2,7 @@ package mediainfo
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"log/slog"
 	"strings"
@@ -162,10 +163,11 @@ type recordTouch struct {
 }
 
 type flight struct {
-	done   chan struct{}
-	job    *job
-	record Record
-	err    error
+	done      chan struct{}
+	job       *job
+	userAgent string
+	record    Record
+	err       error
 }
 
 type job struct {
@@ -313,15 +315,26 @@ func (service *Service) Ensure(ctx context.Context, request Request) (Record, er
 		return record, nil
 	}
 	service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoCacheMisses() })
-	flight, err := service.begin(request)
-	if err != nil {
-		return Record{}, err
-	}
-	select {
-	case <-ctx.Done():
-		return Record{}, ctx.Err()
-	case <-flight.done:
-		return cloneRecord(flight.record), flight.err
+	for {
+		if err := ctx.Err(); err != nil {
+			return Record{}, err
+		}
+		flight, err := service.begin(request)
+		if err != nil {
+			return Record{}, err
+		}
+		select {
+		case <-ctx.Done():
+			return Record{}, ctx.Err()
+		case <-flight.done:
+			if flight.err != nil && flight.userAgent != request.ClientUserAgent {
+				// Successful technical metadata is UA-independent and remains
+				// shared. A failed provider attempt is UA-sensitive, so a waiter
+				// with another client identity may retry within its own deadline.
+				continue
+			}
+			return cloneRecord(flight.record), flight.err
+		}
 	}
 }
 
@@ -351,6 +364,10 @@ func (service *Service) normalizeRequest(request Request) (Request, error) {
 	}
 	if request.Key.PlexServerID != service.plexServerID {
 		return Request{}, errors.New("MediaInfo request belongs to another Plex server")
+	}
+	request.ClientUserAgent = strings.TrimSpace(request.ClientUserAgent)
+	if request.ClientUserAgent == "" {
+		request.ClientUserAgent = service.backgroundUserAgent
 	}
 	if err := request.validate(); err != nil {
 		return Request{}, err
@@ -420,18 +437,19 @@ func (service *Service) begin(request Request) (*flight, error) {
 		return nil, err
 	}
 	key := request.Key.cacheKey()
+	negativeKey := service.negativeKey(request)
 	now := service.now()
 	service.mu.Lock()
 	if service.closed {
 		service.mu.Unlock()
 		return nil, ErrServiceUnavailable
 	}
-	if until, exists := service.negative[key]; exists {
+	if until, exists := service.negative[negativeKey]; exists {
 		if now.Before(until) {
 			service.mu.Unlock()
 			return nil, ErrNegativeCache
 		}
-		delete(service.negative, key)
+		delete(service.negative, negativeKey)
 	}
 	if existing, exists := service.flights[key]; exists {
 		if request.Priority == PriorityInteractive {
@@ -440,7 +458,7 @@ func (service *Service) begin(request Request) (*flight, error) {
 		service.mu.Unlock()
 		return existing, nil
 	}
-	flight := &flight{done: make(chan struct{})}
+	flight := &flight{done: make(chan struct{}), userAgent: request.ClientUserAgent}
 	queued := &job{request: request, flight: flight}
 	flight.job = queued
 	if !service.enqueueLocked(queued) {
@@ -626,7 +644,7 @@ func (service *Service) finish(queued *job, record Record, err error) {
 	}
 	delete(service.flights, key)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		service.rememberNegativeLocked(key, service.now())
+		service.rememberNegativeLocked(service.negativeKey(queued.request), service.now())
 	}
 	flight.record = record
 	flight.err = err
@@ -638,6 +656,11 @@ func (service *Service) finish(queued *job, record Record, err error) {
 		return
 	}
 	service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoProbeSuccess() })
+}
+
+func (service *Service) negativeKey(request Request) string {
+	digest := sha256.Sum256([]byte(request.ClientUserAgent))
+	return request.Key.cacheKey() + "\x00" + string(digest[:])
 }
 
 func (service *Service) rememberNegativeLocked(key string, now time.Time) {

@@ -22,6 +22,6 @@ WORKDIR /app_data
 USER gateway
 EXPOSE 32400
 ENV LISTEN_ADDR=:32400
-ENV MEDIAINFO_DB_PATH=/app_data/mediainfo.db
+ENV DATABASE_PATH=/app_data/plex-gateway.db
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD ["/usr/local/bin/plex-gateway", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/plex-gateway"]

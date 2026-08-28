@@ -2,37 +2,44 @@ package mediainfo
 
 import (
 	"context"
-	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/InfinityPacer/plex-gateway/internal/database"
 )
+
+func openTestSQLiteStore(tb testing.TB, path string) (*SQLiteStore, *database.SQLite) {
+	tb.Helper()
+	gatewayDB, err := database.OpenSQLite(context.Background(), path)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	store, err := NewSQLiteStore(context.Background(), gatewayDB)
+	if err != nil {
+		_ = gatewayDB.Close()
+		tb.Fatal(err)
+	}
+	return store, gatewayDB
+}
 
 func TestSQLiteStorePersistsRetainedRecordAcrossReopen(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "mediainfo.db")
+	path := filepath.Join(t.TempDir(), "plex-gateway.db")
 	now := time.Unix(1_800_000_000, 0).UTC()
 	record := completeRecord(now)
 
-	store, err := OpenSQLite(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, gatewayDB := openTestSQLiteStore(t, path)
 	if err := store.Put(ctx, record); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Close(); err != nil {
+	if err := gatewayDB.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	store, err = OpenSQLite(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store, gatewayDB = openTestSQLiteStore(t, path)
+	defer gatewayDB.Close()
 	loaded, err := store.LoadCompatibleRetained(ctx, now, 100, testProviderDescriptor())
 	if err != nil {
 		t.Fatal(err)
@@ -43,45 +50,50 @@ func TestSQLiteStorePersistsRetainedRecordAcrossReopen(t *testing.T) {
 }
 
 func TestSQLiteStoreRecordsSchemaVersion(t *testing.T) {
-	store, err := OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "mediainfo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store, gatewayDB := openTestSQLiteStore(t, filepath.Join(t.TempDir(), "plex-gateway.db"))
+	defer gatewayDB.Close()
 	var version int
-	if err := store.db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+	if err := store.db.QueryRowContext(t.Context(), `
+		SELECT MAX(version) FROM gateway_schema_migrations WHERE module = ?
+	`, mediaInfoMigrationModule).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != sqliteDatabaseVersion {
+	if version != 1 {
 		t.Fatalf("schema version = %d", version)
 	}
 }
 
 func TestSQLiteStoreRejectsNewerSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mediainfo.db")
-	database, err := sql.Open("sqlite", path)
+	path := filepath.Join(t.TempDir(), "plex-gateway.db")
+	gatewayDB, err := database.OpenSQLite(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.ExecContext(t.Context(), "PRAGMA user_version = 999"); err != nil {
+	if _, err := gatewayDB.SQLDB().ExecContext(t.Context(), `
+		INSERT INTO gateway_schema_migrations (module, version, applied_at_ms)
+		VALUES (?, 1, ?), (?, 2, ?)
+	`, mediaInfoMigrationModule, time.Now().UTC().UnixMilli(),
+		mediaInfoMigrationModule, time.Now().UTC().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.Close(); err != nil {
+	if err := gatewayDB.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, err = OpenSQLite(t.Context(), path)
+	gatewayDB, err = database.OpenSQLite(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gatewayDB.Close()
+	_, err = NewSQLiteStore(t.Context(), gatewayDB)
 	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
-		t.Fatalf("OpenSQLite() error = %v", err)
+		t.Fatalf("NewSQLiteStore() error = %v", err)
 	}
 }
 
 func TestSQLiteStoreRejectsLateOlderProbe(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "mediainfo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store, gatewayDB := openTestSQLiteStore(t, filepath.Join(t.TempDir(), "plex-gateway.db"))
+	defer gatewayDB.Close()
 
 	now := time.Unix(1_800_000_000, 0).UTC()
 	newer := completeRecord(now)
@@ -105,11 +117,8 @@ func TestSQLiteStoreRejectsLateOlderProbe(t *testing.T) {
 
 func TestSQLiteStoreDeletesUnretainedWithoutAffectingStaleOrFresh(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "mediainfo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store, gatewayDB := openTestSQLiteStore(t, filepath.Join(t.TempDir(), "plex-gateway.db"))
+	defer gatewayDB.Close()
 
 	now := time.Unix(1_800_000_000, 0).UTC()
 	unretained := completeRecord(now.Add(-200 * 24 * time.Hour))
@@ -141,11 +150,8 @@ func TestSQLiteStoreDeletesUnretainedWithoutAffectingStaleOrFresh(t *testing.T) 
 }
 
 func TestSQLiteStoreLoadsMostRecentlyAccessedWithinLimit(t *testing.T) {
-	store, err := OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "mediainfo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store, gatewayDB := openTestSQLiteStore(t, filepath.Join(t.TempDir(), "plex-gateway.db"))
+	defer gatewayDB.Close()
 	now := time.Unix(1_800_000_000, 0).UTC()
 	for index, age := range []time.Duration{3 * time.Hour, 2 * time.Hour, time.Hour} {
 		record := completeRecord(now.Add(-age))
@@ -168,11 +174,8 @@ func testProviderDescriptor() ProviderDescriptor {
 }
 
 func TestSQLiteStoreDoesNotRestoreOtherProviderRevision(t *testing.T) {
-	store, err := OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "mediainfo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store, gatewayDB := openTestSQLiteStore(t, filepath.Join(t.TempDir(), "plex-gateway.db"))
+	defer gatewayDB.Close()
 	now := time.Unix(1_800_000_000, 0).UTC()
 	if err := store.Put(t.Context(), completeRecord(now)); err != nil {
 		t.Fatal(err)
@@ -189,11 +192,8 @@ func TestSQLiteStoreDoesNotRestoreOtherProviderRevision(t *testing.T) {
 }
 
 func TestSQLiteStoreTouchExtendsRetentionMonotonically(t *testing.T) {
-	store, err := OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "mediainfo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store, gatewayDB := openTestSQLiteStore(t, filepath.Join(t.TempDir(), "plex-gateway.db"))
+	defer gatewayDB.Close()
 	now := time.Unix(1_800_000_000, 0).UTC()
 	record := completeRecord(now)
 	if err := store.Put(t.Context(), record); err != nil {
