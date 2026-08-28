@@ -108,6 +108,12 @@ Important environment variables:
 | `PART_PROBE_TIMEOUT` | `15s` | Timeout for the bodyless Plex Part authorization probe. |
 | `CLOUD_EXTENSIONS` | `.strm` | Comma-separated cloud control-file extensions. |
 | `TRACE_ENABLED` | `false` | Enable sanitized Plex request-order tracing. |
+| `METADATA_GUARD_ENABLED` | `false` | Limit single-item detailed metadata requests before they enter Plex. |
+| `METADATA_GUARD_GLOBAL_CONCURRENCY` | `8` | Shared detailed metadata concurrency limit across all clients. |
+| `METADATA_GUARD_CLIENT_CONCURRENCY` | `4` | Detailed metadata concurrency limit for each Plex client identifier. |
+| `METADATA_GUARD_BATCH_ENABLED` | `false` | Limit comma-separated batch metadata reads before they enter Plex. |
+| `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | Shared batch metadata concurrency limit across all clients. |
+| `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | Maximum admission wait before returning `429`. |
 
 Plex tokens are not stored in configuration. Ordinary Plex requests remain
 transparent. For cloud playback, all client request headers are forwarded to
@@ -121,6 +127,27 @@ Clients connect to the gateway as they would connect to Plex and authenticate
 through Plex. The gateway does not need a Plex username, password, or static
 token. MediaVault's API key for `/api/v1` integrations is also not required for
 the STRM `/redirect` playback contract.
+
+### Metadata concurrency protection
+
+Some clients fan out many `GET/HEAD /library/metadata/{ratingKey}` requests
+when opening a large library. When `METADATA_GUARD_ENABLED` is enabled, the
+gateway applies global and per-client concurrency limits before these
+single-item detailed metadata requests enter Plex. Client identifiers are used
+only for in-process admission and retained as digests. They are not written to
+logs or metrics.
+
+The guard does not cover library listings, timeline or watch-state traffic,
+playback decisions, `/library/parts`, or other Plex paths. Requests wait for at
+most `METADATA_GUARD_QUEUE_TIMEOUT`. A timed-out request receives `429` instead
+of bypassing the guard and reaching Plex. The feature does not cache metadata
+or modify Plex responses.
+
+`METADATA_GUARD_BATCH_ENABLED` protects
+`GET/HEAD /library/metadata/1,2,...` with a separate global concurrency pool.
+Batch reads do not consume the global or per-client slots reserved for
+interactive single-item metadata requests, and metadata mutations do not enter
+the batch pool.
 
 ## Advertise the gateway through Plex
 
@@ -205,8 +232,9 @@ That topology is outside the exclusive-gateway deployment contract.
 
 - `GET /health` returns process health.
 - `GET /metrics` returns fixed-shape JSON counters plus resolver and complete
-  redirect-path latency totals, samples, last values, and maxima, without
-  request labels or credentials.
+  redirect-path latency totals, samples, last values, and maxima. When metadata
+  protection is enabled, it also reports admission, timeout, active, and queued
+  counts. No metric contains request labels or credentials.
 - Every other endpoint follows the Plex proxy or Direct Play interception
   rules described in [docs/architecture.md](docs/architecture.md).
 

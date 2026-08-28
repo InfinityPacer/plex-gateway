@@ -96,6 +96,12 @@ go run ./cmd/plex-gateway
 | `PART_PROBE_TIMEOUT` | `15s` | 无 body 的 Plex Part 授权 probe 超时时间。 |
 | `CLOUD_EXTENSIONS` | `.strm` | 以逗号分隔的云端控制文件扩展名。 |
 | `TRACE_ENABLED` | `false` | 启用经过脱敏的 Plex 请求顺序追踪。 |
+| `METADATA_GUARD_ENABLED` | `false` | 限制单项详细 metadata 请求进入 Plex 的并发量。 |
+| `METADATA_GUARD_GLOBAL_CONCURRENCY` | `8` | 所有客户端共享的详细 metadata 并发上限。 |
+| `METADATA_GUARD_CLIENT_CONCURRENCY` | `4` | 每个 Plex 客户端标识的详细 metadata 并发上限。 |
+| `METADATA_GUARD_BATCH_ENABLED` | `false` | 限制逗号分隔的批量 metadata 读取进入 Plex 的并发量。 |
+| `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | 所有客户端共享的批量 metadata 并发上限。 |
+| `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | 等待准入的最长时间，超时返回 `429`。 |
 
 Plex Token 不会保存到配置中。普通 Plex 请求保持透明转发。对于云端播放，客户端的
 所有请求 header 都会转发到配置的 MediaVault origin，使其能够为相同客户端上下文
@@ -106,6 +112,21 @@ Plex Token 不会保存到配置中。普通 Plex 请求保持透明转发。对
 客户端像连接 Plex 一样连接 Gateway，并通过 Plex 完成身份认证。Gateway 不需要
 单独配置 Plex 用户名、密码或静态 Token。STRM `/redirect` 播放协议也不需要
 MediaVault 用于 `/api/v1` 集成的 API key。
+
+### Metadata 并发保护
+
+部分客户端会在打开大型媒体库时并发请求大量
+`GET/HEAD /library/metadata/{ratingKey}`。启用 `METADATA_GUARD_ENABLED` 后，
+Gateway 会在这些单项详细 metadata 请求进入 Plex 前应用全局和单客户端并发上限。
+客户端标识只用于进程内限流，并以摘要形式保存，不会写入日志或 metrics。
+
+该保护不处理媒体库列表、时间线、观看状态、播放决策、`/library/parts` 或其他 Plex
+路径。请求最多排队 `METADATA_GUARD_QUEUE_TIMEOUT`，超时后返回 `429`，不会绕过保护
+继续请求 Plex。此功能不缓存 metadata，也不改变 Plex 响应。
+
+`METADATA_GUARD_BATCH_ENABLED` 使用独立的全局并发池保护
+`GET/HEAD /library/metadata/1,2,...`。批量读取不会占用交互式单项 metadata 的全局或
+单客户端槽位，metadata PUT 等修改请求也不会进入批量池。
 
 ## 通过 Plex 发布 Gateway 地址
 
@@ -178,7 +199,8 @@ Gateway 重新执行检查。
 
 - `GET /health` 返回进程健康状态。
 - `GET /metrics` 返回固定结构的 JSON 计数器，以及 resolver 和完整重定向链路的
-  延迟总计、样本数、最近值和最大值；不包含请求标签或凭据。
+  延迟总计、样本数、最近值和最大值。启用 metadata 保护时还会返回准入、超时、
+  活动和排队计数，所有指标都不包含请求标签或凭据。
 - 其他所有 endpoint 都遵循 [docs/architecture.md](docs/architecture.md) 中说明
   的 Plex 代理或 Direct Play 拦截规则。
 

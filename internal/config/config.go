@@ -22,6 +22,10 @@ const (
 	defaultResolverTimeout   = 15 * time.Second
 	defaultObserveMaxBytes   = 8 << 20
 	defaultPartProbeTimeout  = 15 * time.Second
+	defaultMetadataGlobal    = 8
+	defaultMetadataPerClient = 4
+	defaultMetadataBatch     = 3
+	defaultMetadataQueueWait = 10 * time.Second
 )
 
 // Config contains process-level settings for transparent Plex proxying and
@@ -37,11 +41,24 @@ type Config struct {
 	ResolverTimeout   time.Duration
 	ObserveMaxBytes   int64
 	PartProbeTimeout  time.Duration
+	MetadataGuard     MetadataGuardConfig
 	LogLevel          string
 	TraceEnabled      bool
 	ReadHeaderTimeout time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
+}
+
+// MetadataGuardConfig bounds detailed metadata fan-out before requests enter
+// Plex. The protection is opt-in because client behavior and Plex capacity vary
+// across deployments.
+type MetadataGuardConfig struct {
+	Enabled              bool
+	GlobalConcurrency    int
+	PerClientConcurrency int
+	BatchEnabled         bool
+	BatchConcurrency     int
+	QueueTimeout         time.Duration
 }
 
 // Load reads environment configuration and rejects values that would make the
@@ -105,6 +122,33 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	metadataGuardEnabled, err := envBool("METADATA_GUARD_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataGlobal, err := envPositiveInt("METADATA_GUARD_GLOBAL_CONCURRENCY", defaultMetadataGlobal)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataPerClient, err := envPositiveInt("METADATA_GUARD_CLIENT_CONCURRENCY", defaultMetadataPerClient)
+	if err != nil {
+		return Config{}, err
+	}
+	if metadataPerClient > metadataGlobal {
+		return Config{}, errors.New("METADATA_GUARD_CLIENT_CONCURRENCY must not exceed METADATA_GUARD_GLOBAL_CONCURRENCY")
+	}
+	metadataBatchEnabled, err := envBool("METADATA_GUARD_BATCH_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataBatch, err := envPositiveInt("METADATA_GUARD_BATCH_CONCURRENCY", defaultMetadataBatch)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataQueueWait, err := envDuration("METADATA_GUARD_QUEUE_TIMEOUT", defaultMetadataQueueWait)
+	if err != nil {
+		return Config{}, err
+	}
 
 	readHeaderTimeout, err := envDuration("READ_HEADER_TIMEOUT", defaultReadHeaderTimeout)
 	if err != nil {
@@ -132,15 +176,23 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		ListenAddr:        listenAddr,
-		PlexURL:           plexURL,
-		MediaVaultURL:     mediaVaultURL,
-		PathMappings:      pathMappings,
-		CloudExtensions:   cloudExtensions,
-		PartTTL:           partTTL,
-		ResolverTimeout:   resolverTimeout,
-		ObserveMaxBytes:   observeMaxBytes,
-		PartProbeTimeout:  partProbeTimeout,
+		ListenAddr:       listenAddr,
+		PlexURL:          plexURL,
+		MediaVaultURL:    mediaVaultURL,
+		PathMappings:     pathMappings,
+		CloudExtensions:  cloudExtensions,
+		PartTTL:          partTTL,
+		ResolverTimeout:  resolverTimeout,
+		ObserveMaxBytes:  observeMaxBytes,
+		PartProbeTimeout: partProbeTimeout,
+		MetadataGuard: MetadataGuardConfig{
+			Enabled:              metadataGuardEnabled,
+			GlobalConcurrency:    metadataGlobal,
+			PerClientConcurrency: metadataPerClient,
+			BatchEnabled:         metadataBatchEnabled,
+			BatchConcurrency:     metadataBatch,
+			QueueTimeout:         metadataQueueWait,
+		},
 		LogLevel:          logLevel,
 		TraceEnabled:      traceEnabled,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -241,6 +293,21 @@ func envPositiveInt64(name string, fallback int64) (int64, error) {
 		return fallback, nil
 	}
 	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return value, nil
+}
+
+func envPositiveInt(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, fmt.Errorf("parse %s: %w", name, err)
 	}

@@ -51,6 +51,9 @@ func (h *decisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	request := r.Clone(r.Context())
 	requestURL := *r.URL
 	requestURL.RawQuery = forceDirectPlay(requestURL.RawQuery)
+	if _, present := query["mediaIndex"]; !present {
+		requestURL.RawQuery += "&mediaIndex=0"
+	}
 	request.URL = &requestURL
 	h.logger.Info("decision_direct_play", "part", selection.Part.ID)
 	capture := newDecisionResponseCapture(w, defaultDecisionMetadataMaxBytes)
@@ -68,11 +71,20 @@ func (h *decisionHandler) selectCloudPart(r *http.Request, attempt playback.Atte
 	if h.probe == nil || h.service == nil {
 		return playback.PreparedPart{}, decisionSelectionUnauthenticated
 	}
+	_, mediaIndexPresent := query["mediaIndex"]
+	if !mediaIndexPresent && attempt.PartIndex != 0 {
+		return playback.PreparedPart{}, decisionSelectionPassthrough
+	}
 	metadata, err := h.probe.read(r, attempt.MetadataPath, query)
 	if err != nil {
 		return playback.PreparedPart{}, decisionSelectionUnauthenticated
 	}
-	part, err := plexmeta.SelectPart(metadata.body, metadata.contentType, attempt.MediaIndex, attempt.PartIndex)
+	var part plexmeta.Part
+	if mediaIndexPresent {
+		part, err = plexmeta.SelectPart(metadata.body, metadata.contentType, attempt.MediaIndex, attempt.PartIndex)
+	} else {
+		part, err = plexmeta.SelectUniquePart(metadata.body, metadata.contentType)
+	}
 	if err != nil || part.ID == "" || part.File == "" {
 		return playback.PreparedPart{}, decisionSelectionPassthrough
 	}
@@ -167,7 +179,7 @@ func normalizePlaybackAttempt(request *http.Request) (playback.Attempt, url.Valu
 	if !ok || !isMetadataItemPath(metadataPath) {
 		return playback.Attempt{}, query, false
 	}
-	mediaIndex, ok := nonNegativeIndex(query, "mediaIndex")
+	mediaIndex, _, ok := optionalNonNegativeIndex(query, "mediaIndex")
 	if !ok {
 		return playback.Attempt{}, query, false
 	}
@@ -200,6 +212,18 @@ func normalizePlaybackAttempt(request *http.Request) (playback.Attempt, url.Valu
 		Session:      session,
 	}
 	return attempt, query, attempt.Valid()
+}
+
+func optionalNonNegativeIndex(query url.Values, name string) (index int, present, valid bool) {
+	values, present := query[name]
+	if !present {
+		return 0, false, true
+	}
+	if len(values) != 1 || values[0] == "" {
+		return 0, true, false
+	}
+	index, err := strconv.Atoi(values[0])
+	return index, true, err == nil && index >= 0
 }
 
 func requestIdentity(request *http.Request, name string) (value string, present, valid bool) {
@@ -259,21 +283,21 @@ func isMetadataItemPath(value string) bool {
 }
 
 // forceDirectPlay preserves every unrelated raw query component, including
-// repeated client-profile parameters, while replacing all conflicting Direct
-// Play flags with one authoritative value each.
+// repeated client-profile parameters, while replacing the cloud playback
+// decision flags with authoritative values.
 func forceDirectPlay(rawQuery string) string {
 	components := strings.Split(rawQuery, "&")
-	result := make([]string, 0, len(components)+2)
+	result := make([]string, 0, len(components)+3)
 	for _, component := range components {
 		if component == "" {
 			continue
 		}
 		rawName, _, _ := strings.Cut(component, "=")
 		name, err := url.QueryUnescape(rawName)
-		if err == nil && (name == "directPlay" || name == "directStream") {
+		if err == nil && (name == "directPlay" || name == "directStream" || name == "hasMDE") {
 			continue
 		}
 		result = append(result, component)
 	}
-	return strings.Join(append(result, "directPlay=1", "directStream=1"), "&")
+	return strings.Join(append(result, "directPlay=1", "directStream=1", "hasMDE=1"), "&")
 }

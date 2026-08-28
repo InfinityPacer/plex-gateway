@@ -35,6 +35,7 @@ type Options struct {
 	CloudExtensions  []string
 	ObserveMaxBytes  int64
 	PartProbeTimeout time.Duration
+	MetadataGuard    MetadataGuardOptions
 }
 
 // New builds the fail-open Plex proxy and optional Direct Play interceptor.
@@ -159,7 +160,7 @@ func New(options Options) http.Handler {
 	}
 	mux.Handle("GET /library/parts/{partID}/{rest...}", partPlayback)
 	mux.Handle("HEAD /library/parts/{partID}/{rest...}", partPlayback)
-	mux.Handle("/", plex)
+	mux.Handle("/", newMetadataGuard(options.MetadataGuard, plex, registry, logger))
 
 	withActiveRequests := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		release := registry.BeginRequest()

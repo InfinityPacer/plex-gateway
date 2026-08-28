@@ -75,6 +75,14 @@ func run() error {
 		CloudExtensions:  cfg.CloudExtensions,
 		ObserveMaxBytes:  cfg.ObserveMaxBytes,
 		PartProbeTimeout: cfg.PartProbeTimeout,
+		MetadataGuard: gateway.MetadataGuardOptions{
+			Enabled:              cfg.MetadataGuard.Enabled,
+			GlobalConcurrency:    cfg.MetadataGuard.GlobalConcurrency,
+			PerClientConcurrency: cfg.MetadataGuard.PerClientConcurrency,
+			BatchEnabled:         cfg.MetadataGuard.BatchEnabled,
+			BatchConcurrency:     cfg.MetadataGuard.BatchConcurrency,
+			QueueTimeout:         cfg.MetadataGuard.QueueTimeout,
+		},
 	})
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -94,6 +102,8 @@ func run() error {
 			"cloud_redirect", cfg.MediaVaultURL != nil,
 			"path_mappings", len(cfg.PathMappings),
 			"trace", cfg.TraceEnabled,
+			"metadata_guard", cfg.MetadataGuard.Enabled,
+			"metadata_batch_guard", cfg.MetadataGuard.BatchEnabled,
 		)
 		serveErrors <- server.ListenAndServe()
 	}()

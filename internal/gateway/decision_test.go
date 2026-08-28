@@ -54,8 +54,8 @@ func TestCloudDecisionForcesDirectPlayAndContinuesThroughPartRedirect(t *testing
 			if got := query["directStream"]; len(got) != 1 || got[0] != "1" {
 				t.Fatalf("directStream = %#v", got)
 			}
-			if query.Get("hasMDE") != "0" {
-				t.Fatalf("hasMDE = %q", query.Get("hasMDE"))
+			if got := query["hasMDE"]; len(got) != 1 || got[0] != "1" {
+				t.Fatalf("hasMDE = %#v", got)
 			}
 			if got := query["profileExtra"]; len(got) != 2 || got[0] != "first" || got[1] != "second" {
 				t.Fatalf("profileExtra = %#v", got)
@@ -91,6 +91,7 @@ func TestCloudDecisionForcesDirectPlayAndContinuesThroughPartRedirect(t *testing
 	query.Add("directPlay", "0")
 	query.Set("directStream", "0")
 	query.Set("hasMDE", "0")
+	query.Add("hasMDE", "1")
 	query.Add("profileExtra", "first")
 	query.Add("profileExtra", "second")
 	query.Set("X-Plex-Token", "query-token")
@@ -120,12 +121,113 @@ func TestCloudDecisionForcesDirectPlayAndContinuesThroughPartRedirect(t *testing
 	}
 }
 
-func TestLocalDecisionRemainsUnchanged(t *testing.T) {
-	originalQuery := "path=%2Flibrary%2Fmetadata%2F42&mediaIndex=0&partIndex=0&directPlay=0&directStream=0&hasMDE=1"
+func TestCloudDecisionInfersOmittedMediaIndexFromUniqueMetadata(t *testing.T) {
+	localRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localRoot, "Unique.strm"), []byte("http://public.invalid/redirect/pickcode/Unique.mkv\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mediaVault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://cdn.invalid/Unique.mkv?signature=private")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer mediaVault.Close()
+
+	var decisionRequests, partRequests int
+	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/library/metadata/42":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"MediaContainer":{"Metadata":[{"Media":[{"Part":[{"id":20,"key":"/library/parts/20/1/file","file":"/media/cloud/Unique.strm"}]}]}]}}`))
+		case "/video/:/transcode/universal/decision":
+			decisionRequests++
+			query := r.URL.Query()
+			if query.Get("mediaIndex") != "0" || query.Get("partIndex") != "0" || query.Get("directPlay") != "1" || query.Get("hasMDE") != "1" {
+				t.Fatalf("adapted decision query = %q", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<MediaContainer><Video><Media decision="directplay"><Part decision="directplay" key="/library/parts/20/1/file"/></Media></Video></MediaContainer>`))
+		case "/library/parts/20/1/file":
+			partRequests++
+			w.Header().Set("Location", "http://public.invalid/redirect/pickcode/Unique.mkv")
+			w.WriteHeader(http.StatusMovedPermanently)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer plex.Close()
+
+	handler, _, _ := newCloudHandler(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{
+		PlexPrefix:  "/media/cloud",
+		LocalPrefix: localRoot,
+	}})
+	query := url.Values{
+		"path":                       {"/library/metadata/42"},
+		"partIndex":                  {"0"},
+		"directPlay":                 {"0"},
+		"directStream":               {"0"},
+		"X-Plex-Playback-Session-Id": {"apple-tv-session"},
+	}
+	decisionRequest := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?"+query.Encode(), nil)
+	decisionRequest.Header.Set("X-Plex-Token", "client-token")
+	decisionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(decisionResponse, decisionRequest)
+	if decisionResponse.Code != http.StatusOK {
+		t.Fatalf("decision status = %d body = %q", decisionResponse.Code, decisionResponse.Body.String())
+	}
+
+	startRequest := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/start.m3u8?"+query.Encode(), nil)
+	startRequest.Header.Set("X-Plex-Token", "client-token")
+	startResponse := httptest.NewRecorder()
+	handler.ServeHTTP(startResponse, startRequest)
+	if startResponse.Code != http.StatusFound || startResponse.Header().Get("Location") != "https://cdn.invalid/Unique.mkv?signature=private" {
+		t.Fatalf("start status = %d Location = %q", startResponse.Code, startResponse.Header().Get("Location"))
+	}
+	if decisionRequests != 1 || partRequests != 1 {
+		t.Fatalf("decision requests = %d, part requests = %d", decisionRequests, partRequests)
+	}
+}
+
+func TestOmittedMediaIndexWithAmbiguousMetadataRemainsUnchanged(t *testing.T) {
+	originalQuery := "path=%2Flibrary%2Fmetadata%2F42&partIndex=0&directPlay=0&directStream=0"
+	var metadataRequests int
 	var decisionQuery string
 	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/library/metadata/42":
+			metadataRequests++
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<MediaContainer><Video><Media><Part id="10" file="/media/cloud/A.strm"/></Media><Media><Part id="20" file="/media/cloud/B.strm"/></Media></Video></MediaContainer>`))
+		case "/video/:/transcode/universal/decision":
+			decisionQuery = r.URL.RawQuery
+			http.Error(w, "original decision", http.StatusBadRequest)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer plex.Close()
+
+	handler, _, _ := newCloudHandler(t, plex.URL, "http://mediavault.invalid:7811", []pathmap.Mapping{{
+		PlexPrefix:  "/media/cloud",
+		LocalPrefix: t.TempDir(),
+	}})
+	request := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?"+originalQuery, nil)
+	request.Header.Set("X-Plex-Token", "client-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || metadataRequests != 1 || decisionQuery != originalQuery {
+		t.Fatalf("status=%d metadata=%d query=%q", response.Code, metadataRequests, decisionQuery)
+	}
+}
+
+func TestLocalDecisionRemainsUnchanged(t *testing.T) {
+	originalQuery := "path=%2Flibrary%2Fmetadata%2F42&partIndex=0&directPlay=0&directStream=0"
+	var metadataRequests int
+	var decisionQuery string
+	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/library/metadata/42":
+			metadataRequests++
 			w.Header().Set("Content-Type", "application/xml")
 			_, _ = w.Write([]byte(`<MediaContainer><Video><Media><Part id="10" key="/library/parts/10/1/file" file="/media/local/A.mkv"/></Media></Video></MediaContainer>`))
 		case "/video/:/transcode/universal/decision":
@@ -141,10 +243,12 @@ func TestLocalDecisionRemainsUnchanged(t *testing.T) {
 		PlexPrefix:  "/media/cloud",
 		LocalPrefix: t.TempDir(),
 	}})
+	request := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?"+originalQuery, nil)
+	request.Header.Set("X-Plex-Token", "client-token")
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?"+originalQuery, nil))
-	if response.Code != http.StatusBadRequest || decisionQuery != originalQuery {
-		t.Fatalf("status = %d decision query = %q", response.Code, decisionQuery)
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || metadataRequests != 1 || decisionQuery != originalQuery {
+		t.Fatalf("status=%d metadata=%d decision_query=%q", response.Code, metadataRequests, decisionQuery)
 	}
 }
 
@@ -157,6 +261,10 @@ func TestAmbiguousDecisionIndicesFailOpenWithoutMetadataProbe(t *testing.T) {
 		{name: "automatic part", query: "path=%2Flibrary%2Fmetadata%2F42&mediaIndex=0&partIndex=-1&directPlay=0&directStream=0"},
 		{name: "missing part", query: "path=%2Flibrary%2Fmetadata%2F42&mediaIndex=0&directPlay=0&directStream=0"},
 		{name: "duplicate media", query: "path=%2Flibrary%2Fmetadata%2F42&mediaIndex=0&mediaIndex=1&partIndex=0&directPlay=0&directStream=0"},
+		{name: "empty media", query: "path=%2Flibrary%2Fmetadata%2F42&mediaIndex=&partIndex=0&directPlay=0&directStream=0"},
+		{name: "empty part", query: "path=%2Flibrary%2Fmetadata%2F42&partIndex=&directPlay=0&directStream=0"},
+		{name: "duplicate part", query: "path=%2Flibrary%2Fmetadata%2F42&partIndex=0&partIndex=1&directPlay=0&directStream=0"},
+		{name: "omitted media with nonzero part", query: "path=%2Flibrary%2Fmetadata%2F42&partIndex=1&directPlay=0&directStream=0"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var metadataRequests int
@@ -178,8 +286,10 @@ func TestAmbiguousDecisionIndicesFailOpenWithoutMetadataProbe(t *testing.T) {
 				PlexPrefix:  "/media/cloud",
 				LocalPrefix: t.TempDir(),
 			}})
+			request := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?"+test.query, nil)
+			request.Header.Set("X-Plex-Token", "client-token")
 			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?"+test.query, nil))
+			handler.ServeHTTP(response, request)
 			if response.Code != http.StatusNoContent || metadataRequests != 0 || decisionQuery != test.query {
 				t.Fatalf("status=%d metadata=%d query=%q", response.Code, metadataRequests, decisionQuery)
 			}

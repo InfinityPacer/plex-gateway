@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-28
+
+### Added
+
+- Configurable concurrency protection for individual and batch Plex metadata
+  requests to limit native-client metadata fan-out against Plex Media Server.
+- Metadata Guard metrics for admitted, queued, active, and timed-out requests.
+
+### Fixed
+
+- Apple TV Plex client Direct Play decisions and playback negotiation for STRM
+  media while preserving Plex authorization of client credentials and Parts.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added
@@ -28,5 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway redirects playback.
 - Logs and metrics exclude Plex tokens and complete signed media URLs.
 
-[Unreleased]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/InfinityPacer/plex-gateway/releases/tag/v0.1.0

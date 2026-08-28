@@ -39,6 +39,20 @@ func SelectPart(body []byte, contentType string, mediaIndex, partIndex int) (Par
 	return selectXMLPart(trimmed, mediaIndex, partIndex)
 }
 
+// SelectUniquePart returns the only Part only when the metadata response has
+// exactly one Media and that Media has exactly one Part. This permits a protocol
+// adapter to resolve an omitted index without guessing across media versions.
+func SelectUniquePart(body []byte, contentType string) (Part, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return Part{}, errors.New("Plex metadata response is empty")
+	}
+	if strings.Contains(strings.ToLower(contentType), "json") || trimmed[0] == '{' || trimmed[0] == '[' {
+		return selectUniqueJSONPart(trimmed)
+	}
+	return selectUniqueXMLPart(trimmed)
+}
+
 // ParseParts extracts Part identifiers from Plex XML or JSON without rewriting
 // or retaining the original response body.
 func ParseParts(body []byte, contentType string) ([]Part, error) {
@@ -126,6 +140,31 @@ func selectXMLPart(body []byte, mediaIndex, partIndex int) (Part, error) {
 	return part, nil
 }
 
+func selectUniqueXMLPart(body []byte) (Part, error) {
+	type media struct {
+		Parts []Part `xml:"Part"`
+	}
+	type video struct {
+		Media []media `xml:"Media"`
+	}
+	type container struct {
+		Videos []video `xml:"Video"`
+	}
+
+	var value container
+	if err := xml.Unmarshal(body, &value); err != nil {
+		return Part{}, fmt.Errorf("parse Plex XML metadata: %w", err)
+	}
+	if len(value.Videos) != 1 || len(value.Videos[0].Media) != 1 || len(value.Videos[0].Media[0].Parts) != 1 {
+		return Part{}, errors.New("Plex metadata does not contain a unique Media/Part")
+	}
+	part := value.Videos[0].Media[0].Parts[0]
+	if part.ID == "" || part.File == "" {
+		return Part{}, errors.New("selected Plex Part has no id or file")
+	}
+	return part, nil
+}
+
 func selectJSONPart(body []byte, mediaIndex, partIndex int) (Part, error) {
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -155,6 +194,41 @@ func selectJSONPart(body []byte, mediaIndex, partIndex int) (Part, error) {
 		return Part{}, errors.New("Plex part index is out of range")
 	}
 	part, ok := partFromMap(parts[partIndex])
+	if !ok || part.ID == "" || part.File == "" {
+		return Part{}, errors.New("selected Plex Part has no id or file")
+	}
+	return part, nil
+}
+
+func selectUniqueJSONPart(body []byte) (Part, error) {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return Part{}, fmt.Errorf("parse Plex JSON metadata: %w", err)
+	}
+
+	root, ok := value.(map[string]any)
+	if !ok {
+		return Part{}, errors.New("Plex JSON metadata has no object root")
+	}
+	mediaContainer, ok := root["MediaContainer"].(map[string]any)
+	if !ok {
+		return Part{}, errors.New("Plex JSON metadata has no MediaContainer")
+	}
+	metadata := objectList(mediaContainer["Metadata"])
+	if len(metadata) != 1 {
+		return Part{}, errors.New("Plex JSON metadata does not contain one Metadata item")
+	}
+	media := objectList(metadata[0]["Media"])
+	if len(media) != 1 {
+		return Part{}, errors.New("Plex metadata does not contain a unique Media/Part")
+	}
+	parts := objectList(media[0]["Part"])
+	if len(parts) != 1 {
+		return Part{}, errors.New("Plex metadata does not contain a unique Media/Part")
+	}
+	part, ok := partFromMap(parts[0])
 	if !ok || part.ID == "" || part.File == "" {
 		return Part{}, errors.New("selected Plex Part has no id or file")
 	}
