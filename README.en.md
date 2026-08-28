@@ -46,11 +46,10 @@ media in Plex Web remains ordinary proxied Plex traffic.
 | Client or path | Status | Boundary |
 | --- | --- | --- |
 | Local Plex media | Supported by transparent proxy | The gateway does not rewrite local Parts. |
-| Infuse Direct Play | Implemented; acceptance matrix incomplete | Uses the Plex Part redirect path. |
-| Plex iOS ExperimentalPlayer | Limited runtime evidence | One successful session is not a general compatibility claim. |
+| Infuse Direct Play | Direct Play verified | Uses the Plex Part redirect path. |
+| Plex iOS ExperimentalPlayer | Direct Play verified | STRM uses the universal decision/start redirect path. |
 | Plex for Apple TV | Direct Play verified | STRM uses the universal decision/start redirect path; local media remains transparent proxy traffic. |
 | Plex Web cloud playback | Unsupported | The browser expects a DASH manifest and enforces final-origin CORS. |
-| VidHub and SenPlayer | Not yet verified | Planned client-compatibility targets. |
 
 This is an independent community project. It is not affiliated with, endorsed
 by, or sponsored by Plex, MediaVault, Infuse, or their respective owners.

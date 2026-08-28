@@ -31,8 +31,9 @@ pass playback, seek, watch-state, and next-episode acceptance.
 
 ## Phase 2: Client compatibility
 
-Validate Infuse, VidHub, and SenPlayer across movie, episode, multi-part, audio,
-subtitle, LAN/WAN, HTTP/HTTPS, seek, and next-episode flows.
+Phase 2 is complete for the Direct Play paths verified with Infuse, Plex iOS
+ExperimentalPlayer, and Plex for Apple TV. Compatibility claims remain limited
+to observed runtime evidence; additional client targets are not scheduled.
 
 Runtime evidence from Plex Web and the official mobile client established a
 separate compatibility leaf: their original universal decision requested
@@ -54,9 +55,9 @@ Play decision can still be followed by `start.mpd` or `start.m3u8` because STRM
 metadata has no media streams. The start adapter selects and authorizes the
 exact Part captured by the same session's confirmed Direct Play decision grant,
 resolves MediaVault, and returns the final CDN 302 without repeating metadata
-selection. One Plex iOS ExperimentalPlayer session has successfully followed
-this redirect path in production. Other official-client playback paths are not
-supported by the current compatibility scope.
+selection. Production playback has successfully followed this redirect path
+with Plex iOS ExperimentalPlayer and Plex for Apple TV. Other official-client
+playback paths are not supported by the current compatibility scope.
 
 Plex Web remains outside the cloud-playback compatibility gate. Its browser
 player fetches `start.mpd` as a DASH manifest; a redirect to the original media
