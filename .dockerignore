@@ -3,6 +3,7 @@
 .workbenchs
 .env
 .env.*
+app.env
 docs/plex-behavior.local.md
 bin
 dist
