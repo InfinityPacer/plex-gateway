@@ -9,6 +9,21 @@
 
 ## [未发布]
 
+### 新增
+
+- 增加通用 Plex metadata 微批。认证、查询和客户端上下文完全一致的单项 GET 默认可合并为
+  最多 32 项的 Plex 原生 batch，并按 ratingKey 拆回 XML、JSON 或 gzip 单项响应。
+
+### 变更
+
+- metadata 分析过滤器只移除 `asyncAugmentMetadata`，继续透传 `checkFiles`，保留 Plex
+  `Part.accessible` 与 `Part.exists` 语义。
+
+### 修复
+
+- batch 异常时每个唯一 ratingKey 只通过既有单项 Guard 回退一次，重复调用者共享结果，
+  并短暂熔断同组微批；取消的请求不会回退，全部调用者取消后终止上游 batch。
+
 ## [0.1.2] - 2026-08-29
 
 ### 新增

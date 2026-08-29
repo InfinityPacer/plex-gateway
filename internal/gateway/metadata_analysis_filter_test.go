@@ -24,7 +24,7 @@ func TestMetadataAnalysisFilterRemovesOnlyAnalysisParameters(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
 	}
-	if received != "z=last&X-Plex-Token=a%2Bb&a=first+value" {
+	if received != "z=last&checkFiles=1&X-Plex-Token=a%2Bb&a=first+value" {
 		t.Fatalf("filtered query = %q", received)
 	}
 	if request.URL.RawQuery != originalQuery {
@@ -42,11 +42,11 @@ func TestMetadataAnalysisFilterAppliesToSupportedReads(t *testing.T) {
 		path   string
 		want   string
 	}{
-		{name: "head", method: http.MethodHead, path: "/library/metadata/42?checkFiles=1&keep=yes", want: "keep=yes"},
+		{name: "head", method: http.MethodHead, path: "/library/metadata/42?asyncAugmentMetadata=1&checkFiles=1&keep=yes", want: "checkFiles=1&keep=yes"},
 		{name: "batch", method: http.MethodGet, path: "/library/metadata/42,43?asyncAugmentMetadata&keep=yes", want: "keep=yes"},
-		{name: "children", method: http.MethodGet, path: "/library/metadata/42/children?checkFiles=1", want: "checkFiles=1"},
-		{name: "write", method: http.MethodPut, path: "/library/metadata/42?checkFiles=1", want: "checkFiles=1"},
-		{name: "non_numeric", method: http.MethodGet, path: "/library/metadata/abc?checkFiles=1", want: "checkFiles=1"},
+		{name: "children", method: http.MethodGet, path: "/library/metadata/42/children?asyncAugmentMetadata=1", want: "asyncAugmentMetadata=1"},
+		{name: "write", method: http.MethodPut, path: "/library/metadata/42?asyncAugmentMetadata=1", want: "asyncAugmentMetadata=1"},
+		{name: "non_numeric", method: http.MethodGet, path: "/library/metadata/abc?asyncAugmentMetadata=1", want: "asyncAugmentMetadata=1"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -70,9 +70,9 @@ func TestMetadataAnalysisFilterPreservesMalformedAndDisabledQueries(t *testing.T
 		enabled bool
 		query   string
 	}{
-		{name: "disabled", enabled: false, query: "checkFiles=1&keep=yes"},
-		{name: "malformed_key", enabled: true, query: "checkFiles%ZZ=1&keep=yes"},
-		{name: "unrelated", enabled: true, query: "checkFilesExtra=1&keep=yes"},
+		{name: "disabled", enabled: false, query: "asyncAugmentMetadata=1&keep=yes"},
+		{name: "malformed_key", enabled: true, query: "asyncAugmentMetadata%ZZ=1&keep=yes"},
+		{name: "unrelated", enabled: true, query: "asyncAugmentMetadataExtra=1&keep=yes"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

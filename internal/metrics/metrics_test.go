@@ -28,6 +28,10 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.IncMetadataBatchGuardTimeouts()
 	registry.IncMetadataBatchGuardActive()
 	registry.IncMetadataBatchGuardQueued()
+	registry.IncMetadataCoalesceOffered()
+	registry.IncMetadataCoalesceBatch(3)
+	registry.IncMetadataCoalesceFallback()
+	registry.IncMetadataCoalesceActive()
 	registry.IncMediaInfoCacheHits()
 	registry.IncMediaInfoCacheMisses()
 	registry.IncMediaInfoProbeOffered(0)
@@ -92,6 +96,11 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 		MetadataBatchGuardTimeoutsTotal:   1,
 		MetadataBatchGuardActive:          1,
 		MetadataBatchGuardQueued:          1,
+		MetadataCoalesceOfferedTotal:      1,
+		MetadataCoalesceBatchesTotal:      1,
+		MetadataCoalesceItemsTotal:        3,
+		MetadataCoalesceFallbacksTotal:    1,
+		MetadataCoalesceActive:            1,
 		MediaInfoCacheHitsTotal:           1,
 		MediaInfoCacheMissesTotal:         1,
 		MediaInfoProbeOfferedTotal:        1,
@@ -146,6 +155,7 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.DecMetadataGuardQueued()
 	registry.DecMetadataBatchGuardActive()
 	registry.DecMetadataBatchGuardQueued()
+	registry.DecMetadataCoalesceActive()
 	registry.DecMediaInfoProbeActive()
 	registry.DecMediaInfoWaitActive()
 	if got := registry.Snapshot().ActiveRequests; got != 0 {
@@ -199,6 +209,7 @@ func TestActiveRequestReleaseIsIdempotentAndClamped(t *testing.T) {
 	registry.DecMetadataGuardQueued()
 	registry.DecMetadataBatchGuardActive()
 	registry.DecMetadataBatchGuardQueued()
+	registry.DecMetadataCoalesceActive()
 	registry.DecMediaInfoProbeActive()
 	registry.DecMediaInfoWaitActive()
 	if got := registry.Snapshot().ActiveRequests; got != 0 {
@@ -241,6 +252,11 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 				registry.DecMetadataBatchGuardActive()
 				registry.IncMetadataBatchGuardQueued()
 				registry.DecMetadataBatchGuardQueued()
+				registry.IncMetadataCoalesceOffered()
+				registry.IncMetadataCoalesceBatch(2)
+				registry.IncMetadataCoalesceFallback()
+				registry.IncMetadataCoalesceActive()
+				registry.DecMetadataCoalesceActive()
 				registry.IncMediaInfoCacheHits()
 				registry.IncMediaInfoCacheMisses()
 				registry.IncMediaInfoProbeOffered(0)
@@ -287,6 +303,8 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 		got.MetadataGuardActive != 0 || got.MetadataGuardQueued != 0 ||
 		got.MetadataBatchGuardAdmittedTotal != want || got.MetadataBatchGuardTimeoutsTotal != want ||
 		got.MetadataBatchGuardActive != 0 || got.MetadataBatchGuardQueued != 0 ||
+		got.MetadataCoalesceOfferedTotal != want || got.MetadataCoalesceBatchesTotal != want ||
+		got.MetadataCoalesceItemsTotal != 2*want || got.MetadataCoalesceFallbacksTotal != want || got.MetadataCoalesceActive != 0 ||
 		got.MediaInfoCacheHitsTotal != want || got.MediaInfoCacheMissesTotal != want ||
 		got.MediaInfoProbeOfferedTotal != want || got.MediaInfoProbeQueuedTotal != want || got.MediaInfoProbeJoinedTotal != want ||
 		got.MediaInfoProbePromotedTotal != want || got.MediaInfoProbeDroppedFullTotal != want ||

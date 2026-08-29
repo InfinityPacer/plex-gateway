@@ -14,40 +14,45 @@ import (
 )
 
 const (
-	defaultListenAddr         = ":32400"
-	defaultReadHeaderTimeout  = 15 * time.Second
-	defaultIdleTimeout        = 90 * time.Second
-	defaultShutdownTimeout    = 15 * time.Second
-	defaultPartTTL            = 24 * time.Hour
-	defaultResolverTimeout    = 15 * time.Second
-	defaultObserveMaxBytes    = 8 << 20
-	defaultPartProbeTimeout   = 15 * time.Second
-	defaultMetadataGlobal     = 8
-	defaultMetadataPerClient  = 4
-	defaultMetadataBatch      = 3
-	defaultMetadataQueueWait  = 10 * time.Second
-	defaultDatabasePath       = "./data/plex-gateway.db"
-	defaultMediaInfoProbe     = 20 * time.Second
-	defaultMediaInfoSize      = 8 << 20
-	defaultMediaInfoAnalyze   = 5 * time.Second
-	defaultMediaInfoOutput    = 2 << 20
-	defaultMediaInfoWorkers   = 1
-	defaultPlaybackQueue      = 16
-	defaultNeighborQueue      = 50
-	defaultMetadataQueue      = 50
-	defaultPendingTTL         = 5 * time.Minute
-	defaultBackgroundInterval = 5 * time.Second
-	defaultMediaInfoTTL       = 30 * 24 * time.Hour
-	defaultMediaInfoRetention = 180 * 24 * time.Hour
-	defaultMediaInfoL1Entries = 10_000
-	defaultMediaInfoNegative  = 15 * time.Minute
-	defaultMediaInfoAgent     = "Infuse-Library/8.5.1"
-	defaultMediaInfoColdWait  = 5 * time.Second
-	defaultMediaInfoBodyLimit = 8 << 20
-	defaultMediaInfoWaiters   = 8
-	defaultPrewarmBefore      = 2
-	defaultPrewarmAfter       = 3
-	maxPrewarmWindow          = 50
+	defaultListenAddr               = ":32400"
+	defaultReadHeaderTimeout        = 15 * time.Second
+	defaultIdleTimeout              = 90 * time.Second
+	defaultShutdownTimeout          = 15 * time.Second
+	defaultPartTTL                  = 24 * time.Hour
+	defaultResolverTimeout          = 15 * time.Second
+	defaultObserveMaxBytes          = 8 << 20
+	defaultPartProbeTimeout         = 15 * time.Second
+	defaultMetadataGlobal           = 8
+	defaultMetadataPerClient        = 4
+	defaultMetadataBatch            = 3
+	defaultMetadataQueueWait        = 10 * time.Second
+	defaultMetadataCoalesceWindow   = 3 * time.Millisecond
+	defaultMetadataCoalesceMaxItems = 32
+	defaultMetadataCoalesceTimeout  = 5 * time.Second
+	maxMetadataCoalesceWindow       = 100 * time.Millisecond
+	maxMetadataCoalesceItems        = 64
+	defaultDatabasePath             = "./data/plex-gateway.db"
+	defaultMediaInfoProbe           = 20 * time.Second
+	defaultMediaInfoSize            = 8 << 20
+	defaultMediaInfoAnalyze         = 5 * time.Second
+	defaultMediaInfoOutput          = 2 << 20
+	defaultMediaInfoWorkers         = 1
+	defaultPlaybackQueue            = 16
+	defaultNeighborQueue            = 50
+	defaultMetadataQueue            = 50
+	defaultPendingTTL               = 5 * time.Minute
+	defaultBackgroundInterval       = 5 * time.Second
+	defaultMediaInfoTTL             = 30 * 24 * time.Hour
+	defaultMediaInfoRetention       = 180 * 24 * time.Hour
+	defaultMediaInfoL1Entries       = 10_000
+	defaultMediaInfoNegative        = 15 * time.Minute
+	defaultMediaInfoAgent           = "Infuse-Library/8.5.1"
+	defaultMediaInfoColdWait        = 5 * time.Second
+	defaultMediaInfoBodyLimit       = 8 << 20
+	defaultMediaInfoWaiters         = 8
+	defaultPrewarmBefore            = 2
+	defaultPrewarmAfter             = 3
+	maxPrewarmWindow                = 50
 )
 
 // Config contains process-level settings for transparent Plex proxying and
@@ -68,6 +73,7 @@ type Config struct {
 	PartProbeTimeout       time.Duration
 	MetadataAnalysisFilter bool
 	MetadataGuard          MetadataGuardConfig
+	MetadataCoalesce       MetadataCoalesceConfig
 	MediaInfo              MediaInfoConfig
 	PlaybackVeto           bool
 	LogLevel               string
@@ -116,6 +122,15 @@ type MetadataGuardConfig struct {
 	BatchEnabled         bool
 	BatchConcurrency     int
 	QueueTimeout         time.Duration
+}
+
+// MetadataCoalesceConfig bounds transparent aggregation of equivalent
+// single-item reads into Plex's native comma-separated metadata endpoint.
+type MetadataCoalesceConfig struct {
+	Enabled  bool
+	Window   time.Duration
+	MaxItems int
+	Timeout  time.Duration
 }
 
 // Load reads environment configuration and rejects values that would make the
@@ -213,6 +228,31 @@ func Load() (Config, error) {
 	metadataQueueWait, err := envDuration("METADATA_GUARD_QUEUE_TIMEOUT", defaultMetadataQueueWait)
 	if err != nil {
 		return Config{}, err
+	}
+	metadataCoalesceEnabled, err := envBool("METADATA_COALESCE_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataCoalesceWindow, err := envDuration("METADATA_COALESCE_WINDOW", defaultMetadataCoalesceWindow)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataCoalesceMaxItems, err := envPositiveInt("METADATA_COALESCE_MAX_ITEMS", defaultMetadataCoalesceMaxItems)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataCoalesceTimeout, err := envDuration("METADATA_COALESCE_TIMEOUT", defaultMetadataCoalesceTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	if metadataCoalesceWindow > maxMetadataCoalesceWindow {
+		return Config{}, fmt.Errorf("METADATA_COALESCE_WINDOW must not exceed %s", maxMetadataCoalesceWindow)
+	}
+	if metadataCoalesceMaxItems < 2 {
+		return Config{}, errors.New("METADATA_COALESCE_MAX_ITEMS must be at least 2")
+	}
+	if metadataCoalesceMaxItems > maxMetadataCoalesceItems {
+		return Config{}, fmt.Errorf("METADATA_COALESCE_MAX_ITEMS must not exceed %d", maxMetadataCoalesceItems)
 	}
 	mediaInfoEnabled, err := envBool("MEDIAINFO_ENABLED", true)
 	if err != nil {
@@ -365,6 +405,10 @@ func Load() (Config, error) {
 			BatchEnabled:         metadataBatchEnabled,
 			BatchConcurrency:     metadataBatch,
 			QueueTimeout:         metadataQueueWait,
+		},
+		MetadataCoalesce: MetadataCoalesceConfig{
+			Enabled: metadataCoalesceEnabled, Window: metadataCoalesceWindow,
+			MaxItems: metadataCoalesceMaxItems, Timeout: metadataCoalesceTimeout,
 		},
 		MediaInfo: MediaInfoConfig{
 			Enabled: mediaInfoEnabled, FFProbePath: mediaInfoFFProbe,

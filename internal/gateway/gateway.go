@@ -18,6 +18,7 @@ import (
 	"github.com/InfinityPacer/plex-gateway/internal/partcache"
 	"github.com/InfinityPacer/plex-gateway/internal/pathmap"
 	"github.com/InfinityPacer/plex-gateway/internal/playback"
+	"github.com/InfinityPacer/plex-gateway/internal/plexmeta"
 	"github.com/InfinityPacer/plex-gateway/internal/prewarm"
 	"github.com/InfinityPacer/plex-gateway/internal/resolver"
 	"github.com/InfinityPacer/plex-gateway/internal/trace"
@@ -40,6 +41,7 @@ type Options struct {
 	PartProbeTimeout               time.Duration
 	MetadataAnalysisFilter         bool
 	MetadataGuard                  MetadataGuardOptions
+	MetadataCoalesce               MetadataCoalesceOptions
 	MediaInfoEnabled               bool
 	MediaInfoStatus                func() mediainfo.Status
 	MediaInfoService               *mediainfo.Service
@@ -73,6 +75,13 @@ func New(options Options) http.Handler {
 	}
 
 	var cloudPlayback *playback.Service
+	rememberParts := func(ratingKey string, parts []plexmeta.Part) {
+		for _, part := range parts {
+			if cloudPlayback != nil {
+				cloudPlayback.Remember(playback.PreparedPart{Part: part, RatingKey: ratingKey})
+			}
+		}
+	}
 	transport := http.RoundTripper(newTransport())
 	if options.PartCache != nil {
 		transport = observe.NewRoundTripper(transport, observe.Config{
@@ -83,13 +92,9 @@ func New(options Options) http.Handler {
 				"/playQueues",
 			},
 			MaxBodyBytes: options.ObserveMaxBytes,
+			SkipRequest:  isMetadataCoalesceUpstreamRequest,
 			OnParts: func(observation observe.Observation) {
-				ratingKey := observedRatingKey(observation.Request)
-				for _, part := range observation.Parts {
-					if cloudPlayback != nil {
-						cloudPlayback.Remember(playback.PreparedPart{Part: part, RatingKey: ratingKey})
-					}
-				}
+				rememberParts(observedRatingKey(observation.Request), observation.Parts)
 			},
 		})
 	}
@@ -206,15 +211,22 @@ func New(options Options) http.Handler {
 	}
 	mux.Handle("GET /library/parts/{partID}/{rest...}", partPlayback)
 	mux.Handle("HEAD /library/parts/{partID}/{rest...}", partPlayback)
+	metadataCoalesce := options.MetadataCoalesce
+	metadataCoalesce.OnMetadata = func(request *http.Request, body []byte, contentType string) {
+		parts, err := plexmeta.ParseParts(body, contentType)
+		if err != nil {
+			return
+		}
+		rememberParts(observedRatingKey(request), parts)
+	}
+	metadataSource := newMetadataGuard(options.MetadataGuard, plex, registry, logger)
+	metadataSource = newMetadataCoalescer(metadataCoalesce, metadataSource, registry, logger)
 	metadata := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
 		Service: options.MediaInfoService, Mapper: options.PathMapper, Resolver: options.Resolver,
 		CloudExtensions: options.CloudExtensions,
 		ResponseLimit:   options.MediaInfoResponseMaxBytes, Concurrency: options.MediaInfoEnrichmentConcurrency,
 		Metrics: registry,
-	}, plex)
-	// Admission must happen before response buffering so a queued request does
-	// not consume an enrichment slot or bypass projection under client bursts.
-	metadata = newMetadataGuard(options.MetadataGuard, metadata, registry, logger)
+	}, metadataSource)
 	metadata = newMetadataAnalysisFilter(options.MetadataAnalysisFilter, metadata, registry)
 	mux.Handle("/", metadata)
 

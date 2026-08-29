@@ -11,18 +11,29 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
 ## Request ownership
 
 - All requests are transparently proxied to Plex by default.
-- Optional admission guards limit single-item `GET` and `HEAD`
-  `/library/metadata/{ratingKey}` requests and comma-separated batch metadata
-  reads before they enter Plex. Single-item requests use global and per-client
-  limits; batch reads use a separate global pool so maintenance traffic cannot
-  consume interactive metadata slots. Neither pool caches or rewrites Plex
-  responses. Library listings, metadata mutations, playback paths, timeline,
-  and watch-state traffic do not enter these pools.
-- The current Guard defaults are global 8 for single-item metadata, per-client
-  4, and batch 3. A global 16, per-client 4, batch 3 candidate is reserved for
-  evaluation after Plex MediaInfo writes provide high coverage and the resulting
-  load is retested. No additional Guard mode or configuration is part of this
-  release.
+- Equivalent authenticated single-item metadata `GET` requests can be combined
+  within a three-millisecond window into Plex's native comma-separated endpoint.
+  A group requires identical raw query, complete request headers, representation
+  context, host, protocol, and remote identity. The default batch contains at
+  most 32 unique rating keys, with 64 available for controlled A/B, and is split
+  by rating key into individual XML, JSON, or gzip responses. This is a bounded,
+  non-caching protocol transform. `HEAD`,
+  Range, conditional requests, bodies, ambiguous credentials, and every
+  non-metadata path bypass it.
+- Optional admission guards limit direct or fallback single-item `GET` and
+  `HEAD` `/library/metadata/{ratingKey}` requests and comma-separated batch
+  metadata reads before they enter Plex. Single-item requests use global and
+  per-client limits; explicit and synthesized batch reads use a separate global
+  pool. A batch failure issues at most one fallback per unique rating key through
+  the single-item pool and fans the result out to duplicate callers. Different
+  keys remain bounded by the Guard, and batching is temporarily suspended for
+  the same request context. The current Guard defaults are global 8, per-client
+  4, and batch 3.
+- The metadata chain is analysis filter, per-item MediaInfo enrichment,
+  coalescer, Guard, and Plex. This ordering lets each original request preserve
+  its response projection while one synthesized batch consumes one batch Guard
+  slot. Library listings, metadata mutations, playback paths, timeline, and
+  watch-state traffic do not enter the coalescer or Guard pools.
 - Successful XML or JSON Plex responses are observed to populate the in-memory
   `Part.id` cache without changing their bytes. When MediaInfo is available, an
   authenticated single-item metadata response may also fill missing whitelisted
@@ -73,7 +84,7 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
 | `internal/gateway` | Plex routing, transparent proxying, protocol probes, response capture, 302/fallback output, and request metrics. |
 | `internal/mediainfo` | Bounded analysis scheduling, L1/persistent cache policy, provider contracts, and technical-media records. |
 | `internal/playback` | Shared STRM preparation, normalized playback attempts, Plex authorization/MediaVault resolution sequencing, and decision-grant state. |
-| `internal/plexmeta` | XML and JSON Part/decision readers plus whitelisted metadata projection. |
+| `internal/plexmeta` | XML and JSON Part/decision readers, native-batch splitting, and whitelisted metadata projection. |
 | `internal/partcache` | Derived, expiring `Part.id` index; never an authority for access. |
 | `internal/pathmap` | Lexical Plex-to-container path mapping. |
 | `internal/resolver` | STRM target validation and the MediaVault `/redirect` protocol. |
@@ -161,6 +172,16 @@ applicable limits within its queue timeout receives `429` instead of bypassing
 protection and increasing Plex load. This protects Plex control-plane
 availability and does not change cloud redirect fallback behavior.
 
+Metadata coalescing remains fail-open through the Guard rather than directly to
+Plex. A non-200 batch, missing or duplicate item, unsupported encoding,
+oversized body, timeout, or malformed envelope is never interpreted as a
+single-item result. Each unique rating key performs at most one fallback with
+its original filtered request, and duplicate callers share the captured result;
+canceled callers are discarded. When every caller leaves, the upstream batch is
+canceled. Synthesized responses remove batch validators,
+recompute `Content-Length`, and use private no-cache semantics because their
+wire representation differs from the batch response.
+
 Cloud STRM support is Direct Play only. The decision adapter opts an eligible
 Part into Plex's own Direct Play decision path; it does not synthesize a
 decision, create a transcode session, or send a cloud URL to Plex Transcoder.
@@ -214,11 +235,12 @@ belong to workers. Background synchronization identified by `-Library` plus
 persisted and is discarded on cache reset, shutdown, or process restart.
 
 Detailed numeric metadata reads pass through an independent analysis-parameter
-filter before admission control. When enabled, it removes only `checkFiles` and
-`asyncAugmentMetadata`, preserving all retained raw query segments and leaving
-headers and responses untouched. This prevents browse bursts over STRM entries
-from asking Plex to start file scanners. The filter and concurrency guard have
-separate switches so capacity tests never need to restore on-demand analysis.
+filter before enrichment, coalescing, and admission control. When enabled, it
+removes only `asyncAugmentMetadata`, preserving all retained raw query segments,
+headers, and `checkFiles`. Plex therefore retains ownership of synchronous
+`Part.accessible` and `Part.exists` fields while browse bursts cannot schedule
+asynchronous augmentation. The filter, coalescer, and Guard have separate
+switches for compatibility and capacity tests.
 
 `/metrics` keeps aggregate scheduler counters and a fixed, label-free P0/P1/P2
 breakdown for offers, admissions, joins, promotions, capacity drops, expiry, and

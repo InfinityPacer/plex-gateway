@@ -20,10 +20,12 @@ const defaultMaxBodyBytes int64 = 4 << 20
 // Config controls which Plex responses are eligible for observation.
 // MetadataPaths are path prefixes; a trailing * is accepted for readability
 // and matches the remainder of that path. MaxBodyBytes bounds both the copied
-// wire body and the decompressed gzip body.
+// wire body and the decompressed gzip body. SkipRequest prevents redundant
+// observation when another layer owns parsing of a synthetic request.
 type Config struct {
 	MetadataPaths []string
 	MaxBodyBytes  int64
+	SkipRequest   func(*http.Request) bool
 	OnParts       func(Observation)
 }
 
@@ -42,6 +44,7 @@ type RoundTripper struct {
 	base          http.RoundTripper
 	metadataPaths []string
 	maxBodyBytes  int64
+	skipRequest   func(*http.Request) bool
 	onParts       func(Observation)
 }
 
@@ -59,6 +62,7 @@ func NewRoundTripper(base http.RoundTripper, config Config) *RoundTripper {
 		base:          base,
 		metadataPaths: append([]string(nil), config.MetadataPaths...),
 		maxBodyBytes:  maxBodyBytes,
+		skipRequest:   config.SkipRequest,
 		onParts:       config.OnParts,
 	}
 }
@@ -70,7 +74,8 @@ func (t *RoundTripper) RoundTrip(request *http.Request) (*http.Response, error) 
 	if err != nil || response == nil || response.Body == nil || t.onParts == nil {
 		return response, err
 	}
-	if !matchesMetadataPath(request.URL.Path, t.metadataPaths) || !successfulMetadataResponse(response) {
+	if (t.skipRequest != nil && t.skipRequest(request)) ||
+		!matchesMetadataPath(request.URL.Path, t.metadataPaths) || !successfulMetadataResponse(response) {
 		return response, nil
 	}
 	response.Body = &observedBody{

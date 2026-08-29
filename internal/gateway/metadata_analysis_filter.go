@@ -10,12 +10,11 @@ import (
 
 var metadataAnalysisParameters = map[string]struct{}{
 	"asyncAugmentMetadata": {},
-	"checkFiles":           {},
 }
 
-// newMetadataAnalysisFilter prevents detailed metadata reads from asking Plex
-// to inspect media files on demand. Library scans remain responsible for local
-// file freshness, while STRM entries can use the Gateway MediaInfo projection.
+// newMetadataAnalysisFilter prevents detailed metadata reads from scheduling
+// asynchronous Plex analysis. Synchronous file accessibility fields remain
+// Plex-owned and are therefore preserved.
 func newMetadataAnalysisFilter(enabled bool, next http.Handler, registry *metrics.Metrics) http.Handler {
 	if !enabled {
 		return next

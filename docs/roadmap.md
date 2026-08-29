@@ -116,9 +116,10 @@ delivery gate for this work. Local media must remain transparent, Part and
 universal-start routes must remain free of analysis I/O, an L1 hit must not
 block on SQLite, and one decision may consume at most one configured cold-wait
 budget. The current Guard defaults are global 8, per-client 4, and batch 3.
-After production Plex MediaInfo writing provides high coverage and the load is
-retested, global 16, per-client 4, and batch 3 may be evaluated. No new Guard
-mode or configuration is planned for this release.
+Equivalent single-item metadata GET requests may use the bounded native Plex
+micro-batch adapter before Guard admission; invalid batches return through the
+single-item limits. Guard changes remain evidence-driven rather than tied to a
+future Plex MediaInfo write strategy.
 
 The complete MoviePilot, MediaVault, 115 share, ownership, seeding, cleanup,
 MediaInfo, and projection design is documented in

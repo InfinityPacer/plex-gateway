@@ -31,6 +31,11 @@ type Metrics struct {
 	metadataBatchTimeouts            atomic.Uint64
 	metadataBatchActive              atomic.Int64
 	metadataBatchQueued              atomic.Int64
+	metadataCoalesceOffered          atomic.Uint64
+	metadataCoalesceBatches          atomic.Uint64
+	metadataCoalesceItems            atomic.Uint64
+	metadataCoalesceFallbacks        atomic.Uint64
+	metadataCoalesceActive           atomic.Int64
 	mediaInfoCacheHits               atomic.Uint64
 	mediaInfoCacheMisses             atomic.Uint64
 	mediaInfoProbeOffered            atomic.Uint64
@@ -102,6 +107,11 @@ type Snapshot struct {
 	MetadataBatchGuardTimeoutsTotal       uint64            `json:"metadata_batch_guard_timeouts_total"`
 	MetadataBatchGuardActive              int64             `json:"metadata_batch_guard_active"`
 	MetadataBatchGuardQueued              int64             `json:"metadata_batch_guard_queued"`
+	MetadataCoalesceOfferedTotal          uint64            `json:"metadata_coalesce_offered_total"`
+	MetadataCoalesceBatchesTotal          uint64            `json:"metadata_coalesce_batches_total"`
+	MetadataCoalesceItemsTotal            uint64            `json:"metadata_coalesce_items_total"`
+	MetadataCoalesceFallbacksTotal        uint64            `json:"metadata_coalesce_fallbacks_total"`
+	MetadataCoalesceActive                int64             `json:"metadata_coalesce_active"`
 	MediaInfoCacheHitsTotal               uint64            `json:"mediainfo_cache_hits_total"`
 	MediaInfoCacheMissesTotal             uint64            `json:"mediainfo_cache_misses_total"`
 	MediaInfoProbeOfferedTotal            uint64            `json:"mediainfo_probe_offered_total"`
@@ -392,6 +402,29 @@ func (m *Metrics) DecMetadataBatchGuardQueued() {
 	decrementGauge(&m.metadataBatchQueued)
 }
 
+// IncMetadataCoalesceOffered records one eligible single-item read entering
+// the bounded aggregation window.
+func (m *Metrics) IncMetadataCoalesceOffered() { m.metadataCoalesceOffered.Add(1) }
+
+// IncMetadataCoalesceBatch records one native Plex batch and its unique item
+// count. Duplicate waiters do not inflate the item count.
+func (m *Metrics) IncMetadataCoalesceBatch(items int) {
+	m.metadataCoalesceBatches.Add(1)
+	if items > 0 {
+		m.metadataCoalesceItems.Add(uint64(items))
+	}
+}
+
+// IncMetadataCoalesceFallback records a batch that returned through bounded
+// single-item Plex requests because its response was not safely splittable.
+func (m *Metrics) IncMetadataCoalesceFallback() { m.metadataCoalesceFallbacks.Add(1) }
+
+// IncMetadataCoalesceActive marks one native Plex batch in flight.
+func (m *Metrics) IncMetadataCoalesceActive() { m.metadataCoalesceActive.Add(1) }
+
+// DecMetadataCoalesceActive marks one native Plex batch complete.
+func (m *Metrics) DecMetadataCoalesceActive() { decrementGauge(&m.metadataCoalesceActive) }
+
 // ObserveResolverLatency records one MediaVault direct-link lookup without
 // attaching request, client, Part, or URL labels.
 func (m *Metrics) ObserveResolverLatency(duration time.Duration) {
@@ -478,6 +511,11 @@ func (m *Metrics) Snapshot() Snapshot {
 		MetadataBatchGuardTimeoutsTotal:       m.metadataBatchTimeouts.Load(),
 		MetadataBatchGuardActive:              m.metadataBatchActive.Load(),
 		MetadataBatchGuardQueued:              m.metadataBatchQueued.Load(),
+		MetadataCoalesceOfferedTotal:          m.metadataCoalesceOffered.Load(),
+		MetadataCoalesceBatchesTotal:          m.metadataCoalesceBatches.Load(),
+		MetadataCoalesceItemsTotal:            m.metadataCoalesceItems.Load(),
+		MetadataCoalesceFallbacksTotal:        m.metadataCoalesceFallbacks.Load(),
+		MetadataCoalesceActive:                m.metadataCoalesceActive.Load(),
 		MediaInfoCacheHitsTotal:               m.mediaInfoCacheHits.Load(),
 		MediaInfoCacheMissesTotal:             m.mediaInfoCacheMisses.Load(),
 		MediaInfoProbeOfferedTotal:            m.mediaInfoProbeOffered.Load(),

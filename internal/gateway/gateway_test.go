@@ -70,7 +70,7 @@ func TestTransparentProxyPreservesRequestAndResponse(t *testing.T) {
 func TestMetadataAnalysisFilterIsAppliedBeforePlexProxy(t *testing.T) {
 	registry := metrics.New()
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if got := request.URL.RawQuery; got != "X-Plex-Token=a%2Bb&includeMarkers=1" {
+		if got := request.URL.RawQuery; got != "checkFiles=1&X-Plex-Token=a%2Bb&includeMarkers=1" {
 			t.Fatalf("upstream query = %q", got)
 		}
 		if got := request.Header.Get("X-Plex-Client-Identifier"); got != "client-id" {

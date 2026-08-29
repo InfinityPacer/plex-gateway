@@ -601,8 +601,8 @@ Gateway 应负责：
 - 透明转发 Plex API 和观看状态；
 - 只对已确认 STRM Part 进行 Direct Play/302 适配；
 - 对所有未知和已知项目的详细 metadata 请求执行通用有界准入，保护冷缓存和首次浏览；
-- 对相同认证范围、ratingKey、query profile、内容协商和 Gateway 版本做 singleflight
-  与短缓存，禁止跨 Plex 用户或 token 权限域复用；
+- 对认证范围、完整 query、客户端 Header、内容协商和远端身份一致的单项读取做短窗口
+  微批，不缓存 metadata，禁止跨 Plex 用户、Token、Cookie 或 Authorization 权限域复用；
 - 过载时只对非关键详细 metadata 返回合规的缓存响应或明确 `429/503`，不能 fail-open
   绕过保护；时间线、观看状态和本地播放请求不进入该限流池；
 - 云项目定向策略只能使用独立、稳定、只读的分类索引，不能依赖 MoviePilot 私有表，

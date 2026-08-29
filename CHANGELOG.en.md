@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added general Plex metadata micro-batching. Single-item GET requests with
+  identical authentication, query, and client context can share a native Plex
+  batch of 32 items by default and are split back into XML, JSON, or gzip
+  responses by rating key.
+
+### Changed
+
+- The metadata analysis filter now removes only `asyncAugmentMetadata` and
+  preserves `checkFiles`, retaining Plex `Part.accessible` and `Part.exists`
+  semantics.
+
+### Fixed
+
+- Failed batches issue at most one request per unique rating key through the
+  existing single-item Guard, fan out that result to duplicate callers, and
+  temporarily suspend batching for that request group. Canceled callers do not
+  fall back, and canceling all callers terminates the upstream batch.
+
 ## [0.1.2] - 2026-08-29
 
 ### Added

@@ -15,8 +15,10 @@
   因此持久化 I/O 不得阻塞热路径。
 - 单项 metadata 冷 miss 只允许内存级 P2 投递并立即返回 Plex 原响应，不同步读取 SQLite、
   请求 MediaVault 或等待 CDN probe。
-- 详细 metadata 请求默认移除 `checkFiles` 和 `asyncAugmentMetadata`，避免 STRM 浏览突发
-  启动 Plex Scanner；过滤器不解析 body、不缓存响应，也不规范化其余 query。
+- 详细 metadata 请求默认只移除 `asyncAugmentMetadata`，避免浏览突发调度 Plex 后台分析；
+  `checkFiles` 继续透传以保留 `Part.accessible` 与 `Part.exists`。
+- 通用 metadata 微批只合并认证、query、Header、表示和远端身份完全一致的单项 GET。
+  它不缓存响应；HEAD、Range、条件请求和任何不确定身份直接透传。
 - 一个 universal decision 最多等待一次 `MEDIAINFO_COLD_WAIT`。veto 只复用响应增强已经
   取得的新鲜记录，不增加缓存读取或远程探测。
 - 同一 MediaInfo key 的并发请求必须共享 singleflight。并发数不能突破配置的 worker
@@ -43,15 +45,25 @@
 | Metadata 分析过滤器，非 metadata | 6.247-6.429 ns/op | 0 B, 0 allocs | 普通代理路径仅执行方法和前缀判断。 |
 | Metadata 分析过滤器，无目标参数 | 75.36-77.49 ns/op | 32 B, 2 allocs | 保留原请求和完整 raw query。 |
 | Metadata 分析过滤器，移除目标参数 | 377.3-386.3 ns/op | 768 B, 7 allocs | 克隆请求 URL，其他 query 字节不变。 |
+| 32 项 metadata 直接内存 handler | 76.87-78.02 us/op | 约 219.5 KiB, 929 allocs | 仅作为微批代码增量对照，不包含 Plex 网络或数据库。 |
+| 32 项 metadata 微批、拆分与 fan-out | 422.9-448.4 us/op | 约 577.1 KiB, 4856-4857 allocs | 相对直接 handler 增加约 0.35-0.37 ms，包含 goroutine、JSON 拆分及 32 个响应。 |
 
 真实 MediaVault/CDN 抽样为 5/5 成功：MediaVault redirect p50 141 ms、范围
 109-533 ms；受限 CDN ffprobe p50 601 ms、范围 403-674 ms；合计 p50 761 ms、范围
 543-955 ms。每次读取约 1.22 MiB 并发生 2 次 seek。样本量较小，只证明当前探测通常能在
 默认 5 秒冷等待内完成，不能作为 CDN SLA。
 
-当前 Metadata Guard 默认值为单项全局 8、单客户端 4、批量 3。单项全局 16、单客户端 4、
-批量 3 只有在 Plex MediaInfo 写库达到较高覆盖率并完成重新压测后才作为候选，不属于当前
-版本的性能承诺。
+真实 Plex 控制面 A/B 中，直连 Plex 与 Gateway 透明代理单项 metadata p50 均约
+`46-47ms`。Plex 原生 batch 的 16、32、64、100 项响应约为 `50ms`、`94ms`、`182ms`、
+`285ms`。Apple TV 长剧集样本曾在约一秒内发出 1010 个单项请求，其中 581 个唯一条目，
+峰值约 180 请求/秒；固定并发 Guard 会将这种突发转换为多轮排队。上述数据支持默认使用
+32 项、3ms 微批：32 项约为 340 item/s，64 项约为 352 item/s，吞吐只增加约 3.5%，
+但单批延迟和失败回退范围接近翻倍。64 保留为可配置 A/B 候选，不能替代候选部署后的
+客户端首屏验证。
+
+当前 Metadata Guard 默认值为单项全局 8、单客户端 4、批量 3。合成 batch 占用批量池，
+异常回退占用单项池。是否调整这些值只依据候选版本的 Plex 延迟、错误率和真实客户端
+请求矩阵，不与未来 Plex MediaInfo 写入方案绑定。
 
 2026-08-30 的 NAS 阻塞 A/B 将旧候选判定为不可接受：同一冷 metadata 请求直连 Plex
 约 `0.52s`，经旧候选约 `5.15s`，Gateway 热缓存约 `0.15s`。同期实际 CDN ffprobe 平均
@@ -76,7 +88,8 @@
 | 不同 Part 并发 2/4/8 | 受 worker 上限约束 | active、队列、CPU、内存、错误率 | 不突破 `MEDIAINFO_CONCURRENCY`，不拖慢本地或 302 路径。 |
 | A/B/C 快速切换 | 当前项 P0 probe、P1 邻近预热 | 每项延迟、身份对应、替换/队列指标 | 新当前项优先排队；不能抢占正在运行的 probe；无跨项 MediaInfo、grant 或 redirect。 |
 | 长剧集 metadata 突发 | Plex、L1；P2 后台可查 SQLite/探测 | 前台响应、P2 队列/过期/远程启动次数 | 前台不等待 P2；唯一 pending P2 <= 50；远程启动间隔 >= 5 s；过期任务 0 MV/CDN。 |
-| 长剧集分析参数过滤 A/B | Plex、L1 | 过滤计数、Scanner 进程、metadata p50/p95/p99、错误率 | 开启过滤后 Scanner 为 0；先保留 Guard 验证，再关闭 Guard 测试 Plex 原生吞吐。 |
+| 长剧集 metadata 微批 | Plex、L1 | 原始单项数、合成 batch 数、唯一 item、fallback、p50/p95/p99 | 同组 batch <= 32；身份不跨组；正常响应 0 fallback；相对透明代理显著降低上游请求并改善页面完成时间。 |
+| 长剧集分析参数过滤 A/B | Plex、L1 | 过滤计数、Scanner 进程、`accessible/exists`、metadata p50/p95/p99 | `asyncAugmentMetadata` 不到达 Plex；`checkFiles` 和对应字段保留；Scanner 为 0。 |
 
 表中的验收条件是候选版本的门槛，不代表本机微基准已经替代端到端验收。当前已有证据
 包括本机代码基准和 5/5 成功的 MediaVault/CDN 探测抽样；本地透明代理、302 热冷路径、
@@ -93,6 +106,9 @@ go test -run '^$' \
   -benchmem -count=5 ./internal/mediainfo
 
 go test -run '^$' -bench '^BenchmarkMetadataAnalysisFilter$' \
+  -benchmem -count=5 ./internal/gateway
+
+go test -run '^$' -bench '^BenchmarkMetadataCoalescerBurst32$' \
   -benchmem -count=5 ./internal/gateway
 ```
 

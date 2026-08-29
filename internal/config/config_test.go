@@ -25,6 +25,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LOG_LEVEL", "")
 	t.Setenv("TRACE_ENABLED", "")
 	t.Setenv("METADATA_ANALYSIS_FILTER_ENABLED", "")
+	t.Setenv("METADATA_COALESCE_ENABLED", "")
 
 	got, err := Load()
 	if err != nil {
@@ -47,6 +48,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if !got.MetadataAnalysisFilter {
 		t.Fatal("MetadataAnalysisFilter = false")
+	}
+	if !got.MetadataCoalesce.Enabled || got.MetadataCoalesce.Window != 3*time.Millisecond || got.MetadataCoalesce.MaxItems != 32 || got.MetadataCoalesce.Timeout != 5*time.Second {
+		t.Fatalf("unexpected metadata coalesce defaults: %#v", got.MetadataCoalesce)
 	}
 	if got.DatabasePath != "./data/plex-gateway.db" {
 		t.Fatalf("DatabasePath = %q", got.DatabasePath)
@@ -93,6 +97,10 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	t.Setenv("METADATA_GUARD_BATCH_ENABLED", "true")
 	t.Setenv("METADATA_GUARD_BATCH_CONCURRENCY", "2")
 	t.Setenv("METADATA_GUARD_QUEUE_TIMEOUT", "5s")
+	t.Setenv("METADATA_COALESCE_ENABLED", "false")
+	t.Setenv("METADATA_COALESCE_WINDOW", "7ms")
+	t.Setenv("METADATA_COALESCE_MAX_ITEMS", "24")
+	t.Setenv("METADATA_COALESCE_TIMEOUT", "4s")
 	t.Setenv("MEDIAINFO_ENABLED", "true")
 	t.Setenv("DATABASE_PATH", "/app_data/test.db")
 	t.Setenv("MEDIAINFO_FFPROBE_PATH", "/usr/bin/ffprobe")
@@ -138,6 +146,9 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	}
 	if got.MetadataAnalysisFilter {
 		t.Fatal("MetadataAnalysisFilter = true")
+	}
+	if got.MetadataCoalesce.Enabled || got.MetadataCoalesce.Window != 7*time.Millisecond || got.MetadataCoalesce.MaxItems != 24 || got.MetadataCoalesce.Timeout != 4*time.Second {
+		t.Fatalf("metadata coalesce = %#v", got.MetadataCoalesce)
 	}
 	if got.DatabasePath != "/app_data/test.db" {
 		t.Fatalf("DatabasePath = %q", got.DatabasePath)
@@ -185,6 +196,29 @@ func TestLoadRejectsMetadataClientLimitAboveGlobalLimit(t *testing.T) {
 	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "must not exceed") {
 		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestLoadRejectsUnsafeMetadataCoalesceBounds(t *testing.T) {
+	tests := []struct {
+		name  string
+		env   string
+		value string
+	}{
+		{name: "window", env: "METADATA_COALESCE_WINDOW", value: "101ms"},
+		{name: "too_few_items", env: "METADATA_COALESCE_MAX_ITEMS", value: "1"},
+		{name: "items", env: "METADATA_COALESCE_MAX_ITEMS", value: "65"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("PLEX_URL", "http://plex:32400")
+			t.Setenv(test.env, test.value)
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "must") {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
 	}
 }
 
