@@ -47,6 +47,7 @@ type Options struct {
 	MediaInfoEnrichmentConcurrency int
 	MediaInfoPrewarmer             cloudRedirectPrewarmer
 	MediaInfoPrewarmStatus         func() prewarm.Status
+	PlaybackVeto                   bool
 }
 
 type cloudRedirectPrewarmer interface {
@@ -148,6 +149,7 @@ func New(options Options) http.Handler {
 		logger:    logger,
 		metrics:   registry,
 		grants:    playback.NewGrantStore(defaultDecisionGrantTTL, defaultDecisionGrantLimit),
+		veto:      newPlaybackVeto(options.PlaybackVeto),
 		probe: &decisionMetadataProbe{
 			upstream: options.Upstream,
 			client: &http.Client{

@@ -3,7 +3,6 @@ package gateway
 import (
 	"bytes"
 	"compress/gzip"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,12 +10,18 @@ import (
 	"testing"
 )
 
-func TestDecisionCaptureReplacesGzipBodyAndEntityHeaders(t *testing.T) {
+func TestDecisionCaptureReplacesGzipBodyAndRepresentationHeaders(t *testing.T) {
 	destination := httptest.NewRecorder()
 	capture := newDecisionResponseCapture(destination, 1<<20)
 	capture.Header().Set("Content-Encoding", "gzip")
 	capture.Header().Set("Content-Length", "1")
-	capture.Header().Set("ETag", `"stale"`)
+	for _, name := range []string{
+		"Accept-Ranges", "Content-MD5", "Content-Range", "Digest", "ETag",
+		"Last-Modified", "Trailer", "Transfer-Encoding", "Vary",
+	} {
+		capture.Header().Set(name, "stale")
+	}
+	capture.Header().Set("Content-Type", "application/xml")
 	capture.WriteHeader(http.StatusOK)
 
 	var original bytes.Buffer
@@ -33,19 +38,19 @@ func TestDecisionCaptureReplacesGzipBodyAndEntityHeaders(t *testing.T) {
 	if err := capture.commit(); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := gzip.NewReader(bytes.NewReader(destination.Body.Bytes()))
-	if err != nil {
-		t.Fatal(err)
+	if destination.Body.String() != "enriched" || destination.Header().Get("Content-Encoding") != "" || destination.Header().Get("Content-Length") != strconv.Itoa(len("enriched")) {
+		t.Fatalf("headers=%#v body=%q", destination.Header(), destination.Body.String())
 	}
-	decoded, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
+	if destination.Header().Get("Content-Type") != "application/xml" {
+		t.Fatalf("Content-Type = %q", destination.Header().Get("Content-Type"))
 	}
-	if err := reader.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if string(decoded) != "enriched" || destination.Header().Get("ETag") != "" || destination.Header().Get("Content-Length") != strconv.Itoa(destination.Body.Len()) {
-		t.Fatalf("headers=%#v body=%q", destination.Header(), decoded)
+	for _, name := range []string{
+		"Accept-Ranges", "Content-MD5", "Content-Range", "Digest", "ETag",
+		"Last-Modified", "Trailer", "Transfer-Encoding", "Vary",
+	} {
+		if got := destination.Header().Get(name); got != "" {
+			t.Errorf("%s = %q, want empty", name, got)
+		}
 	}
 }
 

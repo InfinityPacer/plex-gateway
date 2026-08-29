@@ -100,10 +100,10 @@ func TestGrantedCloudTranscodeStartRedirectsToDirectURL(t *testing.T) {
 			}))
 			defer plex.Close()
 
-			handler, registry, cache := newCloudHandler(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{
+			handler, registry, cache := newCloudHandlerWithVeto(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{
 				PlexPrefix:  "/media/cloud",
 				LocalPrefix: localRoot,
-			}})
+			}}, true)
 			performCloudDecision(t, handler, query, http.StatusOK)
 
 			response := httptest.NewRecorder()
@@ -622,10 +622,10 @@ func TestLocalTranscodeStartRemainsUnchanged(t *testing.T) {
 	}))
 	defer plex.Close()
 
-	handler, _, _ := newCloudHandler(t, plex.URL, "http://mediavault.invalid:7811", []pathmap.Mapping{{
+	handler, _, _ := newCloudHandlerWithVeto(t, plex.URL, "http://mediavault.invalid:7811", []pathmap.Mapping{{
 		PlexPrefix:  "/media/cloud",
 		LocalPrefix: t.TempDir(),
-	}})
+	}}, true)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/start.mpd?"+originalQuery, nil))
 	if response.Code != http.StatusAccepted || startQuery != originalQuery {

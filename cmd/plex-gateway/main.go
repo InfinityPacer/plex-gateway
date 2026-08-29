@@ -123,6 +123,7 @@ func run() error {
 		MediaInfoEnrichmentConcurrency: cfg.MediaInfo.EnrichmentWaiters,
 		MediaInfoPrewarmer:             prewarmService,
 		MediaInfoPrewarmStatus:         prewarmStatus,
+		PlaybackVeto:                   cfg.PlaybackVeto,
 	})
 	handler := newMaintenanceHandler(gatewayHandler, mediaInfoService, cfg.DatabasePath, logger)
 	server := &http.Server{
@@ -153,6 +154,7 @@ func run() error {
 			"mediainfo_prewarm_before", cfg.MediaInfo.PrewarmBefore,
 			"mediainfo_prewarm_after", cfg.MediaInfo.PrewarmAfter,
 			"mediainfo_prewarm_interval_ms", cfg.MediaInfo.PrewarmInterval.Milliseconds(),
+			"playback_veto_enabled", cfg.PlaybackVeto,
 		)
 		serveErrors <- server.ListenAndServe()
 	}()

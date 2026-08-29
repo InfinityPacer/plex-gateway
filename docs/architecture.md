@@ -18,6 +18,11 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   consume interactive metadata slots. Neither pool caches or rewrites Plex
   responses. Library listings, metadata mutations, playback paths, timeline,
   and watch-state traffic do not enter these pools.
+- The current Guard defaults are global 8 for single-item metadata, per-client
+  4, and batch 3. A global 16, per-client 4, batch 3 candidate is reserved for
+  evaluation after Plex MediaInfo writes provide high coverage and the resulting
+  load is retested. No additional Guard mode or configuration is part of this
+  release.
 - Successful XML or JSON Plex responses are observed to populate the in-memory
   `Part.id` cache without changing their bytes. When MediaInfo is available, an
   authenticated single-item metadata response may also fill missing whitelisted
@@ -27,7 +32,13 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   selection state, and an existing Stream set is never expanded. The transform
   is bounded and preserves the original Plex response on timeout, ambiguity,
   unsupported encoding, or any other failure. Background library crawlers
-  identified by `skipRefresh` and a `-Library` product consume cache only.
+  identified by `skipRefresh` and a `-Library` product consume cache only. Hot
+  records remain concurrently projectable; one continuous browsing burst may
+  wait on only one cold probe. After the admitted synchronous wait releases its
+  slot, a fixed five-second window begins. Other cold misses preserve the Plex
+  response, and rejected requests do not renew the window. An admitted probe
+  may finish in the background after the request wait ends and persist to L1
+  and SQLite, preventing guard-delayed request waves from starving later work.
 - `GET` and `HEAD` requests below `/library/parts/{partID}/...` are eligible for
   interception only when the cached `Part.file` has a configured cloud
   extension and maps to a readable local STRM file.
@@ -41,6 +52,11 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   Plex's response remain intact. The complete XML or JSON decision response is
   observed without rewriting it; a start grant exists only when the same Part
   is explicitly marked `directplay`.
+- After Plex accepts the exact STRM Part for Direct Play, an optional playback
+  veto may inspect the fresh MediaInfo record already obtained for response
+  enrichment. The built-in veto covers only Plex for Apple TV on tvOS with
+  Dolby Vision Profile 5 and BL compatibility ID 0. A match returns a
+  Plex-compatible unsupported envelope and creates no Direct Play grant.
 - Eligible universal `start`, `start.mpd`, and `start.m3u8` requests repeat the
   Part authorization using the exact selection captured by a short-lived Direct
   Play decision grant for the same client session and Media/Part, then resolve
@@ -75,7 +91,7 @@ control-file and metadata readers.
 | State | Authority and writer | Invalidation |
 | --- | --- | --- |
 | Plex library, descriptive metadata, and watch state | Plex only; the gateway forwards timeline/scrobble traffic unchanged. | Plex lifecycle. |
-| Technical MediaInfo | A validated producer record, or Gateway SQLite for fallback-probed media; Plex fields and response enrichment are projections. | Source or STRM fingerprint change, schema change, or freshness policy. |
+| Technical MediaInfo | A validated producer record, or Gateway SQLite for fallback-probed media; Plex fields and response enrichment are projections. Plex DB production writes are not enabled in this release. | Source or STRM fingerprint change, schema change, or freshness policy. |
 | Part cache | Derived by metadata observation or an authenticated playback selection, keyed by `Part.id`. | Configured TTL or process restart. |
 | Direct Play grant | Published only after a complete Plex decision explicitly accepts the exact Part; a new related decision revokes the previous grant first. | Five-minute TTL, bounded eviction, or explicit revocation. |
 | MediaVault direct URL | Produced for the active authorized request and copied only to `Location`. | Never persisted or reused by the gateway. |
@@ -154,11 +170,22 @@ Universal start routes are redirected only after the same STRM selection and
 authorization checks; manifest segments and genuine transcode traffic remain
 Plex-owned.
 
-All clients use the same MediaInfo projection rules. The gateway does not infer
-format compatibility from a product name, device name, or User-Agent. Part and
-universal-start redirects never wait for MediaInfo. A decision may perform one
-bounded cache lookup or interactive probe; timeout or failure preserves Plex's
-original response.
+All clients use the same MediaInfo projection rules. Part and universal-start
+redirects never wait for MediaInfo. An L1 hit does not synchronously read SQLite
+for the request; access renewal may touch SQLite asynchronously. An L1 miss may
+use the persistent record or one bounded interactive probe, and timeout or
+failure preserves the existing Direct Play path. Metadata browsing has a
+separate single synchronous cold-probe slot. After the admitted synchronous wait
+releases its slot, a fixed five-second window begins. Misses rejected inside that
+window do not renew it, and an admitted probe can finish in the background and
+write L1 and SQLite after the request waiter leaves.
+
+`PLAYBACK_VETO_ENABLED=false` leaves a nil hook in the decision handler. The
+experimental hook is disabled by default. When enabled, it only consumes the
+fresh MediaInfo record already obtained by that request and checks the built-in
+Apple TV Plex Dolby Vision Profile 5 combination. It has no cache, persistence,
+Part interception, remote I/O, or positive allow semantics. Missing or
+conflicting facts preserve Plex's Direct Play response.
 
 ## Client compatibility boundary
 
@@ -173,6 +200,15 @@ claim cloud STRM support for Plex Web. Proxying media bytes, repackaging media,
 or modifying the Plex Web client would violate or expand the playback-plane
 boundary; none is enabled by this project. Local media remains transparently
 proxied and retains Plex's normal Web compatibility.
+
+## Playback veto contract
+
+The veto is a best-effort compatibility override, not an authorization or
+capability engine. It runs only after Plex has accepted the exact Part for
+Direct Play and MediaInfo enrichment already has a complete, fresh record.
+Returning a veto replaces that decision response and prevents creation of its
+short-lived start grant. It does not block a direct Part request and therefore
+must not be treated as a security boundary.
 
 ## Analysis-plane boundary
 
@@ -193,10 +229,18 @@ is accepted, the body is not consumed, and every error preserves the other
 probe fields. This fallback remains inside the MediaInfo worker and never enters
 the synchronous 302 path.
 A stable MediaVault or MoviePilot provider can replace remote probing without
-changing playback. Plex persistence remains a feasibility question across an
-official API, another supported PMS interface, and an isolated database helper.
-Intro and credits work starts with an isolated Plex marker API probe. See
+changing playback. Plex DB production writing is a next-stage evaluation only,
+covering an official API, another supported PMS interface, and an isolated
+database helper with explicit coverage, backup, and rollback tests. This release
+does not select or enable a Plex DB write path. Intro and credits work starts
+with an isolated Plex marker API probe. See
 [media-lifecycle-architecture.md](media-lifecycle-architecture.md).
+
+Performance acceptance and reproducible microbenchmarks are defined in
+[performance-matrix.md](performance-matrix.md). Local proxying and the 302 path
+remain higher priority than analysis coverage; a feature that moves MediaInfo,
+SQLite, or CDN I/O into Part or universal-start handling is an architecture
+regression.
 
 ## Cache lifecycle
 

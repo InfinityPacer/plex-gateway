@@ -10,6 +10,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/InfinityPacer/plex-gateway/internal/mediainfo"
@@ -22,6 +23,7 @@ import (
 const (
 	defaultMediaInfoColdWait        = 5 * time.Second
 	defaultMediaInfoCacheLookupWait = 100 * time.Millisecond
+	defaultMetadataColdProbeQuiet   = 5 * time.Second
 	defaultMediaInfoResponseLimit   = 8 << 20
 	defaultMediaInfoEnrichmentSlots = 8
 )
@@ -55,6 +57,12 @@ type metadataEnrichmentHandler struct {
 	responseLimit   int64
 	waiters         chan struct{}
 	metrics         *metrics.Metrics
+
+	coldProbeMu           sync.Mutex
+	coldProbeActive       bool
+	coldProbeBlockedUntil time.Time
+	coldProbeQuiet        time.Duration
+	now                   func() time.Time
 }
 
 func newMetadataEnrichmentHandler(options metadataEnrichmentOptions, next http.Handler) http.Handler {
@@ -80,7 +88,8 @@ func newMetadataEnrichmentHandler(options metadataEnrichmentOptions, next http.H
 	return &metadataEnrichmentHandler{
 		next: next, service: options.Service, mapper: options.Mapper, resolver: options.Resolver,
 		cloudExtensions: normalizedExtensionSet(options.CloudExtensions), coldWait: coldWait,
-		responseLimit: responseLimit, waiters: make(chan struct{}, concurrency), metrics: registry,
+		responseLimit: responseLimit, waiters: make(chan struct{}, concurrency),
+		coldProbeQuiet: defaultMetadataColdProbeQuiet, now: time.Now, metrics: registry,
 	}
 }
 
@@ -143,17 +152,19 @@ func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, reque
 		return
 	}
 	key := mediainfo.Key{PartID: target.Part.ID, STRMFingerprint: fingerprint}
-	var record mediainfo.Record
-	if mediaInfoCacheOnlyRequest(request) {
-		var found bool
-		lookupContext, cancel := context.WithTimeout(request.Context(), defaultMediaInfoCacheLookupWait)
-		record, found = handler.service.GetContext(lookupContext, key)
-		cancel()
-		if !found {
+	lookupContext, cancel := context.WithTimeout(request.Context(), defaultMediaInfoCacheLookupWait)
+	record, found := handler.service.GetContext(lookupContext, key)
+	cancel()
+	if !found {
+		cacheOnly := mediaInfoCacheOnlyRequest(request)
+		if cacheOnly || !handler.acquireColdProbe() {
+			if !cacheOnly {
+				handler.metrics.IncMediaInfoWaitRejected()
+			}
 			handler.replay(capture, rawBody)
 			return
 		}
-	} else {
+		defer handler.releaseColdProbe()
 		waitContext, cancel := context.WithTimeout(request.Context(), handler.coldWait)
 		record, err = handler.service.Ensure(waitContext, mediainfo.Request{
 			Key: key, RatingKey: ratingKey, Target: strmTarget,
@@ -185,6 +196,31 @@ func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, reque
 		return
 	}
 	handler.metrics.IncMediaInfoEnriched()
+}
+
+// A completed probe opens a fixed quiet interval. Rejected requests never move
+// its end, so continuous metadata traffic cannot starve the next probe.
+func (handler *metadataEnrichmentHandler) acquireColdProbe() bool {
+	handler.coldProbeMu.Lock()
+	defer handler.coldProbeMu.Unlock()
+
+	now := handler.now()
+	if handler.coldProbeActive || now.Before(handler.coldProbeBlockedUntil) {
+		return false
+	}
+	handler.coldProbeActive = true
+	return true
+}
+
+func (handler *metadataEnrichmentHandler) releaseColdProbe() {
+	handler.coldProbeMu.Lock()
+	defer handler.coldProbeMu.Unlock()
+	if !handler.coldProbeActive {
+		return
+	}
+	now := handler.now()
+	handler.coldProbeActive = false
+	handler.coldProbeBlockedUntil = now.Add(handler.coldProbeQuiet)
 }
 
 // serveCachedCollection enriches already-probed items without admitting remote

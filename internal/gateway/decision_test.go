@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"log/slog"
@@ -9,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/InfinityPacer/plex-gateway/internal/partcache"
 	"github.com/InfinityPacer/plex-gateway/internal/pathmap"
 	"github.com/InfinityPacer/plex-gateway/internal/playback"
+	"github.com/InfinityPacer/plex-gateway/internal/plexmeta"
 	"github.com/InfinityPacer/plex-gateway/internal/resolver"
 )
 
@@ -26,10 +30,12 @@ type decisionMediaInfoStub struct {
 	memoryHit     bool
 	waitForCancel bool
 	ensureCalls   int
+	memoryCalls   int
 	request       mediainfo.Request
 }
 
 func (stub *decisionMediaInfoStub) GetMemory(mediainfo.Key) (mediainfo.Record, bool) {
+	stub.memoryCalls++
 	return stub.record, stub.memoryHit
 }
 
@@ -60,7 +66,7 @@ func TestCloudDecisionProjectsMediaInfoWithoutClientSpecificPolicy(t *testing.T)
 			media := completeProjectionMedia()
 			media.Size = 987654321
 			mediaInfo := &decisionMediaInfoStub{record: mediainfo.Record{Media: media}}
-			handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond)
+			handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond, nil)
 			request := decisionProjectionRequest()
 			request.Header.Set("User-Agent", client.userAgent)
 			request.Header.Set("X-Plex-Product", client.product)
@@ -92,7 +98,7 @@ func TestCloudDecisionProjectsMediaInfoWithoutClientSpecificPolicy(t *testing.T)
 
 func TestCloudDecisionMediaInfoTimeoutFailsOpen(t *testing.T) {
 	mediaInfo := &decisionMediaInfoStub{waitForCancel: true}
-	handler := newDecisionProjectionHandler(t, mediaInfo, 10*time.Millisecond)
+	handler := newDecisionProjectionHandler(t, mediaInfo, 10*time.Millisecond, nil)
 	response := httptest.NewRecorder()
 	started := time.Now()
 
@@ -109,7 +115,243 @@ func TestCloudDecisionMediaInfoTimeoutFailsOpen(t *testing.T) {
 	}
 }
 
-func newDecisionProjectionHandler(t *testing.T, mediaInfo decisionMediaInfoService, coldWait time.Duration) http.Handler {
+func TestWriteIncompatibleDecisionClearsRepresentationHeadersAndHonorsHEAD(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		method string
+		accept string
+	}{
+		{name: "XML GET", method: http.MethodGet, accept: "application/xml"},
+		{name: "JSON GET", method: http.MethodGet, accept: "application/json"},
+		{name: "XML HEAD", method: http.MethodHead, accept: "application/xml"},
+		{name: "JSON HEAD", method: http.MethodHead, accept: "application/json"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			for _, name := range []string{
+				"Accept-Ranges", "Content-Encoding", "Content-MD5", "Content-Range", "Digest",
+				"ETag", "Last-Modified", "Trailer", "Transfer-Encoding", "Vary",
+			} {
+				response.Header().Set(name, "stale")
+			}
+			request := httptest.NewRequest(test.method, "/video/:/transcode/universal/decision", nil)
+			request.Header.Set("Accept", test.accept)
+
+			writeIncompatibleDecision(response, request)
+
+			contentType, body := plexmeta.IncompatibleDecision(test.accept)
+			if response.Code != http.StatusOK || response.Header().Get("Content-Type") != contentType ||
+				response.Header().Get("Content-Length") != strconv.Itoa(len(body)) || response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("status=%d headers=%#v", response.Code, response.Header())
+			}
+			wantBody := string(body)
+			if test.method == http.MethodHead {
+				wantBody = ""
+			}
+			if response.Body.String() != wantBody {
+				t.Fatalf("body=%q want=%q", response.Body.String(), wantBody)
+			}
+			for _, name := range []string{
+				"Accept-Ranges", "Content-Encoding", "Content-MD5", "Content-Range", "Digest",
+				"ETag", "Last-Modified", "Trailer", "Transfer-Encoding", "Vary",
+			} {
+				if got := response.Header().Get(name); got != "" {
+					t.Errorf("%s = %q, want empty", name, got)
+				}
+			}
+		})
+	}
+}
+
+func TestCloudDecisionJSONProjectionClearsRepresentationHeaders(t *testing.T) {
+	media := completeProjectionMedia()
+	mediaInfo := &decisionMediaInfoStub{record: freshDecisionRecord(media), memoryHit: true}
+	handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond, nil).(*decisionHandler)
+	handler.plex = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		for _, name := range []string{
+			"Accept-Ranges", "Content-MD5", "Content-Range", "Digest", "ETag", "Last-Modified",
+			"Trailer", "Transfer-Encoding", "Vary",
+		} {
+			w.Header().Set(name, "stale")
+		}
+		w.Header().Set("Content-Length", "1")
+		_, _ = w.Write([]byte(`{"MediaContainer":{"Metadata":[{"Media":[{"decision":"directplay","Part":[{"id":9,"key":"/library/parts/9/1/file","size":301,"decision":"directplay"}]}]}]}}`))
+	})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, decisionProjectionRequest())
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"container":"mkv"`) {
+		t.Fatalf("status=%d headers=%#v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	if response.Header().Get("Content-Length") != strconv.Itoa(response.Body.Len()) || response.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("body headers=%#v body_len=%d", response.Header(), response.Body.Len())
+	}
+	for _, name := range []string{
+		"Accept-Ranges", "Content-Encoding", "Content-MD5", "Content-Range", "Digest", "ETag",
+		"Last-Modified", "Trailer", "Transfer-Encoding", "Vary",
+	} {
+		if got := response.Header().Get(name); got != "" {
+			t.Errorf("%s = %q, want empty", name, got)
+		}
+	}
+}
+
+func TestCloudDecisionVetoReplacesGzipResponseWithIdentityBody(t *testing.T) {
+	media := completeProjectionMedia()
+	media.Streams[0].HDRFormat = "dolby_vision"
+	media.Streams[0].DolbyVision = &mediainfo.DolbyVision{Profile: 5, BLCompatID: 0}
+	mediaInfo := &decisionMediaInfoStub{record: freshDecisionRecord(media), memoryHit: true}
+	handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond, newPlaybackVeto(true)).(*decisionHandler)
+	handler.plex = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.Header().Set("Content-Encoding", "gzip")
+		for _, name := range []string{
+			"Accept-Ranges", "Content-MD5", "Content-Range", "Digest", "ETag", "Last-Modified",
+			"Trailer", "Transfer-Encoding", "Vary",
+		} {
+			w.Header().Set(name, "stale")
+		}
+		var compressed bytes.Buffer
+		writer := gzip.NewWriter(&compressed)
+		_, _ = writer.Write([]byte(`<MediaContainer><Video><Media decision="directplay"><Part id="9" key="/library/parts/9/1/file" size="301" decision="directplay"/></Media></Video></MediaContainer>`))
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(compressed.Len()))
+		_, _ = w.Write(compressed.Bytes())
+	})
+	request := decisionProjectionRequest()
+	request.Header.Set("Accept", "application/xml")
+	request.Header.Set("X-Plex-Product", "Plex for Apple TV")
+	request.Header.Set("X-Plex-Platform", "tvOS")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `transcodeDecisionCode="4005"`) || response.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("status=%d headers=%#v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	if response.Header().Get("Content-Length") != strconv.Itoa(response.Body.Len()) {
+		t.Fatalf("Content-Length=%q body_len=%d", response.Header().Get("Content-Length"), response.Body.Len())
+	}
+	for _, name := range []string{
+		"Accept-Ranges", "Content-MD5", "Content-Range", "Digest", "ETag", "Last-Modified",
+		"Trailer", "Transfer-Encoding", "Vary",
+	} {
+		if got := response.Header().Get(name); got != "" {
+			t.Errorf("%s = %q, want empty", name, got)
+		}
+	}
+}
+
+func TestCloudDecisionOptionalVetoUsesExistingFreshMediaInfo(t *testing.T) {
+	media := completeProjectionMedia()
+	media.Streams[0].HDRFormat = "dolby_vision"
+	media.Streams[0].DolbyVision = &mediainfo.DolbyVision{Profile: 5, BLCompatID: 0}
+	mediaInfo := &decisionMediaInfoStub{record: freshDecisionRecord(media), memoryHit: true}
+	handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond, newPlaybackVeto(true))
+	request := decisionProjectionRequest()
+	request.Header.Set("X-Plex-Product", "Plex for Apple TV")
+	request.Header.Set("X-Plex-Platform", "tvOS")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `transcodeDecisionCode="4005"`) || strings.Contains(response.Body.String(), `decision="directplay"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if mediaInfo.memoryCalls != 1 || mediaInfo.ensureCalls != 0 {
+		t.Fatalf("GetMemory calls=%d Ensure calls=%d", mediaInfo.memoryCalls, mediaInfo.ensureCalls)
+	}
+}
+
+func TestCloudDecisionDisabledVetoPreservesDV5WithSameMediaInfoIO(t *testing.T) {
+	media := completeProjectionMedia()
+	media.Streams[0].HDRFormat = "dolby_vision"
+	media.Streams[0].DolbyVision = &mediainfo.DolbyVision{Profile: 5, BLCompatID: 0}
+	mediaInfo := &decisionMediaInfoStub{record: freshDecisionRecord(media), memoryHit: true}
+	handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond, nil)
+	request := decisionProjectionRequest()
+	request.Header.Set("X-Plex-Product", "Plex for Apple TV")
+	request.Header.Set("X-Plex-Platform", "tvOS")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `decision="directplay"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if mediaInfo.memoryCalls != 1 || mediaInfo.ensureCalls != 0 {
+		t.Fatalf("GetMemory calls=%d Ensure calls=%d", mediaInfo.memoryCalls, mediaInfo.ensureCalls)
+	}
+}
+
+func TestCloudDecisionOptionalVetoAbstainsOnStaleMediaInfo(t *testing.T) {
+	media := completeProjectionMedia()
+	media.Streams[0].HDRFormat = "dolby_vision"
+	media.Streams[0].DolbyVision = &mediainfo.DolbyVision{Profile: 5, BLCompatID: 0}
+	now := time.Now().UTC()
+	record := freshDecisionRecord(media)
+	record.ProbedAt = now.Add(-2 * time.Hour)
+	record.ExpiresAt = now.Add(-time.Hour)
+	mediaInfo := &decisionMediaInfoStub{record: record, memoryHit: true}
+	handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond, newPlaybackVeto(true))
+	request := decisionProjectionRequest()
+	request.Header.Set("X-Plex-Product", "Plex for Apple TV")
+	request.Header.Set("X-Plex-Platform", "tvOS")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `decision="directplay"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestCloudDecisionVetoDoesNotOverrideCompletePlexDecision(t *testing.T) {
+	media := completeProjectionMedia()
+	media.Streams[0].HDRFormat = "dolby_vision"
+	media.Streams[0].DolbyVision = &mediainfo.DolbyVision{Profile: 5, BLCompatID: 0}
+	mediaInfo := &decisionMediaInfoStub{record: freshDecisionRecord(media), memoryHit: true}
+	handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond, newPlaybackVeto(true)).(*decisionHandler)
+	base := []byte(`<MediaContainer><Video><Media id="11" decision="directplay"><Part id="9" key="/library/parts/9/1/file" size="301" decision="directplay"/></Media></Video></MediaContainer>`)
+	complete, changed, err := plexmeta.EnrichDecision(base, "application/xml", plexmeta.Part{ID: "9", Key: "/library/parts/9/1/file"}, media)
+	if err != nil || !changed {
+		t.Fatalf("prepare complete decision changed=%v err=%v", changed, err)
+	}
+	handler.plex = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write(complete)
+	})
+	request := decisionProjectionRequest()
+	request.Header.Set("X-Plex-Product", "Plex for Apple TV")
+	request.Header.Set("X-Plex-Platform", "tvOS")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `decision="directplay"`) || strings.Contains(response.Body.String(), `transcodeDecisionCode="4005"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func freshDecisionRecord(media mediainfo.Media) mediainfo.Record {
+	now := time.Now().UTC()
+	return mediainfo.Record{
+		Key:      mediainfo.Key{PlexServerID: "plex", PartID: "9", STRMFingerprint: strings.Repeat("a", 64)},
+		Provider: mediainfo.ProviderMediaVaultFFProbe, ProviderRevision: mediainfo.ProviderRevisionFFProbeJSONV3,
+		SchemaVersion: mediainfo.SchemaVersion, Media: media,
+		ProbedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour),
+		LastAccessedAt: now, RetainUntil: now.Add(24 * time.Hour),
+	}
+}
+
+func newDecisionProjectionHandler(
+	t *testing.T,
+	mediaInfo decisionMediaInfoService,
+	coldWait time.Duration,
+	veto playbackVeto,
+) http.Handler {
 	t.Helper()
 	localRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localRoot, "episode.strm"), []byte("http://mediavault.invalid/redirect/pick/episode.mkv\n"), 0o600); err != nil {
@@ -158,7 +400,7 @@ func newDecisionProjectionHandler(t *testing.T, mediaInfo decisionMediaInfoServi
 			client:   &http.Client{Timeout: time.Second},
 			maxBytes: 1 << 20,
 		},
-		service: cloudPlayback, mediaInfo: mediaInfo, coldWait: coldWait,
+		service: cloudPlayback, mediaInfo: mediaInfo, coldWait: coldWait, veto: veto,
 		grants: playback.NewGrantStore(time.Minute, 16), logger: logger, metrics: metrics.New(),
 	}
 }

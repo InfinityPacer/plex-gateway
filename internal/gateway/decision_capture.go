@@ -137,26 +137,41 @@ func (w *decisionResponseCapture) body() []byte {
 }
 
 // replaceDecodedBody swaps one complete bounded decision response before it is
-// exposed to the client. Wire encoding is preserved while stale entity
-// validators are removed because the response representation has changed.
+// exposed to the client. The replacement is emitted without upstream content
+// coding because the response representation has changed.
 func (w *decisionResponseCapture) replaceDecodedBody(body []byte) error {
 	if !w.successful() || w.committed || w.passthrough {
 		return errors.New("decision response is not replaceable")
 	}
-	wireBody, err := encodeMetadataBody(body, w.Header().Get("Content-Encoding"))
-	if err != nil {
-		return err
-	}
-	if int64(len(wireBody)) > w.limit {
+	if int64(len(body)) > w.limit {
 		return errors.New("enriched decision response exceeds the limit")
 	}
 	w.captured.Reset()
-	_, _ = w.captured.Write(wireBody)
-	for _, name := range []string{"ETag", "Last-Modified", "Content-MD5", "Digest"} {
-		w.Header().Del(name)
-	}
-	w.Header().Set("Content-Length", strconv.Itoa(len(wireBody)))
+	_, _ = w.captured.Write(body)
+	resetDecisionBodyHeaders(w.Header(), len(body))
 	return nil
+}
+
+// resetDecisionBodyHeaders removes representation metadata that describes the
+// upstream body before installing a replacement. Validators and transfer
+// framing are no longer valid once the decision document has changed.
+func resetDecisionBodyHeaders(header http.Header, bodyLength int) {
+	for _, name := range []string{
+		"Accept-Ranges",
+		"Content-Encoding",
+		"Content-Length",
+		"Content-MD5",
+		"Content-Range",
+		"Digest",
+		"ETag",
+		"Last-Modified",
+		"Trailer",
+		"Transfer-Encoding",
+		"Vary",
+	} {
+		header.Del(name)
+	}
+	header.Set("Content-Length", strconv.Itoa(bodyLength))
 }
 
 var _ interface{ Unwrap() http.ResponseWriter } = (*decisionResponseCapture)(nil)

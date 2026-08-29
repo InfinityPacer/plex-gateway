@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	defaultMetadataGlobalConcurrency    = 8
+	defaultMetadataGlobalConcurrency    = 16
 	defaultMetadataPerClientConcurrency = 4
 	defaultMetadataBatchConcurrency     = 3
 	defaultMetadataQueueTimeout         = 10 * time.Second

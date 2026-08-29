@@ -27,9 +27,12 @@ Part 标记为 Direct Play 后，Gateway 才会创建短期授权。如果客户
 对应的授权，再次为 Part 请求授权，并返回同一个 CDN 重定向，而不会启动 Plex
 Transcoder 或合成 Plex 元数据。
 
-Gateway 对所有客户端使用同一套 MediaInfo 投影规则，不根据产品名、设备名或
-User-Agent 特判格式兼容性。Part 302 不等待 MediaInfo；Plex decision 在冷缓存时最多
-等待 `MEDIAINFO_COLD_WAIT`，探测超时或失败会原样返回 Plex 响应。
+Gateway 对所有客户端使用同一套 MediaInfo 投影规则。默认关闭的实验性播放 veto 只在
+Plex 已返回同一 STRM Part 的 Direct Play decision、且本次 MediaInfo 增强已经取得新鲜
+记录时检查 Apple TV Plex 与 Dolby Vision Profile 5 组合。命中时返回 Plex 兼容的
+不支持决策，其他情况保持原播放链路。该判断不保存 verdict、不拦截 Part，也不会触发
+额外探测。Apple TV 硬件支持 Profile 5，实际兼容性还受 Plex 版本、容器和片源影响，
+因此 veto 默认关闭。
 
 能够在这些路径上接受原始媒体重定向的原生客户端可以使用此链路。Plex Web 不支持
 云端播放：其浏览器播放器会将 `start.mpd` 作为 DASH manifest 获取，而重定向目标
@@ -43,7 +46,7 @@ User-Agent 特判格式兼容性。Part 302 不等待 MediaInfo；Plex decision 
 | Plex 本地媒体 | 透明代理支持 | Gateway 不会重写本地 Part。 |
 | Infuse Direct Play | 已验证 Direct Play | 使用 Plex Part 重定向路径。 |
 | Plex iOS ExperimentalPlayer | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路。 |
-| Plex for Apple TV | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路，并与其他客户端使用相同 MediaInfo 投影规则。实际 HDR/Dolby Vision 输出仍取决于片源与客户端解码能力。 |
+| Plex for Apple TV | 已验证 Direct Play | HDR STRM 使用通用 decision/start 重定向链路。Apple TV 4K 支持 DV Profile 5 Direct Play，但 Plex 版本、容器和片源组合仍可能影响兼容性；Gateway 默认不拒绝。 |
 | Plex Web 云端播放 | 不支持 | 浏览器需要 DASH manifest，并受最终源站 CORS 限制。 |
 
 本项目是独立的社区项目，与 Plex、MediaVault、Infuse 或其各自所有者没有关联，
@@ -114,6 +117,7 @@ go run ./cmd/plex-gateway
 | `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite 持久数据库路径；容器镜像默认使用 `/app_data/plex-gateway.db`。 |
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.5.1` | 没有活动客户端上下文时，后台探测使用的 fallback User-Agent。 |
 | `MEDIAINFO_COLD_WAIT` | `5s` | 单项 metadata 冷缓存等待上限；超时返回原 Plex 响应，探测继续。 |
+| `PLAYBACK_VETO_ENABLED` | `false` | 启用实验性 Apple TV Plex Dolby Vision Profile 5 veto；只复用 decision 已取得的新鲜 MediaInfo，不发起额外探测。 |
 | `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | 可以缓冲并尝试增强的单个 Plex metadata 响应上限。 |
 | `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | 同时缓冲和等待 MediaInfo 的单项 metadata 响应上限。 |
 | `MEDIAINFO_PREWARM_BEFORE` | `2` | 当前项之前的邻近媒体预热数量。 |
@@ -137,6 +141,19 @@ Git 的 `app.env` 中。推荐让 Compose 只通过 `env_file: ./app.env` 加载
 单独配置 Plex 用户名或密码，播放也不依赖管理 Token。STRM `/redirect` 播放协议不需要
 MediaVault 用于 `/api/v1` 集成的 API key。
 
+### 播放 veto
+
+`PLAYBACK_VETO_ENABLED=false` 时不创建 veto 函数，decision 主线路只经过一次 nil 判断。
+显式开启后，Gateway 只对 Apple TV Plex、tvOS、Dolby Vision Profile 5 且 BL
+compatibility ID 为 0 的完整 MediaInfo 返回不支持 decision。它只读取 MediaInfo 增强
+已经取得的新鲜记录，不新增缓存读取、SQLite、MediaVault 或 CDN 请求，不创建状态，
+也不进入 Part 和 universal start 路径。证据缺失、过期、冲突或不匹配一律 fail-open。
+
+这是用于已知片源兼容问题的实验性开关，不代表 Apple TV 普遍不支持 Dolby Vision
+Profile 5。配置和性能验收见
+[docs/architecture.md](docs/architecture.md) 与
+[docs/performance-matrix.md](docs/performance-matrix.md)。
+
 ### MediaInfo 响应增强
 
 对于已认证的单项 STRM metadata 请求，Gateway 可以从 L1 或 SQLite 记录补充缺失的
@@ -145,6 +162,15 @@ ffprobe 的流类型和源索引创建描述性的视频、音频和字幕 Strea
 Vision、bit depth、codec、codecID、bitrate、声道布局和语言码等字段。合成 Stream 不包含 Plex
 Stream ID，也不生成 `selected`、`default` 或 `decision` 等播放选择字段。Plex 已经存在
 Stream 时只补充身份匹配 Stream 的缺失字段，不创建缺少的其他流，也不覆盖 Plex 值。
+当前版本只将兜底探测结果写入 Gateway SQLite，不写入 Plex DB。Plex DB 生产写入属于下一
+阶段评估内容，需先完成覆盖率、兼容性、备份和回滚验证。
+
+L1 热路径直接返回，不会为了本次请求同步读取 SQLite。访问续期可能异步 touch SQLite，
+不会把持久化 I/O 放进请求关键路径。热缓存投影可以并发执行，一次连续的浏览请求突发只
+允许一个请求同步等待远程探测。释放本次同步准入后建立固定 5 秒窗口，窗口内其他冷 miss
+立即返回原始 Plex 响应，拒绝请求不会续期窗口。已准入的探测在请求等待结束后仍可在后台
+完成，并成功写入 L1 和 SQLite。窗口结束后才允许下一个浏览冷探测。播放 decision 保留
+独立的冷探测预算，因此该限制只抑制首屏和季页面的 metadata 请求风暴。
 
 当 ffprobe 无法返回媒体总大小时，Gateway 会使用与本次 MediaVault 解析和 ffprobe 相同的
 User-Agent 对同一临时直链发送一次 `Range: bytes=0-0`。该请求最多等待 `2s`，只接受包含有效
@@ -154,9 +180,11 @@ User-Agent 对同一临时直链发送一次 `Range: bytes=0-0`。该请求最�
 重复请求 CDN。
 
 Infuse 等客户端的后台媒体库同步可能逐项请求整个库。带 `skipRefresh` 且产品名以
-`-Library` 结尾的后台同步请求只读取现有 MediaInfo 缓存，不创建冷探测。普通单项访问、
-成功的云端 302 和邻近窗口仍可按既定边界提交探测，因此浏览媒体库不会扩散成全库 CDN
-ffprobe。任何缓存 miss、超时、结构不支持或投影失败都会返回原始 Plex response。
+`-Library` 结尾的后台同步请求只读取现有 MediaInfo 缓存，不创建冷探测。普通单项访问
+遵循同一个固定冷探测窗口，窗口内的冷 miss 不准入且不会续期；成功的云端 302 和邻近窗口
+继续按既定边界提交。
+因此浏览媒体库不会扩散成全库 CDN ffprobe。任何缓存 miss、超时、结构不支持或投影失败
+都会返回原始 Plex response。
 
 ### 邻近媒体 MediaInfo 预热
 
@@ -165,16 +193,17 @@ Gateway 在云端 Part 已通过 Plex 授权、MediaVault 已返回最终直链�
 客户端已经跟随 302 或真实起播。当前项预热不需要管理 Token；配置有效
 `PLEX_TOKEN` 后才会额外发现邻近媒体。
 
-当前项会立即以交互优先级提交。后台优先使用明确的 Plex playQueue 顺序，并允许其中的
+当前项会进入交互优先级队列。后台优先使用明确的 Plex playQueue 顺序，并允许其中的
 电影、跨剧条目和多 Media/Part；候选始终采用自身的 PartID 与 STRM fingerprint 落库，
-不会写入当前项。没有可靠 playQueue 时，按 Plex 返回的剧集和季顺序查找邻近项，包括
-S00 和缺失索引的条目。
+不会写入当前项。当前项只能优先排队，不能抢占正在运行的探测。没有可靠 playQueue 时，
+按 Plex 返回的剧集和季顺序查找邻近项，包括 S00 和缺失索引的条目。
 
 默认窗口为前 `2`、后 `3`，后续项先提交；两个方向合计最多配置 `50`。邻近项默认每隔
 `5s` 进入低优先级队列，MediaInfo worker 默认并发为 `1`，用于避免 MediaVault/CDN
 请求突发。快速切换 A、B、C 时，新当前项立即进入交互队列，旧窗口中尚未提交的候选会被
-取消；已经提交的任务仍按自己的身份完成并由 singleflight 去重。整个发现、STRM 读取、
-指纹计算和 SQLite 查询均在 302 响应之后执行。
+取消；已经提交或正在运行的任务仍按自己的身份完成并由 singleflight 去重。正在运行的
+后台探测不会被当前项抢占。整个发现、STRM 读取、指纹计算和 SQLite 查询均在 302 响应
+之后执行。
 
 Gateway 只持久化解析后的 MediaInfo，不缓存短期 CDN URL 或原始文件头尾。MediaVault 的
 上传预缓存只覆盖经其上传的新文件；若未来提供稳定 MediaInfo/预缓存读取 API，可作为优先
@@ -196,6 +225,10 @@ Gateway 会在这些单项详细 metadata 请求进入 Plex 前应用全局和�
 `METADATA_GUARD_BATCH_ENABLED` 使用独立的全局并发池保护
 `GET/HEAD /library/metadata/1,2,...`。批量读取不会占用交互式单项 metadata 的全局或
 单客户端槽位，metadata PUT 等修改请求也不会进入批量池。
+
+当前默认 Guard 为单项全局 8、单客户端 4、批量 3。Plex MediaInfo 写库完成较高覆盖率
+并经过重新压测后，才评估单项全局 16、单客户端 4、批量 3 的候选值。当前版本不新增
+Guard 模式或配置项。
 
 ## 通过 Plex 发布 Gateway 地址
 
@@ -269,7 +302,7 @@ Gateway 重新执行检查。
 - `GET /health` 返回进程健康状态，以及不含媒体身份和凭据的 MediaInfo 缓存、探测队列和邻近媒体预热摘要。
 - `GET /metrics` 返回固定结构的 JSON 计数器，以及 resolver 和完整重定向链路的
   延迟总计、样本数、最近值和最大值。启用 metadata 保护时还会返回准入、超时、
-  活动和排队计数，所有指标都不包含请求标签或凭据。
+  活动和排队计数。所有指标都不包含请求标签或凭据。
 - 其他所有 endpoint 都遵循 [docs/architecture.md](docs/architecture.md) 中说明
   的 Plex 代理或 Direct Play 拦截规则。
 

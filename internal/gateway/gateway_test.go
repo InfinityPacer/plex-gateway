@@ -281,7 +281,7 @@ func TestAuthorizedPlexSTRMRedirectEnablesCloudPartRedirect(t *testing.T) {
 	}
 }
 
-func TestCloudPartRedirectDoesNotApplyClientSpecificPolicy(t *testing.T) {
+func TestCloudPartRedirectDoesNotApplyPlaybackVeto(t *testing.T) {
 	localRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localRoot, "Movie.strm"), []byte("http://public.invalid/redirect/pickcode\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -298,9 +298,9 @@ func TestCloudPartRedirectDoesNotApplyClientSpecificPolicy(t *testing.T) {
 	}))
 	defer plex.Close()
 
-	handler, _, cache := newCloudHandler(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{
+	handler, _, cache := newCloudHandlerWithVeto(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{
 		PlexPrefix: "/media/cloud", LocalPrefix: localRoot,
-	}})
+	}}, true)
 	cache.Put(partcache.PartInfo{PartID: "123", PlexFilePath: "/media/cloud/Movie.strm"})
 	clients := []struct {
 		product   string
@@ -958,6 +958,10 @@ func TestMetricsEndpointIsLocalAndStable(t *testing.T) {
 }
 
 func newCloudHandler(t *testing.T, plexURL, mediaVaultURL string, mappings []pathmap.Mapping) (http.Handler, *metrics.Metrics, *partcache.Cache) {
+	return newCloudHandlerWithVeto(t, plexURL, mediaVaultURL, mappings, false)
+}
+
+func newCloudHandlerWithVeto(t *testing.T, plexURL, mediaVaultURL string, mappings []pathmap.Mapping, playbackVeto bool) (http.Handler, *metrics.Metrics, *partcache.Cache) {
 	t.Helper()
 	upstream, err := url.Parse(plexURL)
 	if err != nil {
@@ -983,6 +987,7 @@ func newCloudHandler(t *testing.T, plexURL, mediaVaultURL string, mappings []pat
 		Resolver:        strmResolver,
 		Metrics:         registry,
 		CloudExtensions: []string{".strm"},
+		PlaybackVeto:    playbackVeto,
 	}), registry, cache
 }
 

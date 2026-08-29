@@ -40,7 +40,7 @@ const (
 	defaultMediaInfoAgent     = "Infuse-Library/8.5.1"
 	defaultMediaInfoColdWait  = 5 * time.Second
 	defaultMediaInfoBodyLimit = 8 << 20
-	defaultMediaInfoWaiters   = defaultMetadataGlobal
+	defaultMediaInfoWaiters   = 8
 	defaultPrewarmBefore      = 2
 	defaultPrewarmAfter       = 3
 	defaultPrewarmInterval    = 5 * time.Second
@@ -65,6 +65,7 @@ type Config struct {
 	PartProbeTimeout  time.Duration
 	MetadataGuard     MetadataGuardConfig
 	MediaInfo         MediaInfoConfig
+	PlaybackVeto      bool
 	LogLevel          string
 	TraceEnabled      bool
 	ReadHeaderTimeout time.Duration
@@ -296,6 +297,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	playbackVeto, err := envBool("PLAYBACK_VETO_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	readHeaderTimeout, err := envDuration("READ_HEADER_TIMEOUT", defaultReadHeaderTimeout)
 	if err != nil {
@@ -354,6 +359,7 @@ func Load() (Config, error) {
 			PrewarmBefore: mediaInfoPrewarmBefore, PrewarmAfter: mediaInfoPrewarmAfter,
 			PrewarmInterval: mediaInfoPrewarmInterval,
 		},
+		PlaybackVeto:      playbackVeto,
 		LogLevel:          logLevel,
 		TraceEnabled:      traceEnabled,
 		ReadHeaderTimeout: readHeaderTimeout,

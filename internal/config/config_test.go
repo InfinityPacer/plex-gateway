@@ -50,6 +50,9 @@ func TestLoadDefaults(t *testing.T) {
 	if !got.MediaInfo.Enabled || got.MediaInfo.ProbeTimeout != 20*time.Second || got.MediaInfo.Concurrency != 1 || got.MediaInfo.UserAgent != "Infuse-Library/8.5.1" || got.MediaInfo.ColdWait != 5*time.Second || got.MediaInfo.ResponseMaxBytes != 8<<20 || got.MediaInfo.EnrichmentWaiters != 8 || got.MediaInfo.PrewarmBefore != 2 || got.MediaInfo.PrewarmAfter != 3 || got.MediaInfo.PrewarmInterval != 5*time.Second {
 		t.Fatalf("unexpected MediaInfo defaults: %#v", got.MediaInfo)
 	}
+	if got.PlaybackVeto {
+		t.Fatal("PlaybackVeto = true")
+	}
 	if got.MediaVaultURL != nil || len(got.PathMappings) != 0 {
 		t.Fatalf("cloud redirect unexpectedly enabled: %#v", got)
 	}
@@ -194,5 +197,18 @@ func TestLoadAllowsCurrentOnlyPrewarm(t *testing.T) {
 	}
 	if got.MediaInfo.PrewarmBefore != 0 || got.MediaInfo.PrewarmAfter != 0 {
 		t.Fatalf("prewarm window = %d/%d", got.MediaInfo.PrewarmBefore, got.MediaInfo.PrewarmAfter)
+	}
+}
+
+func TestLoadPlaybackVetoCanBeEnabled(t *testing.T) {
+	t.Setenv("PLEX_URL", "http://plex:32400")
+	t.Setenv("PLAYBACK_VETO_ENABLED", "true")
+
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.PlaybackVeto {
+		t.Fatal("PlaybackVeto = false")
 	}
 }

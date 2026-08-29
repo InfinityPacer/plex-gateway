@@ -34,11 +34,15 @@ playback session and exact Media/Part, authorizes the Part again, and returns
 the same CDN redirect without starting Plex Transcoder or synthesizing Plex
 metadata.
 
-The gateway applies the same MediaInfo projection rules to every client. It
-does not branch on product name, device name, or User-Agent for format
-compatibility. Part redirects never wait for MediaInfo. A Plex decision may
-wait up to `MEDIAINFO_COLD_WAIT` on a cold cache; probe timeout or failure
-returns Plex's original response unchanged.
+The gateway applies the same MediaInfo projection rules to every client. A
+disabled-by-default experimental playback veto checks the Plex for Apple TV,
+tvOS, Dolby Vision Profile 5 combination only after Plex returns Direct Play
+for the same STRM Part and MediaInfo enrichment already has a fresh record. A
+match returns a Plex-compatible unsupported decision; every other case keeps
+the existing playback path. The veto stores no verdict, does not intercept the
+Part path, and starts no additional probe. Apple TV hardware supports Profile
+5, while compatibility still varies with Plex version, container, and source,
+so the veto remains disabled by default.
 
 Native clients that accept a raw media redirect on those routes can use this
 path. Plex Web cloud playback is not supported: its browser player fetches
@@ -54,7 +58,7 @@ media in Plex Web remains ordinary proxied Plex traffic.
 | Local Plex media | Supported by transparent proxy | The gateway does not rewrite local Parts. |
 | Infuse Direct Play | Direct Play verified | Uses the Plex Part redirect path. |
 | Plex iOS ExperimentalPlayer | Direct Play verified | STRM uses the universal decision/start redirect path. |
-| Plex for Apple TV | Direct Play verified | STRM uses the universal decision/start redirect path and the same MediaInfo projection rules as other clients. Actual HDR and Dolby Vision output still depends on the source and client decoder capabilities. |
+| Plex for Apple TV | Direct Play verified | HDR STRM uses the universal decision/start redirect path. Apple TV 4K supports Dolby Vision Profile 5 Direct Play, while Plex version, container, and source combinations may still affect compatibility; the gateway does not reject it by default. |
 | Plex Web cloud playback | Unsupported | The browser expects a DASH manifest and enforces final-origin CORS. |
 
 This is an independent community project. It is not affiliated with, endorsed
@@ -128,6 +132,7 @@ Important environment variables:
 | `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite database path; the container image defaults to `/app_data/plex-gateway.db`. |
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.5.1` | Fallback User-Agent for background probes without an active client context. |
 | `MEDIAINFO_COLD_WAIT` | `5s` | Cold-cache wait ceiling for one metadata item; timeout returns the original Plex response while probing continues. |
+| `PLAYBACK_VETO_ENABLED` | `false` | Enable the experimental Apple TV Plex Dolby Vision Profile 5 veto; it only reuses fresh MediaInfo already obtained by the decision path. |
 | `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | Maximum size of one Plex metadata response buffered for enrichment. |
 | `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | Maximum single-item metadata responses buffered and waiting for MediaInfo concurrently. |
 | `MEDIAINFO_PREWARM_BEFORE` | `2` | Number of nearby items before the current item to prewarm. |
@@ -154,6 +159,23 @@ through Plex. The gateway does not need a Plex username or password, and
 playback does not depend on the management token. MediaVault's API key for `/api/v1` integrations is also not required for
 the STRM `/redirect` playback contract.
 
+### Playback veto
+
+With `PLAYBACK_VETO_ENABLED=false`, no veto function is created and the decision
+path performs only one nil check. When enabled, the gateway returns an
+unsupported decision only for complete MediaInfo matching Plex for Apple TV,
+tvOS, Dolby Vision Profile 5, and BL compatibility ID 0. It reuses the fresh
+record already obtained by MediaInfo enrichment, performs no additional cache,
+SQLite, MediaVault, or CDN work, stores no state, and never enters Part or
+universal start handling. Missing, stale, conflicting, or unmatched evidence
+always fails open.
+
+This is an experimental switch for deployments with a known source
+compatibility issue, not a claim that Apple TV generally lacks Dolby Vision
+Profile 5 support. See
+[docs/architecture.md](docs/architecture.md) and
+[docs/performance-matrix.md](docs/performance-matrix.md).
+
 ### MediaInfo response enrichment
 
 For an authenticated single-item STRM metadata request, the gateway can fill
@@ -165,6 +187,21 @@ language code. Generated Streams never contain Plex Stream IDs or playback
 selection fields such as `selected`, `default`, or `decision`. When Plex already
 has Streams, only missing fields on identity-matched Streams are filled. Missing
 sibling Streams are not created and existing Plex values are not overwritten.
+This release writes fallback probe results only to the gateway's SQLite store and
+does not write to the Plex DB. Production Plex DB writes are a next-stage
+evaluation after coverage, compatibility, backup, and rollback validation.
+
+The L1 hot path returns without synchronously reading SQLite for the request.
+Access renewal may touch SQLite asynchronously, so persistence I/O stays out of
+the request critical path. Hot-cache projection remains concurrent. One
+continuous browsing burst may admit only one synchronous remote probe. After
+the admitted synchronous wait releases its slot, a fixed five-second window
+begins. Other cold misses immediately preserve the Plex response, and rejected
+requests do not renew the window. An admitted probe may finish in the background
+after the request wait ends and persist the result to L1 and SQLite. Another
+browsing probe is admitted only after the window ends. Playback decisions retain
+their independent cold-probe budget, so this limit only suppresses metadata fan-out
+from home and season screens.
 
 When ffprobe cannot report the total media size, the gateway sends one
 `Range: bytes=0-0` request to the same temporary direct URL with the same
@@ -179,10 +216,12 @@ do not repeat the CDN request.
 Background library synchronization can enumerate an entire library one item at
 a time. Requests with `skipRefresh` whose product ends in `-Library` may consume
 an existing MediaInfo cache record but never admit a cold probe. Ordinary
-single-item access, a successful cloud 302, and the nearby window retain their
-bounded probe behavior, so browsing a library cannot expand into full-library
-CDN ffprobe work. Any cache miss, timeout, unsupported structure, or projection
-failure returns the original Plex response.
+single-item access follows the same fixed cold-probe window. Cold misses inside
+the window are not admitted and do not renew it; successful cloud 302 and
+nearby-window work retain their existing boundaries. Browsing a library
+therefore cannot expand into full-library CDN ffprobe work. Any cache miss,
+timeout, unsupported structure, or projection failure returns the original Plex
+response.
 
 ### Nearby-item MediaInfo prewarming
 
@@ -193,19 +232,22 @@ it does not claim that the client followed the redirect or actually started
 playback. Current-item prewarming does not require a management token. A valid
 `PLEX_TOKEN` additionally enables nearby-item discovery.
 
-The current item is submitted immediately at interactive priority. The
-background coordinator prefers explicit Plex playQueue order and permits movie,
-cross-show, and multi-Media/Part entries. Every candidate is stored under its
-own PartID and STRM fingerprint. Without a usable queue, Plex episode and season
-response order is used, including specials and entries with missing indices.
+The current item enters the interactive-priority queue. The background
+coordinator prefers explicit Plex playQueue order and permits movie, cross-show,
+and multi-Media/Part entries. Every candidate is stored under its own PartID and
+STRM fingerprint. The current item can only be prioritized in the queue and
+cannot preempt a probe already running. Without a usable queue, Plex episode and
+season response order is used, including specials and entries with missing
+indices.
 
 The default window is two items before and three after, with following items
 submitted first. The combined configurable window is capped at 50. Nearby items
 enter the low-priority queue every five seconds by default, while the MediaInfo
 worker defaults to one concurrent probe to avoid MediaVault/CDN bursts. A rapid
 A/B/C switch submits each new current item immediately and cancels only the old
-window entries that were not submitted. Submitted work retains its own identity
-and is deduplicated by singleflight.
+window entries that were not submitted. Submitted or running work retains its
+own identity and is deduplicated by singleflight. A running background probe is
+not preempted by a current item.
 
 The gateway persists parsed MediaInfo, not short-lived CDN URLs or raw head/tail
 bytes. MediaVault upload precaching applies only to files uploaded through
@@ -237,6 +279,11 @@ or modify Plex responses.
 Batch reads do not consume the global or per-client slots reserved for
 interactive single-item metadata requests, and metadata mutations do not enter
 the batch pool.
+
+The current Guard defaults are global 8 for single-item metadata, per-client 4,
+and batch 3. After Plex MediaInfo writes provide high coverage and the resulting
+load is retested, global 16, per-client 4, and batch 3 may be evaluated. This
+release adds no Guard mode or configuration item.
 
 ## Advertise the gateway through Plex
 

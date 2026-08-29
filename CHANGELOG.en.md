@@ -9,15 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-29
+
 ### Added
 
 - Added bounded remote ffprobe, an L1 LRU plus SQLite MediaInfo cache, and
   single-item Plex metadata response enrichment. Cold-wait timeouts preserve the
   original response while probing continues in the background.
-- Current-Part prewarming now starts after a cloud redirect is ready. An isolated
-  Plex management token can additionally discover and rate-limit a configurable
-  nearby window, defaulting to two previous and three following items. Missing or
-  invalid management credentials disable only nearby discovery.
+- Current-Part prewarming is submitted at interactive priority after a cloud
+  redirect is ready. An isolated Plex management token can additionally discover
+  and rate-limit a configurable nearby window, defaulting to two previous and
+  three following items. The current job is only prioritized in the queue and
+  cannot preempt a probe already running. Missing or invalid management
+  credentials disable only nearby discovery.
 - Added per-client rapid-switch coordination, cross-User-Agent failure handoff,
   and distinct prewarm metrics for fresh cache hits, joined work, new queue
   admissions, and rejections.
@@ -33,6 +37,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preserve the otherwise valid MediaInfo and fail open.
 - Updated the background-probe fallback User-Agent to the currently verified
   Infuse Library version.
+- Added a disabled-by-default experimental Apple TV Plex Dolby Vision Profile 5
+  playback veto. It only reuses fresh MediaInfo already obtained by the
+  decision path, stores no state, does not intercept Parts, and starts no
+  additional probe.
+- Added a public performance matrix. Local media and 302 routes perform no
+  MediaInfo analysis I/O, and one decision waits for at most one cold probe.
+
+### Changed
+
+- This release persists fallback MediaInfo only in the gateway's SQLite store.
+  Production Plex DB writes remain a next-stage evaluation after coverage,
+  compatibility, backup, and rollback requirements are measured; the final API
+  or database-helper route is not selected here.
+
+### Fixed
+
+- Limited one continuous metadata browsing burst to one synchronous cold probe.
+  After the admitted synchronous wait releases its slot, a fixed five-second
+  window begins. Other cold misses immediately preserve the Plex response, and
+  rejected requests do not renew the window. An admitted probe may finish in the
+  background after the request wait ends and persist the result to L1 and SQLite,
+  preventing starvation under continuous traffic.
+- Set the Metadata Guard defaults to global 8, per-client 4, and batch 3. After
+  Plex MediaInfo writes provide high coverage and the resulting load is retested,
+  global 16, per-client 4, and batch 3 remains a candidate for evaluation.
 
 ## [0.1.1] - 2026-08-28
 
@@ -66,6 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway redirects playback.
 - Logs and metrics exclude Plex tokens and complete signed media URLs.
 
-[Unreleased]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/InfinityPacer/plex-gateway/releases/tag/v0.1.0

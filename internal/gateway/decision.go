@@ -34,6 +34,7 @@ type decisionHandler struct {
 	mediaInfo decisionMediaInfoService
 	coldWait  time.Duration
 	grants    *playback.GrantStore
+	veto      playbackVeto
 	logger    *slog.Logger
 	metrics   *metrics.Metrics
 }
@@ -77,6 +78,13 @@ func (h *decisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					h.logger.Warn("decision_mediainfo_fail_open", "part", selection.Part.ID, "error_kind", errorKind(err))
 				} else if changed {
+					if h.veto != nil && record.Fresh(time.Now().UTC()) {
+						if reason, reject := h.veto(r, record.Media); reject {
+							h.logger.Info("playback_veto", "part", selection.Part.ID, "reason", reason)
+							writeIncompatibleDecision(w, r)
+							return
+						}
+					}
 					if err := capture.replaceDecodedBody(enriched); err != nil {
 						h.logger.Warn("decision_mediainfo_fail_open", "part", selection.Part.ID, "error_kind", errorKind(err))
 					} else if h.metrics != nil {
@@ -89,6 +97,17 @@ func (h *decisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := capture.commit(); err != nil && granted {
 		h.grants.Delete(attempt)
+	}
+}
+
+func writeIncompatibleDecision(w http.ResponseWriter, r *http.Request) {
+	contentType, body := plexmeta.IncompatibleDecision(r.Header.Get("Accept"))
+	resetDecisionBodyHeaders(w.Header(), len(body))
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(body)
 	}
 }
 
