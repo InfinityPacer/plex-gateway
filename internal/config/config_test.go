@@ -47,7 +47,12 @@ func TestLoadDefaults(t *testing.T) {
 	if got.DatabasePath != "./data/plex-gateway.db" {
 		t.Fatalf("DatabasePath = %q", got.DatabasePath)
 	}
-	if !got.MediaInfo.Enabled || got.MediaInfo.ProbeTimeout != 20*time.Second || got.MediaInfo.Concurrency != 1 || got.MediaInfo.UserAgent != "Infuse-Library/8.5.1" || got.MediaInfo.ColdWait != 5*time.Second || got.MediaInfo.ResponseMaxBytes != 8<<20 || got.MediaInfo.EnrichmentWaiters != 8 || got.MediaInfo.PrewarmBefore != 2 || got.MediaInfo.PrewarmAfter != 3 || got.MediaInfo.PrewarmInterval != 5*time.Second {
+	if !got.MediaInfo.Enabled || got.MediaInfo.ProbeTimeout != 20*time.Second || got.MediaInfo.Concurrency != 1 ||
+		got.MediaInfo.PlaybackQueueSize != 16 || got.MediaInfo.NeighborQueueSize != 50 ||
+		got.MediaInfo.MetadataQueueSize != 50 || got.MediaInfo.PendingTTL != 5*time.Minute ||
+		got.MediaInfo.BackgroundInterval != 5*time.Second || got.MediaInfo.UserAgent != "Infuse-Library/8.5.1" ||
+		got.MediaInfo.ColdWait != 5*time.Second || got.MediaInfo.ResponseMaxBytes != 8<<20 ||
+		got.MediaInfo.EnrichmentWaiters != 8 || got.MediaInfo.PrewarmBefore != 2 || got.MediaInfo.PrewarmAfter != 3 {
 		t.Fatalf("unexpected MediaInfo defaults: %#v", got.MediaInfo)
 	}
 	if got.PlaybackVeto {
@@ -91,8 +96,11 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	t.Setenv("MEDIAINFO_ANALYZE_DURATION", "3s")
 	t.Setenv("MEDIAINFO_OUTPUT_MAX_BYTES", "1048576")
 	t.Setenv("MEDIAINFO_CONCURRENCY", "2")
-	t.Setenv("MEDIAINFO_INTERACTIVE_QUEUE_SIZE", "64")
-	t.Setenv("MEDIAINFO_BACKGROUND_QUEUE_SIZE", "128")
+	t.Setenv("MEDIAINFO_PLAYBACK_QUEUE_SIZE", "12")
+	t.Setenv("MEDIAINFO_NEIGHBOR_QUEUE_SIZE", "64")
+	t.Setenv("MEDIAINFO_METADATA_QUEUE_SIZE", "128")
+	t.Setenv("MEDIAINFO_PENDING_TTL", "7m")
+	t.Setenv("MEDIAINFO_BACKGROUND_INTERVAL", "9s")
 	t.Setenv("MEDIAINFO_RECORD_TTL", "168h")
 	t.Setenv("MEDIAINFO_RECORD_RETENTION", "720h")
 	t.Setenv("MEDIAINFO_L1_MAX_ENTRIES", "5000")
@@ -103,7 +111,6 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	t.Setenv("MEDIAINFO_ENRICHMENT_CONCURRENCY", "3")
 	t.Setenv("MEDIAINFO_PREWARM_BEFORE", "4")
 	t.Setenv("MEDIAINFO_PREWARM_AFTER", "6")
-	t.Setenv("MEDIAINFO_PREWARM_INTERVAL", "9s")
 
 	got, err := Load()
 	if err != nil {
@@ -127,7 +134,16 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	if got.DatabasePath != "/app_data/test.db" {
 		t.Fatalf("DatabasePath = %q", got.DatabasePath)
 	}
-	if !got.MediaInfo.Enabled || got.MediaInfo.FFProbePath != "/usr/bin/ffprobe" || got.MediaInfo.ProbeTimeout != 12*time.Second || got.MediaInfo.ProbeSize != 4194304 || got.MediaInfo.AnalyzeDuration != 3*time.Second || got.MediaInfo.OutputMaxBytes != 1048576 || got.MediaInfo.Concurrency != 2 || got.MediaInfo.InteractiveQueueSize != 64 || got.MediaInfo.BackgroundQueueSize != 128 || got.MediaInfo.RecordTTL != 168*time.Hour || got.MediaInfo.RecordRetention != 720*time.Hour || got.MediaInfo.L1MaxEntries != 5000 || got.MediaInfo.NegativeTTL != 10*time.Minute || got.MediaInfo.UserAgent != "plex-gateway-test" || got.MediaInfo.ColdWait != 4*time.Second || got.MediaInfo.ResponseMaxBytes != 2097152 || got.MediaInfo.EnrichmentWaiters != 3 || got.MediaInfo.PrewarmBefore != 4 || got.MediaInfo.PrewarmAfter != 6 || got.MediaInfo.PrewarmInterval != 9*time.Second {
+	if !got.MediaInfo.Enabled || got.MediaInfo.FFProbePath != "/usr/bin/ffprobe" || got.MediaInfo.ProbeTimeout != 12*time.Second ||
+		got.MediaInfo.ProbeSize != 4194304 || got.MediaInfo.AnalyzeDuration != 3*time.Second ||
+		got.MediaInfo.OutputMaxBytes != 1048576 || got.MediaInfo.Concurrency != 2 ||
+		got.MediaInfo.PlaybackQueueSize != 12 || got.MediaInfo.NeighborQueueSize != 64 ||
+		got.MediaInfo.MetadataQueueSize != 128 || got.MediaInfo.PendingTTL != 7*time.Minute ||
+		got.MediaInfo.BackgroundInterval != 9*time.Second || got.MediaInfo.RecordTTL != 168*time.Hour ||
+		got.MediaInfo.RecordRetention != 720*time.Hour || got.MediaInfo.L1MaxEntries != 5000 ||
+		got.MediaInfo.NegativeTTL != 10*time.Minute || got.MediaInfo.UserAgent != "plex-gateway-test" ||
+		got.MediaInfo.ColdWait != 4*time.Second || got.MediaInfo.ResponseMaxBytes != 2097152 ||
+		got.MediaInfo.EnrichmentWaiters != 3 || got.MediaInfo.PrewarmBefore != 4 || got.MediaInfo.PrewarmAfter != 6 {
 		t.Fatalf("MediaInfo configuration = %#v", got.MediaInfo)
 	}
 }

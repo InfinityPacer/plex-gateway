@@ -71,20 +71,23 @@ func TestInitializeMediaInfoDoesNotProbeWithoutTask(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	databaseStore, databaseReason := initializeDatabase(t.Context(), filepath.Join(directory, "plex-gateway.db"), true, logger)
 	service, reason := initializeMediaInfo(t.Context(), databaseStore, databaseReason, config.MediaInfoConfig{
-		Enabled:              true,
-		FFProbePath:          ffprobePath,
-		ProbeTimeout:         time.Second,
-		ProbeSize:            1 << 20,
-		AnalyzeDuration:      time.Second,
-		OutputMaxBytes:       1 << 20,
-		Concurrency:          1,
-		InteractiveQueueSize: 2,
-		BackgroundQueueSize:  2,
-		RecordTTL:            24 * time.Hour,
-		RecordRetention:      48 * time.Hour,
-		L1MaxEntries:         10,
-		NegativeTTL:          time.Minute,
-		UserAgent:            "plex-gateway-test",
+		Enabled:            true,
+		FFProbePath:        ffprobePath,
+		ProbeTimeout:       time.Second,
+		ProbeSize:          1 << 20,
+		AnalyzeDuration:    time.Second,
+		OutputMaxBytes:     1 << 20,
+		Concurrency:        1,
+		PlaybackQueueSize:  2,
+		NeighborQueueSize:  2,
+		MetadataQueueSize:  2,
+		PendingTTL:         time.Minute,
+		BackgroundInterval: time.Millisecond,
+		RecordTTL:          24 * time.Hour,
+		RecordRetention:    48 * time.Hour,
+		L1MaxEntries:       10,
+		NegativeTTL:        time.Minute,
+		UserAgent:          "plex-gateway-test",
 	}, plexURL, time.Second, control, metrics.New(), logger)
 	if service == nil || databaseStore == nil || reason != "ready" {
 		t.Fatalf("initializeMediaInfo() service=%v store=%v reason=%q", service != nil, databaseStore != nil, reason)
@@ -111,7 +114,7 @@ func TestInitializeMediaInfoDoesNotProbeWithoutTask(t *testing.T) {
 	partPreparer := playback.NewPartPreparer(mapper, control, []string{".strm"})
 	invalidTokenService, reason := initializePrewarm(
 		t.Context(), "invalid-token", plexURL, time.Second, partPreparer, service,
-		2, 3, time.Millisecond, metrics.New(), logger,
+		2, 3, metrics.New(), logger,
 	)
 	if invalidTokenService == nil || reason != "current_only_plex_token_invalid" ||
 		!invalidTokenService.Status().Available || invalidTokenService.Status().NeighborAvailable {
@@ -125,7 +128,7 @@ func TestInitializeMediaInfoDoesNotProbeWithoutTask(t *testing.T) {
 	closeCancel()
 	prewarmService, reason := initializePrewarm(
 		t.Context(), "management-token", plexURL, time.Second, partPreparer, service,
-		2, 3, time.Millisecond, metrics.New(), logger,
+		2, 3, metrics.New(), logger,
 	)
 	if prewarmService == nil || reason != "ready" || !prewarmService.Status().Available {
 		t.Fatalf("prewarm service=%v reason=%q", prewarmService != nil, reason)

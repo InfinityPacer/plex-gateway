@@ -35,10 +35,10 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   identified by `skipRefresh` and a `-Library` product consume cache only. Hot
   records remain concurrently projectable; one continuous browsing burst may
   wait on only one cold probe. After the admitted synchronous wait releases its
-  slot, a fixed five-second window begins. Other cold misses preserve the Plex
-  response, and rejected requests do not renew the window. An admitted probe
-  may finish in the background after the request wait ends and persist to L1
-  and SQLite, preventing guard-delayed request waves from starving later work.
+  slot, a fixed five-second window begins. Other eligible cold misses preserve
+  the Plex response and may offer bounded P2 work without renewing the window.
+  An admitted probe may finish in the background after the request wait ends
+  and persist to L1 and SQLite.
 - `GET` and `HEAD` requests below `/library/parts/{partID}/...` are eligible for
   interception only when the cached `Part.file` has a configured cloud
   extension and maps to a readable local STRM file.
@@ -173,12 +173,55 @@ Plex-owned.
 All clients use the same MediaInfo projection rules. Part and universal-start
 redirects never wait for MediaInfo. An L1 hit does not synchronously read SQLite
 for the request; access renewal may touch SQLite asynchronously. An L1 miss may
-use the persistent record or one bounded interactive probe, and timeout or
-failure preserves the existing Direct Play path. Metadata browsing has a
-separate single synchronous cold-probe slot. After the admitted synchronous wait
-releases its slot, a fixed five-second window begins. Misses rejected inside that
-window do not renew it, and an admitted probe can finish in the background and
-write L1 and SQLite after the request waiter leaves.
+use the persistent record or one bounded playback probe, and timeout or failure
+preserves the existing Direct Play path. Metadata browsing has a separate single
+synchronous cold-probe slot. After the admitted synchronous wait releases its
+slot, a fixed five-second window begins. Misses inside that window do not renew
+it: eligible foreground misses may be offered to the bounded background
+scheduler, while the original Plex response is returned immediately. An
+admitted probe can finish in the background and write L1 and SQLite after the
+request waiter leaves.
+
+## MediaInfo scheduling contract
+
+The in-memory scheduler owns all remote-probe admission. It has three fixed
+priority classes:
+
+1. P0 represents the item that reached an actual playback decision or successful
+   cloud redirect. Its queue reserves 16 entries and is never displaced by
+   background work.
+2. P1 represents the configured two previous and three following neighbors of an
+   actual playback item. Its queue admits at most 50 entries.
+3. P2 represents an eligible foreground metadata miss that could not use the
+   synchronous cold-probe slot. Its queue admits at most 50 entries.
+
+P1 and P2 pending entries expire after five minutes and share one global
+five-second remote start interval after both L1 and SQLite miss. Fresh SQLite
+records complete without waiting for that interval. P0 bypasses the interval and
+runs before all pending background work, but it does not cancel a probe that has
+already started. Expired, rejected, or superseded work never reaches MediaVault
+or the CDN and does not create negative-cache state.
+
+The exact task identity is Plex server ID, Part ID, and STRM fingerprint. A
+queued or running identity owns one flight across all clients and priorities.
+When a higher-priority request observes the same queued identity, the existing
+job is promoted in place rather than duplicated. Promotion to P0 refreshes the
+unclaimed job with the active playback User-Agent and request identity and
+removes its background expiry. A P0 arrival joins an already running flight; if
+that attempt fails with a different User-Agent, at most one P0 retry may be
+retained. P2 never registers User-Agent fallback probes.
+
+The HTTP metadata path may only offer a P2 task through bounded in-memory work.
+SQLite lookup, MediaVault resolution, ffprobe, persistence, and retry execution
+belong to workers. Background synchronization identified by `-Library` plus
+`skipRefresh` remains cache-only and cannot populate P2. Queue state is not
+persisted and is discarded on cache reset, shutdown, or process restart.
+
+`/metrics` keeps aggregate scheduler counters and a fixed, label-free P0/P1/P2
+breakdown for offers, admissions, joins, promotions, capacity drops, expiry, and
+fingerprint supersession. `/health` reports the current queue depth for each
+class. Neither surface contains Part identities, URLs, credentials, or full
+User-Agent values.
 
 `PLAYBACK_VETO_ENABLED=false` leaves a nil hook in the decision handler. The
 experimental hook is disabled by default. When enabled, it only consumes the

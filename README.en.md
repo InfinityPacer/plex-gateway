@@ -130,6 +130,11 @@ Important environment variables:
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | Maximum admission wait before returning `429`. |
 | `MEDIAINFO_ENABLED` | `true` | Enable the MediaInfo cache, bounded probes, and single-item metadata enrichment; initialization failures do not affect transparent proxying. |
 | `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite database path; the container image defaults to `/app_data/plex-gateway.db`. |
+| `MEDIAINFO_PLAYBACK_QUEUE_SIZE` | `16` | Independent P0 queue capacity for actual playback work. |
+| `MEDIAINFO_NEIGHBOR_QUEUE_SIZE` | `50` | P1 queue capacity for nearby-item prewarming. |
+| `MEDIAINFO_METADATA_QUEUE_SIZE` | `50` | P2 queue capacity for fixed-window metadata misses. |
+| `MEDIAINFO_PENDING_TTL` | `5m` | Lifetime of P1/P2 work that has not started. |
+| `MEDIAINFO_BACKGROUND_INTERVAL` | `5s` | Global minimum interval between P1/P2 remote probes after L1 and SQLite miss. |
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.5.1` | Fallback User-Agent for background probes without an active client context. |
 | `MEDIAINFO_COLD_WAIT` | `5s` | Cold-cache wait ceiling for one metadata item; timeout returns the original Plex response while probing continues. |
 | `PLAYBACK_VETO_ENABLED` | `false` | Enable the experimental Apple TV Plex Dolby Vision Profile 5 veto; it only reuses fresh MediaInfo already obtained by the decision path. |
@@ -137,7 +142,6 @@ Important environment variables:
 | `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | Maximum single-item metadata responses buffered and waiting for MediaInfo concurrently. |
 | `MEDIAINFO_PREWARM_BEFORE` | `2` | Number of nearby items before the current item to prewarm. |
 | `MEDIAINFO_PREWARM_AFTER` | `3` | Number of nearby items after the current item to prewarm. |
-| `MEDIAINFO_PREWARM_INTERVAL` | `5s` | Delay between nearby-item submissions; the current item does not wait. |
 
 Ordinary Plex requests remain transparent, while cloud playback sends client
 headers to the trusted MediaVault origin under the contract below. The optional
@@ -217,11 +221,11 @@ Background library synchronization can enumerate an entire library one item at
 a time. Requests with `skipRefresh` whose product ends in `-Library` may consume
 an existing MediaInfo cache record but never admit a cold probe. Ordinary
 single-item access follows the same fixed cold-probe window. Cold misses inside
-the window are not admitted and do not renew it; successful cloud 302 and
-nearby-window work retain their existing boundaries. Browsing a library
-therefore cannot expand into full-library CDN ffprobe work. Any cache miss,
-timeout, unsupported structure, or projection failure returns the original Plex
-response.
+the window return the original response immediately and only offer bounded P2
+work without renewing it; successful cloud 302 and nearby-window work retain
+their existing boundaries. Browsing a library therefore cannot expand without
+bound into full-library CDN ffprobe work. Any cache miss, timeout, unsupported
+structure, or projection failure returns the original Plex response.
 
 ### Nearby-item MediaInfo prewarming
 
@@ -232,7 +236,7 @@ it does not claim that the client followed the redirect or actually started
 playback. Current-item prewarming does not require a management token. A valid
 `PLEX_TOKEN` additionally enables nearby-item discovery.
 
-The current item enters the interactive-priority queue. The background
+The current item enters the P0 actual-playback queue. The background
 coordinator prefers explicit Plex playQueue order and permits movie, cross-show,
 and multi-Media/Part entries. Every candidate is stored under its own PartID and
 STRM fingerprint. The current item can only be prioritized in the queue and
@@ -241,13 +245,14 @@ season response order is used, including specials and entries with missing
 indices.
 
 The default window is two items before and three after, with following items
-submitted first. The combined configurable window is capped at 50. Nearby items
-enter the low-priority queue every five seconds by default, while the MediaInfo
-worker defaults to one concurrent probe to avoid MediaVault/CDN bursts. A rapid
-A/B/C switch submits each new current item immediately and cancels only the old
-window entries that were not submitted. Submitted or running work retains its
-own identity and is deduplicated by singleflight. A running background probe is
-not preempted by a current item.
+submitted first. The combined configurable window is capped at 50. Prepared
+neighbors are offered to P1 immediately without blocking. Only genuine L1 and
+SQLite misses are subject to the global five-second minimum remote-start
+interval, while the MediaInfo worker defaults to one concurrent probe to avoid
+MediaVault/CDN bursts. A rapid A/B/C switch submits each new current item to P0
+immediately and cancels only old-window entries that were not offered. Offered
+or running work retains its own identity and is deduplicated by singleflight. A
+running background probe is not preempted by a current item.
 
 The gateway persists parsed MediaInfo, not short-lived CDN URLs or raw head/tail
 bytes. MediaVault upload precaching applies only to files uploaded through
@@ -371,7 +376,8 @@ That topology is outside the exclusive-gateway deployment contract.
 - `GET /metrics` returns fixed-shape JSON counters plus resolver and complete
   redirect-path latency totals, samples, last values, and maxima. When metadata
   protection is enabled, it also reports admission, timeout, active, and queued
-  counts. No metric contains request labels or credentials.
+  counts. MediaInfo scheduler outcomes are additionally split into fixed
+  P0/P1/P2 sections. No metric contains request labels or credentials.
 - Every other endpoint follows the Plex proxy or Direct Play interception
   rules described in [docs/architecture.md](docs/architecture.md).
 

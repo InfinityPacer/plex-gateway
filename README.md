@@ -115,6 +115,11 @@ go run ./cmd/plex-gateway
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | 等待准入的最长时间，超时返回 `429`。 |
 | `MEDIAINFO_ENABLED` | `true` | 启用 MediaInfo 缓存、受限探测和单项 metadata 增强；初始化失败不影响透明代理。 |
 | `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite 持久数据库路径；容器镜像默认使用 `/app_data/plex-gateway.db`。 |
+| `MEDIAINFO_PLAYBACK_QUEUE_SIZE` | `16` | P0 实际播放任务的独立队列容量。 |
+| `MEDIAINFO_NEIGHBOR_QUEUE_SIZE` | `50` | P1 邻近项预热的队列容量。 |
+| `MEDIAINFO_METADATA_QUEUE_SIZE` | `50` | P2 fixed-window metadata miss 的队列容量。 |
+| `MEDIAINFO_PENDING_TTL` | `5m` | P1/P2 未开始任务的保留时间。 |
+| `MEDIAINFO_BACKGROUND_INTERVAL` | `5s` | L1/SQLite miss 后 P1/P2 远程探测的全局最小启动间隔。 |
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.5.1` | 没有活动客户端上下文时，后台探测使用的 fallback User-Agent。 |
 | `MEDIAINFO_COLD_WAIT` | `5s` | 单项 metadata 冷缓存等待上限；超时返回原 Plex 响应，探测继续。 |
 | `PLAYBACK_VETO_ENABLED` | `false` | 启用实验性 Apple TV Plex Dolby Vision Profile 5 veto；只复用 decision 已取得的新鲜 MediaInfo，不发起额外探测。 |
@@ -122,7 +127,6 @@ go run ./cmd/plex-gateway
 | `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | 同时缓冲和等待 MediaInfo 的单项 metadata 响应上限。 |
 | `MEDIAINFO_PREWARM_BEFORE` | `2` | 当前项之前的邻近媒体预热数量。 |
 | `MEDIAINFO_PREWARM_AFTER` | `3` | 当前项之后的邻近媒体预热数量。 |
-| `MEDIAINFO_PREWARM_INTERVAL` | `5s` | 邻近项提交到后台探测队列的间隔；当前项不等待。 |
 
 普通 Plex 请求保持透明转发，云端播放请求按下文契约将客户端 header 发送给可信
 MediaVault。可选管理 `PLEX_TOKEN` 通过环境变量注入，只发送到配置的 Plex origin，
@@ -181,10 +185,10 @@ User-Agent 对同一临时直链发送一次 `Range: bytes=0-0`。该请求最�
 
 Infuse 等客户端的后台媒体库同步可能逐项请求整个库。带 `skipRefresh` 且产品名以
 `-Library` 结尾的后台同步请求只读取现有 MediaInfo 缓存，不创建冷探测。普通单项访问
-遵循同一个固定冷探测窗口，窗口内的冷 miss 不准入且不会续期；成功的云端 302 和邻近窗口
-继续按既定边界提交。
-因此浏览媒体库不会扩散成全库 CDN ffprobe。任何缓存 miss、超时、结构不支持或投影失败
-都会返回原始 Plex response。
+遵循同一个固定冷探测窗口，窗口内的冷 miss 立即返回原始响应，仅非阻塞投递有界 P2
+任务且不会续期；成功的云端 302 和邻近窗口继续按既定边界提交。因此浏览媒体库不会无界
+扩散成全库 CDN ffprobe。任何缓存 miss、超时、结构不支持或投影失败都会返回原始 Plex
+response。
 
 ### 邻近媒体 MediaInfo 预热
 
@@ -193,17 +197,17 @@ Gateway 在云端 Part 已通过 Plex 授权、MediaVault 已返回最终直链�
 客户端已经跟随 302 或真实起播。当前项预热不需要管理 Token；配置有效
 `PLEX_TOKEN` 后才会额外发现邻近媒体。
 
-当前项会进入交互优先级队列。后台优先使用明确的 Plex playQueue 顺序，并允许其中的
+当前项会进入 P0 实际播放队列。后台优先使用明确的 Plex playQueue 顺序，并允许其中的
 电影、跨剧条目和多 Media/Part；候选始终采用自身的 PartID 与 STRM fingerprint 落库，
 不会写入当前项。当前项只能优先排队，不能抢占正在运行的探测。没有可靠 playQueue 时，
 按 Plex 返回的剧集和季顺序查找邻近项，包括 S00 和缺失索引的条目。
 
-默认窗口为前 `2`、后 `3`，后续项先提交；两个方向合计最多配置 `50`。邻近项默认每隔
-`5s` 进入低优先级队列，MediaInfo worker 默认并发为 `1`，用于避免 MediaVault/CDN
-请求突发。快速切换 A、B、C 时，新当前项立即进入交互队列，旧窗口中尚未提交的候选会被
-取消；已经提交或正在运行的任务仍按自己的身份完成并由 singleflight 去重。正在运行的
-后台探测不会被当前项抢占。整个发现、STRM 读取、指纹计算和 SQLite 查询均在 302 响应
-之后执行。
+默认窗口为前 `2`、后 `3`，后续项先提交；两个方向合计最多配置 `50`。邻近项发现和准备
+完成后立即非阻塞投递 P1；只有 L1 和 SQLite 都未命中时，远程探测才受全局最小 `5s`
+启动间隔约束。MediaInfo worker 默认并发为 `1`，用于避免 MediaVault/CDN 请求突发。
+快速切换 A、B、C 时，新当前项立即进入 P0，旧窗口中尚未投递的候选会被取消；已经投递
+或正在运行的任务仍按自己的身份完成并由 singleflight 去重。正在运行的后台探测不会被
+当前项抢占。整个发现、STRM 读取、指纹计算和 SQLite 查询均在 302 响应之后执行。
 
 Gateway 只持久化解析后的 MediaInfo，不缓存短期 CDN URL 或原始文件头尾。MediaVault 的
 上传预缓存只覆盖经其上传的新文件；若未来提供稳定 MediaInfo/预缓存读取 API，可作为优先
@@ -302,7 +306,8 @@ Gateway 重新执行检查。
 - `GET /health` 返回进程健康状态，以及不含媒体身份和凭据的 MediaInfo 缓存、探测队列和邻近媒体预热摘要。
 - `GET /metrics` 返回固定结构的 JSON 计数器，以及 resolver 和完整重定向链路的
   延迟总计、样本数、最近值和最大值。启用 metadata 保护时还会返回准入、超时、
-  活动和排队计数。所有指标都不包含请求标签或凭据。
+  活动和排队计数；MediaInfo 调度器另按固定 P0/P1/P2 结构返回准入和丢弃结果。所有指标
+  都不包含请求标签或凭据。
 - 其他所有 endpoint 都遵循 [docs/architecture.md](docs/architecture.md) 中说明
   的 Plex 代理或 Direct Play 拦截规则。
 

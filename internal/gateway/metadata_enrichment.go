@@ -29,8 +29,10 @@ const (
 )
 
 type mediaInfoEnsurer interface {
+	GetMemory(mediainfo.Key) (mediainfo.Record, bool)
 	GetContext(context.Context, mediainfo.Key) (mediainfo.Record, bool)
 	Ensure(context.Context, mediainfo.Request) (mediainfo.Record, error)
+	Offer(mediainfo.Request) mediainfo.SubmitResult
 }
 
 // metadataEnrichmentOptions keeps analysis collaborators outside the playback
@@ -152,28 +154,36 @@ func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, reque
 		return
 	}
 	key := mediainfo.Key{PartID: target.Part.ID, STRMFingerprint: fingerprint}
-	lookupContext, cancel := context.WithTimeout(request.Context(), defaultMediaInfoCacheLookupWait)
-	record, found := handler.service.GetContext(lookupContext, key)
-	cancel()
+	record, found := handler.service.GetMemory(key)
 	if !found {
 		cacheOnly := mediaInfoCacheOnlyRequest(request)
-		if cacheOnly || !handler.acquireColdProbe() {
-			if !cacheOnly {
-				handler.metrics.IncMediaInfoWaitRejected()
+		if cacheOnly {
+			lookupContext, cancel := context.WithTimeout(request.Context(), defaultMediaInfoCacheLookupWait)
+			record, found = handler.service.GetContext(lookupContext, key)
+			cancel()
+			if !found {
+				handler.replay(capture, rawBody)
+				return
 			}
-			handler.replay(capture, rawBody)
-			return
-		}
-		defer handler.releaseColdProbe()
-		waitContext, cancel := context.WithTimeout(request.Context(), handler.coldWait)
-		record, err = handler.service.Ensure(waitContext, mediainfo.Request{
-			Key: key, RatingKey: ratingKey, Target: strmTarget,
-			Priority: mediainfo.PriorityInteractive, ClientUserAgent: request.UserAgent(),
-		})
-		cancel()
-		if err != nil {
-			handler.failOpen(capture, rawBody)
-			return
+		} else {
+			probeRequest := mediainfo.Request{
+				Key: key, RatingKey: ratingKey, Target: strmTarget,
+				Priority: mediainfo.PriorityMetadata, ClientUserAgent: request.UserAgent(),
+			}
+			if !handler.acquireColdProbe() {
+				handler.metrics.IncMediaInfoWaitRejected()
+				_ = handler.service.Offer(probeRequest)
+				handler.replay(capture, rawBody)
+				return
+			}
+			defer handler.releaseColdProbe()
+			waitContext, cancel := context.WithTimeout(request.Context(), handler.coldWait)
+			record, err = handler.service.Ensure(waitContext, probeRequest)
+			cancel()
+			if err != nil {
+				handler.failOpen(capture, rawBody)
+				return
+			}
 		}
 	}
 	currentTarget, err := handler.resolver.ReadTarget(localPath)

@@ -26,7 +26,7 @@ func (function preparerFunc) Prepare(part plexmeta.Part) playback.Preparation { 
 
 type submitterFunc func(mediainfo.Request) error
 
-func (function submitterFunc) SubmitDetailed(request mediainfo.Request) mediainfo.SubmitResult {
+func (function submitterFunc) Offer(request mediainfo.Request) mediainfo.SubmitResult {
 	if err := function(request); err != nil {
 		return mediainfo.SubmitResult{Disposition: mediainfo.SubmitRejected, Err: err}
 	}
@@ -35,7 +35,7 @@ func (function submitterFunc) SubmitDetailed(request mediainfo.Request) mediainf
 
 type detailedSubmitterFunc func(mediainfo.Request) mediainfo.SubmitResult
 
-func (function detailedSubmitterFunc) SubmitDetailed(request mediainfo.Request) mediainfo.SubmitResult {
+func (function detailedSubmitterFunc) Offer(request mediainfo.Request) mediainfo.SubmitResult {
 	return function(request)
 }
 
@@ -67,7 +67,7 @@ func TestServiceTryEnqueueDoesNoIOInline(t *testing.T) {
 	}
 	select {
 	case request := <-submitted:
-		if request.Priority != mediainfo.PriorityInteractive || request.Key.PartID != "9" {
+		if request.Priority != mediainfo.PriorityPlayback || request.Key.PartID != "9" {
 			t.Fatalf("current request = %#v", request)
 		}
 	case <-time.After(time.Second):
@@ -81,7 +81,7 @@ func TestServiceTryEnqueueDoesNoIOInline(t *testing.T) {
 	close(releaseDiscovery)
 }
 
-func TestServiceSubmitsCurrentImmediatelyAndSpacesNeighbors(t *testing.T) {
+func TestServiceOffersCurrentAndNeighborsWithoutLocalRateLimit(t *testing.T) {
 	type observed struct {
 		request mediainfo.Request
 		at      time.Time
@@ -106,23 +106,24 @@ func TestServiceSubmitsCurrentImmediatelyAndSpacesNeighbors(t *testing.T) {
 			submitted <- observed{request: request, at: time.Now()}
 			return nil
 		}),
-		BeforeCount: 2, AfterCount: 3, SubmitInterval: 25 * time.Millisecond,
+		BeforeCount: 2, AfterCount: 3,
 	})
 	started := time.Now()
 	service.TryEnqueue(testPlayback("42", "9", "current"))
-	first := <-submitted
-	second := <-submitted
-	third := <-submitted
-	if first.request.Key.PartID != "9" || first.request.Priority != mediainfo.PriorityInteractive ||
-		second.request.Key.PartID != "10" || second.request.Priority != mediainfo.PriorityBackground ||
-		third.request.Key.PartID != "8" || third.request.Priority != mediainfo.PriorityBackground {
-		t.Fatalf("submission order = %#v %#v %#v", first.request, second.request, third.request)
+	observedByPart := make(map[string]observed, 3)
+	for range 3 {
+		item := <-submitted
+		observedByPart[item.request.Key.PartID] = item
 	}
-	if first.at.Sub(started) > 20*time.Millisecond {
-		t.Fatalf("current submission delay = %s", first.at.Sub(started))
+	if observedByPart["9"].request.Priority != mediainfo.PriorityPlayback ||
+		observedByPart["10"].request.Priority != mediainfo.PriorityNeighbor ||
+		observedByPart["8"].request.Priority != mediainfo.PriorityNeighbor {
+		t.Fatalf("submissions = %#v", observedByPart)
 	}
-	if second.at.Sub(first.at) < 20*time.Millisecond || third.at.Sub(second.at) < 20*time.Millisecond {
-		t.Fatalf("neighbor spacing = %s, %s", second.at.Sub(first.at), third.at.Sub(second.at))
+	for partID, item := range observedByPart {
+		if delay := item.at.Sub(started); delay > 100*time.Millisecond {
+			t.Fatalf("part %s offer delay = %s", partID, delay)
+		}
 	}
 }
 
@@ -162,7 +163,7 @@ func TestServiceLatestPlaybackCancelsOlderNeighborDiscovery(t *testing.T) {
 	for !seenCurrentC || !seenNeighbor {
 		select {
 		case request := <-submitted:
-			if request.Priority == mediainfo.PriorityInteractive {
+			if request.Priority == mediainfo.PriorityPlayback {
 				seenCurrent[request.Key.PartID] = true
 				seenCurrentC = request.Key.PartID == "11" || seenCurrentC
 			}
@@ -453,12 +454,12 @@ func TestServiceAllowsCurrentOnlyWindow(t *testing.T) {
 			submitted <- request
 			return nil
 		}),
-		BeforeCount: 0, AfterCount: 0, SubmitInterval: time.Millisecond,
+		BeforeCount: 0, AfterCount: 0,
 	})
 	service.TryEnqueue(testPlayback("42", "9", "current-only"))
 	select {
 	case request := <-submitted:
-		if request.Key.PartID != "9" || request.Priority != mediainfo.PriorityInteractive {
+		if request.Key.PartID != "9" || request.Priority != mediainfo.PriorityPlayback {
 			t.Fatalf("request = %#v", request)
 		}
 	case <-time.After(time.Second):
@@ -470,7 +471,7 @@ func newTestService(t *testing.T, discovery neighborDiscovery, preparer partPrep
 	t.Helper()
 	return newConfiguredTestService(t, ServiceOptions{
 		Discovery: discovery, Playback: preparer, MediaInfo: submitter,
-		BeforeCount: 2, AfterCount: 3, SubmitInterval: time.Millisecond,
+		BeforeCount: 2, AfterCount: 3,
 	})
 }
 

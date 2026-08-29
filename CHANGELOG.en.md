@@ -16,15 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added bounded remote ffprobe, an L1 LRU plus SQLite MediaInfo cache, and
   single-item Plex metadata response enrichment. Cold-wait timeouts preserve the
   original response while probing continues in the background.
-- Current-Part prewarming is submitted at interactive priority after a cloud
-  redirect is ready. An isolated Plex management token can additionally discover
-  and rate-limit a configurable nearby window, defaulting to two previous and
-  three following items. The current job is only prioritized in the queue and
+- Current-Part prewarming is submitted to P0 after a cloud redirect is ready. An
+  isolated Plex management token can additionally discover a configurable P1
+  nearby window, defaulting to two previous and three following items. The
+  current job is only prioritized in the queue and
   cannot preempt a probe already running. Missing or invalid management
   credentials disable only nearby discovery.
 - Added per-client rapid-switch coordination, cross-User-Agent failure handoff,
   and distinct prewarm metrics for fresh cache hits, joined work, new queue
   admissions, and rejections.
+- Unified actual playback, nearby prewarming, and fixed-window metadata misses
+  under one P0/P1/P2 MediaInfo scheduler. P1/P2 use a five-minute pending TTL
+  and a global five-second remote-start interval while P0 keeps reserved capacity.
 - Parts without Plex Streams now receive descriptive video, audio, and subtitle
   Streams without Plex IDs or playback-selection state, including HDR10, Dolby
   Vision, bit depth, bitrate, channel, and language fields.
@@ -55,10 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Limited one continuous metadata browsing burst to one synchronous cold probe.
   After the admitted synchronous wait releases its slot, a fixed five-second
-  window begins. Other cold misses immediately preserve the Plex response, and
-  rejected requests do not renew the window. An admitted probe may finish in the
-  background after the request wait ends and persist the result to L1 and SQLite,
-  preventing starvation under continuous traffic.
+  window begins. Other cold misses preserve the Plex response immediately and
+  may offer one deduplicated P2 task without renewing the window. Workers check
+  SQLite first, so only genuine misses enter the remote-start limiter.
 - Set the Metadata Guard defaults to global 8, per-client 4, and batch 3. After
   Plex MediaInfo writes provide high coverage and the resulting load is retested,
   global 16, per-client 4, and batch 3 remains a candidate for evaluation.

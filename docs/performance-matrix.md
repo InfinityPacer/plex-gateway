@@ -16,12 +16,14 @@
 - 一个 universal decision 最多等待一次 `MEDIAINFO_COLD_WAIT`。veto 只复用响应增强已经
   取得的新鲜记录，不增加缓存读取或远程探测。
 - 同一 MediaInfo key 的并发请求必须共享 singleflight。并发数不能突破配置的 worker
-  上限；当前项只能优先排队，不能抢占正在运行的后台 probe。
+  上限；P0 实际播放优先于 P1/P2 排队任务，但不能抢占正在运行的后台 probe。
+- P1/P2 在 worker 中先检查 SQLite。只有 L1 和 SQLite 都 miss 的任务才受全局远程启动
+  间隔限制；SQLite 热命中不能因 CDN 风控节流额外等待 5 秒。
 - 302 响应只包含控制流。媒体字节始终由客户端直接从 CDN 读取。
 
 ## 当前基准
 
-基准日期为 2026-08-29。代码运行于 `darwin/arm64`、Apple M3 Max、Go 1.26.5。
+基准采集于 2026-08-29 至 2026-08-30。代码运行于 `darwin/arm64`、Apple M3 Max、Go 1.26.5。
 每项运行三到五轮；下表给出观测范围。工作站数据只用于发现代码回退，换架构或 Go
 版本后必须重新采集。
 
@@ -29,6 +31,8 @@
 | --- | ---: | ---: | --- |
 | MediaInfo L1 cache `Get` | 469.0-476.0 ns/op | 960 B, 7 allocs | 纯缓存结构基准。 |
 | MediaInfo service `GetMemory` | 1.356-1.423 us/op | 2880 B, 21 allocs | 包含记录防御性复制、兼容性校验和访问续期判断。 |
+| MediaInfo service fresh `Offer` | 1.410-1.453 us/op | 2912 B, 22 allocs | P0/P1/P2 非阻塞投递前的 L1 热命中路径。 |
+| MediaInfo service exact-key join `Offer` | 521.0-550.1 ns/op | 512 B, 7 allocs | 已有 flight 的内存去重，不读取 SQLite。 |
 | STRM target fingerprint | 382.0-387.4 ns/op | 448 B, 6 allocs | MediaVault redirect URL 规范化和 SHA-256。 |
 | SQLite 单记录 `Get` | 14.60-15.37 us/op | 4016 B, 74 allocs | 独立本机 SQLite 读取；生产启动会先恢复到 L1。 |
 | 本机 HTTP 合成媒体 ffprobe | 22.48-33.36 ms/op | 约 119-125 KiB, 232-234 allocs | 只验证 worker 代码，不代表 NAS/CDN。 |
@@ -56,7 +60,8 @@
 | Apple TV DV5，veto 开启 | Plex metadata、decision 和既有 MediaInfo 流程 | reject 延迟、grant、额外 I/O | 新鲜完整记录命中时 reject 且不创建 grant；相对 veto 关闭增加 0 次缓存、MV、CDN 请求。 |
 | 同一 Part 并发 2/4/8/16 | 一个共享 probe | 唯一 probe 数、延迟、队列、active | 每个 key 最多 1 次 probe，无重复 CDN 读取。 |
 | 不同 Part 并发 2/4/8 | 受 worker 上限约束 | active、队列、CPU、内存、错误率 | 不突破 `MEDIAINFO_CONCURRENCY`，不拖慢本地或 302 路径。 |
-| A/B/C 快速切换 | 当前项交互 probe、后台邻近预热 | 每项延迟、身份对应、替换/队列指标 | 新当前项优先排队；不能抢占正在运行的 probe；无跨项 MediaInfo、grant 或 redirect。 |
+| A/B/C 快速切换 | 当前项 P0 probe、P1 邻近预热 | 每项延迟、身份对应、替换/队列指标 | 新当前项优先排队；不能抢占正在运行的 probe；无跨项 MediaInfo、grant 或 redirect。 |
+| 长剧集 metadata 突发 | Plex、L1；P2 后台可查 SQLite/探测 | 前台响应、P2 队列/过期/远程启动次数 | 前台不等待 P2；唯一 pending P2 <= 50；远程启动间隔 >= 5 s；过期任务 0 MV/CDN。 |
 
 表中的验收条件是候选版本的门槛，不代表本机微基准已经替代端到端验收。当前已有证据
 包括本机代码基准和 5/5 成功的 MediaVault/CDN 探测抽样；本地透明代理、302 热冷路径、
@@ -69,7 +74,7 @@
 
 ```sh
 go test -run '^$' \
-  -bench 'Benchmark(MediaInfoL1Get|MediaInfoServiceGetMemory|FingerprintSTRMTarget|MediaInfoSQLiteGet|MediaInfoHTTPFFProbe)$' \
+  -bench 'Benchmark(MediaInfoL1Get|MediaInfoServiceGetMemory|MediaInfoServiceOfferFresh|MediaInfoServiceOfferJoin|FingerprintSTRMTarget|MediaInfoSQLiteGet|MediaInfoHTTPFFProbe)$' \
   -benchmem -count=5 ./internal/mediainfo
 ```
 

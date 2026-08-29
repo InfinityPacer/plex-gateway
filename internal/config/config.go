@@ -32,7 +32,11 @@ const (
 	defaultMediaInfoAnalyze   = 5 * time.Second
 	defaultMediaInfoOutput    = 2 << 20
 	defaultMediaInfoWorkers   = 1
-	defaultMediaInfoQueue     = 256
+	defaultPlaybackQueue      = 16
+	defaultNeighborQueue      = 50
+	defaultMetadataQueue      = 50
+	defaultPendingTTL         = 5 * time.Minute
+	defaultBackgroundInterval = 5 * time.Second
 	defaultMediaInfoTTL       = 30 * 24 * time.Hour
 	defaultMediaInfoRetention = 180 * 24 * time.Hour
 	defaultMediaInfoL1Entries = 10_000
@@ -43,7 +47,6 @@ const (
 	defaultMediaInfoWaiters   = 8
 	defaultPrewarmBefore      = 2
 	defaultPrewarmAfter       = 3
-	defaultPrewarmInterval    = 5 * time.Second
 	maxPrewarmWindow          = 50
 )
 
@@ -76,28 +79,30 @@ type Config struct {
 // MediaInfoConfig bounds the optional analysis plane. It is enabled by default
 // but capability initialization remains fail-open for transparent Plex proxying.
 type MediaInfoConfig struct {
-	Enabled              bool
-	FFProbePath          string
-	ProbeTimeout         time.Duration
-	ProbeSize            int64
-	AnalyzeDuration      time.Duration
-	OutputMaxBytes       int64
-	Concurrency          int
-	InteractiveQueueSize int
-	BackgroundQueueSize  int
-	RecordTTL            time.Duration
-	RecordRetention      time.Duration
-	L1MaxEntries         int
-	NegativeTTL          time.Duration
-	UserAgent            string
-	ColdWait             time.Duration
-	ResponseMaxBytes     int64
-	EnrichmentWaiters    int
+	Enabled            bool
+	FFProbePath        string
+	ProbeTimeout       time.Duration
+	ProbeSize          int64
+	AnalyzeDuration    time.Duration
+	OutputMaxBytes     int64
+	Concurrency        int
+	PlaybackQueueSize  int
+	NeighborQueueSize  int
+	MetadataQueueSize  int
+	PendingTTL         time.Duration
+	BackgroundInterval time.Duration
+	RecordTTL          time.Duration
+	RecordRetention    time.Duration
+	L1MaxEntries       int
+	NegativeTTL        time.Duration
+	UserAgent          string
+	ColdWait           time.Duration
+	ResponseMaxBytes   int64
+	EnrichmentWaiters  int
 	// PrewarmBefore and PrewarmAfter bound speculative neighbors around a
-	// cloud redirect. PrewarmInterval spaces their background submissions.
-	PrewarmBefore   int
-	PrewarmAfter    int
-	PrewarmInterval time.Duration
+	// cloud redirect. Remote starts remain governed by BackgroundInterval.
+	PrewarmBefore int
+	PrewarmAfter  int
 }
 
 // MetadataGuardConfig bounds detailed metadata fan-out before requests enter
@@ -236,11 +241,23 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	mediaInfoInteractiveQueue, err := envPositiveInt("MEDIAINFO_INTERACTIVE_QUEUE_SIZE", defaultMediaInfoQueue)
+	mediaInfoPlaybackQueue, err := envPositiveInt("MEDIAINFO_PLAYBACK_QUEUE_SIZE", defaultPlaybackQueue)
 	if err != nil {
 		return Config{}, err
 	}
-	mediaInfoBackgroundQueue, err := envPositiveInt("MEDIAINFO_BACKGROUND_QUEUE_SIZE", defaultMediaInfoQueue)
+	mediaInfoNeighborQueue, err := envPositiveInt("MEDIAINFO_NEIGHBOR_QUEUE_SIZE", defaultNeighborQueue)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoMetadataQueue, err := envPositiveInt("MEDIAINFO_METADATA_QUEUE_SIZE", defaultMetadataQueue)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoPendingTTL, err := envDuration("MEDIAINFO_PENDING_TTL", defaultPendingTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoBackgroundInterval, err := envDuration("MEDIAINFO_BACKGROUND_INTERVAL", defaultBackgroundInterval)
 	if err != nil {
 		return Config{}, err
 	}
@@ -292,10 +309,6 @@ func Load() (Config, error) {
 	}
 	if mediaInfoPrewarmBefore+mediaInfoPrewarmAfter > maxPrewarmWindow {
 		return Config{}, fmt.Errorf("MEDIAINFO_PREWARM_BEFORE and MEDIAINFO_PREWARM_AFTER must total at most %d", maxPrewarmWindow)
-	}
-	mediaInfoPrewarmInterval, err := envDuration("MEDIAINFO_PREWARM_INTERVAL", defaultPrewarmInterval)
-	if err != nil {
-		return Config{}, err
 	}
 	playbackVeto, err := envBool("PLAYBACK_VETO_ENABLED", false)
 	if err != nil {
@@ -351,13 +364,13 @@ func Load() (Config, error) {
 			Enabled: mediaInfoEnabled, FFProbePath: mediaInfoFFProbe,
 			ProbeTimeout: mediaInfoProbeTimeout,
 			ProbeSize:    mediaInfoProbeSize, AnalyzeDuration: mediaInfoAnalyze, OutputMaxBytes: mediaInfoOutput,
-			Concurrency: mediaInfoWorkers, InteractiveQueueSize: mediaInfoInteractiveQueue,
-			BackgroundQueueSize: mediaInfoBackgroundQueue,
-			RecordTTL:           mediaInfoTTL, RecordRetention: mediaInfoRetention, L1MaxEntries: mediaInfoL1Entries,
+			Concurrency: mediaInfoWorkers, PlaybackQueueSize: mediaInfoPlaybackQueue,
+			NeighborQueueSize: mediaInfoNeighborQueue, MetadataQueueSize: mediaInfoMetadataQueue,
+			PendingTTL: mediaInfoPendingTTL, BackgroundInterval: mediaInfoBackgroundInterval,
+			RecordTTL: mediaInfoTTL, RecordRetention: mediaInfoRetention, L1MaxEntries: mediaInfoL1Entries,
 			NegativeTTL: mediaInfoNegativeTTL, UserAgent: mediaInfoUserAgent,
 			ColdWait: mediaInfoColdWait, ResponseMaxBytes: mediaInfoBodyLimit, EnrichmentWaiters: mediaInfoWaiters,
 			PrewarmBefore: mediaInfoPrewarmBefore, PrewarmAfter: mediaInfoPrewarmAfter,
-			PrewarmInterval: mediaInfoPrewarmInterval,
 		},
 		PlaybackVeto:      playbackVeto,
 		LogLevel:          logLevel,

@@ -18,7 +18,6 @@ import (
 const (
 	defaultDiscoveryTimeout = 15 * time.Second
 	defaultTriggerCooldown  = 5 * time.Minute
-	defaultSubmitInterval   = 5 * time.Second
 	defaultRecentLimit      = 4096
 	defaultCurrentQueueSize = 64
 	defaultWindowGroupLimit = 8
@@ -33,7 +32,7 @@ type partPreparer interface {
 }
 
 type mediaInfoSubmitter interface {
-	SubmitDetailed(mediainfo.Request) mediainfo.SubmitResult
+	Offer(mediainfo.Request) mediainfo.SubmitResult
 }
 
 // Metrics receives fixed-cardinality prewarm lifecycle events.
@@ -62,7 +61,6 @@ type ServiceOptions struct {
 	TriggerCooldown  time.Duration
 	BeforeCount      int
 	AfterCount       int
-	SubmitInterval   time.Duration
 	CurrentQueueSize int
 	Now              func() time.Time
 }
@@ -96,7 +94,6 @@ type Service struct {
 	cooldown         time.Duration
 	beforeCount      int
 	afterCount       int
-	submitInterval   time.Duration
 	now              func() time.Time
 
 	ctx     context.Context
@@ -143,10 +140,6 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if afterCount < 0 {
 		return nil, errors.New("prewarm after count is invalid")
 	}
-	submitInterval := options.SubmitInterval
-	if submitInterval <= 0 {
-		submitInterval = defaultSubmitInterval
-	}
 	queueSize := options.CurrentQueueSize
 	if queueSize < 0 {
 		return nil, errors.New("prewarm current queue size is invalid")
@@ -163,7 +156,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 		discovery: options.Discovery, playback: options.Playback, mediaInfo: options.MediaInfo,
 		logger: logger, metrics: options.Metrics, discoveryTimeout: discoveryTimeout,
 		cooldown: cooldown, beforeCount: beforeCount, afterCount: afterCount,
-		submitInterval: submitInterval, now: now, ctx: ctx, cancel: cancel,
+		now: now, ctx: ctx, cancel: cancel,
 		done: make(chan struct{}), currentQueue: make(chan currentJob, queueSize),
 		currentRecent: make(map[string]time.Time), windowRecent: make(map[string]time.Time),
 		windows: make(map[string]*windowState),
@@ -295,7 +288,7 @@ func (service *Service) currentWorker() {
 			submitted := service.submit(service.ctx, Candidate{
 				RatingKey: job.playback.RatingKey,
 				Part:      plexmeta.Part{ID: job.playback.PartID},
-			}, job.playback.Target, job.playback.UserAgent, mediainfo.PriorityInteractive, "current")
+			}, job.playback.Target, job.playback.UserAgent, mediainfo.PriorityPlayback, "current")
 
 			service.mu.Lock()
 			if !submitted {
@@ -369,10 +362,6 @@ func (service *Service) runWindow(ctx context.Context, current PlaybackContext) 
 	}
 	service.metric(func(metrics Metrics) { metrics.IncMediaInfoPrewarmDiscoverySuccess() })
 	for _, candidate := range candidates {
-		if !waitForInterval(ctx, service.submitInterval) {
-			service.metric(func(metrics Metrics) { metrics.IncMediaInfoPrewarmSkipped() })
-			return
-		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -386,7 +375,7 @@ func (service *Service) runWindow(ctx context.Context, current PlaybackContext) 
 		}
 		service.submit(
 			ctx, candidate, preparation.Part.Target, current.UserAgent,
-			mediainfo.PriorityBackground, "neighbor",
+			mediainfo.PriorityNeighbor, "neighbor",
 		)
 	}
 }
@@ -406,7 +395,7 @@ func (service *Service) submit(
 		service.metric(func(metrics Metrics) { metrics.IncMediaInfoPrewarmSkipped() })
 		return false
 	}
-	result := service.mediaInfo.SubmitDetailed(mediainfo.Request{
+	result := service.mediaInfo.Offer(mediainfo.Request{
 		Key:       mediainfo.Key{PartID: candidate.Part.ID, STRMFingerprint: fingerprint},
 		RatingKey: candidate.RatingKey, Target: target,
 		Priority: priority, ClientUserAgent: userAgent,
@@ -429,26 +418,14 @@ func (service *Service) submit(
 	return true
 }
 
-func waitForInterval(ctx context.Context, interval time.Duration) bool {
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
 // Status is a credential-free coordinator snapshot.
 type Status struct {
-	Available         bool  `json:"available"`
-	NeighborAvailable bool  `json:"neighbor_available"`
-	Active            bool  `json:"active"`
-	Queued            int   `json:"queued"`
-	Before            int   `json:"before"`
-	After             int   `json:"after"`
-	IntervalMS        int64 `json:"interval_ms"`
+	Available         bool `json:"available"`
+	NeighborAvailable bool `json:"neighbor_available"`
+	Active            bool `json:"active"`
+	Queued            int  `json:"queued"`
+	Before            int  `json:"before"`
+	After             int  `json:"after"`
 }
 
 // Status reports bounded current and window queue state without media
@@ -473,7 +450,6 @@ func (service *Service) Status() Status {
 		Available: !service.closed, NeighborAvailable: !service.closed && service.discovery != nil,
 		Active: active, Queued: queued,
 		Before: service.beforeCount, After: service.afterCount,
-		IntervalMS: service.submitInterval.Milliseconds(),
 	}
 }
 

@@ -87,7 +87,7 @@ func run() error {
 		context.Background(), cfg.PlexToken, cfg.PlexURL, cfg.PartProbeTimeout,
 		playback.NewPartPreparer(mapper, strmResolver, cfg.CloudExtensions),
 		mediaInfoService, cfg.MediaInfo.PrewarmBefore, cfg.MediaInfo.PrewarmAfter,
-		cfg.MediaInfo.PrewarmInterval, registry, logger,
+		registry, logger,
 	)
 	defer closeRuntime(prewarmService, mediaInfoService, databaseStore, cfg.ShutdownTimeout, logger)
 	mediaInfoStatus := func() mediainfo.Status {
@@ -153,7 +153,7 @@ func run() error {
 			"mediainfo_prewarm_reason", prewarmReason,
 			"mediainfo_prewarm_before", cfg.MediaInfo.PrewarmBefore,
 			"mediainfo_prewarm_after", cfg.MediaInfo.PrewarmAfter,
-			"mediainfo_prewarm_interval_ms", cfg.MediaInfo.PrewarmInterval.Milliseconds(),
+			"mediainfo_background_interval_ms", cfg.MediaInfo.BackgroundInterval.Milliseconds(),
 			"playback_veto_enabled", cfg.PlaybackVeto,
 		)
 		serveErrors <- server.ListenAndServe()
@@ -187,7 +187,6 @@ func initializePrewarm(
 	mediaInfoService *mediainfo.Service,
 	beforeCount int,
 	afterCount int,
-	submitInterval time.Duration,
 	registry *metrics.Metrics,
 	logger *slog.Logger,
 ) (*prewarm.Service, string) {
@@ -225,7 +224,7 @@ func initializePrewarm(
 	serviceOptions := prewarm.ServiceOptions{
 		Playback: partPreparer, MediaInfo: mediaInfoService,
 		Logger: logger, Metrics: registry, DiscoveryTimeout: timeout,
-		BeforeCount: beforeCount, AfterCount: afterCount, SubmitInterval: submitInterval,
+		BeforeCount: beforeCount, AfterCount: afterCount,
 	}
 	if discovery != nil {
 		serviceOptions.Discovery = discovery
@@ -294,8 +293,10 @@ func initializeMediaInfo(
 	service, err := mediainfo.NewService(mediainfo.ServiceOptions{
 		Cache: cache, Store: store, Janitor: store, Provider: provider, PlexServerID: plexServerID,
 		Logger: logger, Metrics: registry, Concurrency: cfg.Concurrency,
-		InteractiveQueueSize: cfg.InteractiveQueueSize, BackgroundQueueSize: cfg.BackgroundQueueSize,
-		ProbeTimeout: cfg.ProbeTimeout, RecordTTL: cfg.RecordTTL,
+		PlaybackQueueSize: cfg.PlaybackQueueSize, NeighborQueueSize: cfg.NeighborQueueSize,
+		MetadataQueueSize: cfg.MetadataQueueSize, PendingTTL: cfg.PendingTTL,
+		BackgroundInterval: cfg.BackgroundInterval,
+		ProbeTimeout:       cfg.ProbeTimeout, RecordTTL: cfg.RecordTTL,
 		RecordRetention: cfg.RecordRetention, NegativeTTL: cfg.NegativeTTL,
 		BackgroundUserAgent: cfg.UserAgent,
 	})

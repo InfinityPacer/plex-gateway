@@ -78,11 +78,11 @@ interactive probe; missing, slow, or failed probes preserve the original Plex
 response. Part and universal-start redirects never wait for MediaInfo. All
 clients use the same projection rules. An L1 hit does not synchronously read
 SQLite for the request, although access renewal may touch SQLite asynchronously.
-One metadata browsing burst permits one synchronous cold probe. Each admitted
-the admitted synchronous wait releases its slot, a fixed five-second window
-begins. Cold misses rejected inside that window fail open without renewing it,
-while an admitted probe may finish in the background and write L1 and SQLite
-after the request waiter leaves.
+One metadata browsing burst permits one synchronous cold probe. After the
+admitted synchronous wait releases its slot, a fixed five-second window begins.
+Cold misses inside that window fail open immediately and may offer bounded P2
+work without renewing it. Background work writes L1 and SQLite only after a
+successful probe.
 A default-disabled experimental veto may reuse an already available fresh record
 for the Apple TV Plex DV Profile 5 combination, but it performs no additional
 probe and owns no Part state.
@@ -95,10 +95,10 @@ D prioritizes the Gateway fallback while preserving the broader lifecycle design
    nearby-item discovery; current-item prewarming remains token-independent;
 3. use bounded remote `ffprobe` with a default `5s` cold metadata wait ceiling;
 4. support exact current-Part analysis and a configurable nearby-item window
-   after a cloud redirect is ready, with current-item priority in the queue and
-   rate-limited background neighbors, without blocking decision, Part,
-   universal start, or 302. Queue priority cannot preempt a probe already
-   running;
+   after a cloud redirect is ready. P0 actual playback, P1 nearby items, and P2
+   foreground metadata misses share one exact-key scheduler. P1/P2 remote starts
+   are rate-limited without blocking Part, universal start, or 302. Queue
+   priority cannot preempt a probe already running;
    defer season, show, and configured STRM-root batch tasks;
 5. enrich authorized Plex metadata responses first. This release writes fallback
    records only to Gateway SQLite. Production Plex DB writing is a next-stage
@@ -107,8 +107,8 @@ D prioritizes the Gateway fallback while preserving the broader lifecycle design
    any path is selected. Parts without Plex Streams may receive descriptive
    ffprobe-indexed Streams, while existing Stream sets are never expanded and
    Plex IDs or playback-selection state are never synthesized. Background
-   `-Library` synchronization remains cache-only, and native-client metadata
-   fan-out cannot schedule a full-library cold scan;
+   `-Library` synchronization remains cache-only. Foreground fan-out can only
+   offer bounded, expiring P2 work and never waits for that background queue;
 6. add Redis or replace SQLite with PostgreSQL only after measured
    multi-instance or capacity requirements exist.
 

@@ -29,7 +29,13 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.IncMetadataBatchGuardQueued()
 	registry.IncMediaInfoCacheHits()
 	registry.IncMediaInfoCacheMisses()
-	registry.IncMediaInfoProbeQueued()
+	registry.IncMediaInfoProbeOffered(0)
+	registry.IncMediaInfoProbeQueued(0)
+	registry.IncMediaInfoProbeJoined(0)
+	registry.IncMediaInfoProbePromoted(0)
+	registry.IncMediaInfoProbeDroppedFull(0)
+	registry.IncMediaInfoProbeDroppedExpired(0)
+	registry.IncMediaInfoProbeSuperseded(0)
 	registry.IncMediaInfoProbeSuccess()
 	registry.IncMediaInfoProbeFailure()
 	registry.IncMediaInfoStoreFailure()
@@ -76,21 +82,31 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 		PlexFallbackTotal: 1,
 		ActiveRequests:    1,
 
-		MetadataGuardAdmittedTotal:            1,
-		MetadataGuardTimeoutsTotal:            1,
-		MetadataGuardActive:                   1,
-		MetadataGuardQueued:                   1,
-		MetadataBatchGuardAdmittedTotal:       1,
-		MetadataBatchGuardTimeoutsTotal:       1,
-		MetadataBatchGuardActive:              1,
-		MetadataBatchGuardQueued:              1,
-		MediaInfoCacheHitsTotal:               1,
-		MediaInfoCacheMissesTotal:             1,
-		MediaInfoProbeQueuedTotal:             1,
-		MediaInfoProbeSuccessTotal:            1,
-		MediaInfoProbeFailureTotal:            1,
-		MediaInfoStoreFailureTotal:            1,
-		MediaInfoProbeActive:                  1,
+		MetadataGuardAdmittedTotal:        1,
+		MetadataGuardTimeoutsTotal:        1,
+		MetadataGuardActive:               1,
+		MetadataGuardQueued:               1,
+		MetadataBatchGuardAdmittedTotal:   1,
+		MetadataBatchGuardTimeoutsTotal:   1,
+		MetadataBatchGuardActive:          1,
+		MetadataBatchGuardQueued:          1,
+		MediaInfoCacheHitsTotal:           1,
+		MediaInfoCacheMissesTotal:         1,
+		MediaInfoProbeOfferedTotal:        1,
+		MediaInfoProbeQueuedTotal:         1,
+		MediaInfoProbeJoinedTotal:         1,
+		MediaInfoProbePromotedTotal:       1,
+		MediaInfoProbeDroppedFullTotal:    1,
+		MediaInfoProbeDroppedExpiredTotal: 1,
+		MediaInfoProbeSupersededTotal:     1,
+		MediaInfoProbeSuccessTotal:        1,
+		MediaInfoProbeFailureTotal:        1,
+		MediaInfoStoreFailureTotal:        1,
+		MediaInfoProbeActive:              1,
+		MediaInfoScheduler: SchedulerSnapshot{P0: SchedulerPrioritySnapshot{
+			OfferedTotal: 1, QueuedTotal: 1, JoinedTotal: 1, PromotedTotal: 1,
+			DroppedFullTotal: 1, DroppedExpiredTotal: 1, SupersededTotal: 1,
+		}},
 		MediaInfoEnrichedTotal:                1,
 		MediaInfoFailOpenTotal:                1,
 		MediaInfoWaitActive:                   1,
@@ -224,7 +240,13 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 				registry.DecMetadataBatchGuardQueued()
 				registry.IncMediaInfoCacheHits()
 				registry.IncMediaInfoCacheMisses()
-				registry.IncMediaInfoProbeQueued()
+				registry.IncMediaInfoProbeOffered(0)
+				registry.IncMediaInfoProbeQueued(1)
+				registry.IncMediaInfoProbeJoined(2)
+				registry.IncMediaInfoProbePromoted(0)
+				registry.IncMediaInfoProbeDroppedFull(1)
+				registry.IncMediaInfoProbeDroppedExpired(2)
+				registry.IncMediaInfoProbeSuperseded(0)
 				registry.IncMediaInfoProbeSuccess()
 				registry.IncMediaInfoProbeFailure()
 				registry.IncMediaInfoStoreFailure()
@@ -262,7 +284,10 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 		got.MetadataBatchGuardAdmittedTotal != want || got.MetadataBatchGuardTimeoutsTotal != want ||
 		got.MetadataBatchGuardActive != 0 || got.MetadataBatchGuardQueued != 0 ||
 		got.MediaInfoCacheHitsTotal != want || got.MediaInfoCacheMissesTotal != want ||
-		got.MediaInfoProbeQueuedTotal != want || got.MediaInfoProbeSuccessTotal != want ||
+		got.MediaInfoProbeOfferedTotal != want || got.MediaInfoProbeQueuedTotal != want || got.MediaInfoProbeJoinedTotal != want ||
+		got.MediaInfoProbePromotedTotal != want || got.MediaInfoProbeDroppedFullTotal != want ||
+		got.MediaInfoProbeDroppedExpiredTotal != want || got.MediaInfoProbeSupersededTotal != want ||
+		got.MediaInfoProbeSuccessTotal != want ||
 		got.MediaInfoProbeFailureTotal != want || got.MediaInfoStoreFailureTotal != want || got.MediaInfoProbeActive != 0 ||
 		got.MediaInfoEnrichedTotal != want || got.MediaInfoFailOpenTotal != want || got.MediaInfoWaitActive != 0 || got.MediaInfoWaitRejectedTotal != want ||
 		got.MediaInfoPrewarmTriggeredTotal != want || got.MediaInfoPrewarmReplacedTotal != want ||

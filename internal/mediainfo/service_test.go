@@ -598,6 +598,9 @@ func newServiceForTest(t *testing.T, options ServiceOptions) *Service {
 	if options.NegativeTTL == 0 {
 		options.NegativeTTL = time.Minute
 	}
+	if options.BackgroundInterval == 0 {
+		options.BackgroundInterval = time.Millisecond
+	}
 	if options.BackgroundUserAgent == "" {
 		options.BackgroundUserAgent = "Infuse-Library/8.4.4"
 	}

@@ -27,11 +27,22 @@ import (
 type fakeMediaInfoEnsurer struct {
 	calls        atomic.Int64
 	gets         atomic.Int64
+	memoryGets   atomic.Int64
 	mu           sync.Mutex
 	seen         []mediainfo.Request
+	offered      []mediainfo.Request
+	memoryFn     func(mediainfo.Key) (mediainfo.Record, bool)
 	getFn        func(mediainfo.Key) (mediainfo.Record, bool)
 	getContextFn func(context.Context, mediainfo.Key) (mediainfo.Record, bool)
 	fn           func(context.Context, mediainfo.Request) (mediainfo.Record, error)
+}
+
+func (ensurer *fakeMediaInfoEnsurer) GetMemory(key mediainfo.Key) (mediainfo.Record, bool) {
+	ensurer.memoryGets.Add(1)
+	if ensurer.memoryFn == nil {
+		return mediainfo.Record{}, false
+	}
+	return ensurer.memoryFn(key)
 }
 
 func (ensurer *fakeMediaInfoEnsurer) GetContext(ctx context.Context, key mediainfo.Key) (mediainfo.Record, bool) {
@@ -79,10 +90,23 @@ func (ensurer *fakeMediaInfoEnsurer) Ensure(ctx context.Context, request mediain
 	return ensurer.fn(ctx, request)
 }
 
+func (ensurer *fakeMediaInfoEnsurer) Offer(request mediainfo.Request) mediainfo.SubmitResult {
+	ensurer.mu.Lock()
+	ensurer.offered = append(ensurer.offered, request)
+	ensurer.mu.Unlock()
+	return mediainfo.SubmitResult{Disposition: mediainfo.SubmitNewlyQueued}
+}
+
 func (ensurer *fakeMediaInfoEnsurer) requests() []mediainfo.Request {
 	ensurer.mu.Lock()
 	defer ensurer.mu.Unlock()
 	return append([]mediainfo.Request(nil), ensurer.seen...)
+}
+
+func (ensurer *fakeMediaInfoEnsurer) offers() []mediainfo.Request {
+	ensurer.mu.Lock()
+	defer ensurer.mu.Unlock()
+	return append([]mediainfo.Request(nil), ensurer.offered...)
 }
 
 func TestMetadataEnrichmentAddsMissingXMLFields(t *testing.T) {
@@ -396,6 +420,9 @@ func TestMetadataEnrichmentColdProbeSaturationFailsOpen(t *testing.T) {
 	if !bytes.Equal(second.Body.Bytes(), raw) || ensurer.calls.Load() != 1 {
 		t.Fatalf("second response=%s Ensure calls=%d", second.Body.Bytes(), ensurer.calls.Load())
 	}
+	if offered := ensurer.offers(); len(offered) != 1 || offered[0].Priority != mediainfo.PriorityMetadata {
+		t.Fatalf("background offers = %#v", offered)
+	}
 	close(release)
 	select {
 	case first := <-firstDone:
@@ -432,6 +459,9 @@ func TestMetadataEnrichmentColdProbeQuietWindowSuppressesSequentialMiss(t *testi
 	handler.ServeHTTP(second, authenticatedMetadataRequest(http.MethodGet))
 	if !bytes.Equal(second.Body.Bytes(), raw) || ensurer.calls.Load() != 1 {
 		t.Fatalf("second response=%s Ensure calls=%d", second.Body.Bytes(), ensurer.calls.Load())
+	}
+	if offered := ensurer.offers(); len(offered) != 1 || offered[0].Priority != mediainfo.PriorityMetadata {
+		t.Fatalf("quiet-window offers = %#v", offered)
 	}
 }
 
@@ -542,7 +572,7 @@ func TestMetadataEnrichmentCachedProjectionBypassesColdProbeSlot(t *testing.T) {
 	release := make(chan struct{})
 	var lookups atomic.Int64
 	ensurer := &fakeMediaInfoEnsurer{
-		getContextFn: func(_ context.Context, key mediainfo.Key) (mediainfo.Record, bool) {
+		memoryFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
 			if lookups.Add(1) == 1 {
 				return mediainfo.Record{}, false
 			}
@@ -578,6 +608,9 @@ func TestMetadataEnrichmentCachedProjectionBypassesColdProbeSlot(t *testing.T) {
 	}
 	if ensurer.calls.Load() != 1 {
 		t.Fatalf("Ensure calls = %d", ensurer.calls.Load())
+	}
+	if offered := ensurer.offers(); len(offered) != 0 {
+		t.Fatalf("background offers after cache hit = %d", len(offered))
 	}
 	close(release)
 	select {
@@ -649,6 +682,12 @@ func TestMetadataEnrichmentBurstDoesNotQueueBehindColdProbe(t *testing.T) {
 	}
 	if ensurer.calls.Load() != 1 {
 		t.Fatalf("Ensure calls = %d", ensurer.calls.Load())
+	}
+	if offered := ensurer.offers(); len(offered) != burst {
+		t.Fatalf("background offers = %d, want %d", len(offered), burst)
+	}
+	if got := ensurer.gets.Load(); got != 0 {
+		t.Fatalf("quiet-window burst performed %d durable-capable lookups", got)
 	}
 	if snapshot := registry.Snapshot(); snapshot.MetadataGuardTimeoutsTotal != 0 || snapshot.MediaInfoWaitRejectedTotal != burst {
 		t.Fatalf("metrics = %#v", snapshot)

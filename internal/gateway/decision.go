@@ -135,7 +135,7 @@ func (h *decisionHandler) mediaInfoForDecision(request *http.Request, part playb
 	defer cancel()
 	record, err := h.mediaInfo.Ensure(ctx, mediainfo.Request{
 		Key: key, RatingKey: part.RatingKey, Target: part.Target,
-		Priority: mediainfo.PriorityInteractive, ClientUserAgent: request.UserAgent(),
+		Priority: mediainfo.PriorityPlayback, ClientUserAgent: request.UserAgent(),
 	})
 	return record, err == nil && record.Media.Complete
 }
