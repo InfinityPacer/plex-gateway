@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -212,6 +214,69 @@ func (store *SQLiteStore) DeleteUnretained(ctx context.Context, now time.Time) (
 		return 0, fmt.Errorf("read deleted MediaInfo count: %w", err)
 	}
 	return deleted, nil
+}
+
+// BackupAndDeleteAll creates a transactionally consistent full-database
+// backup, then removes only rebuildable MediaInfo rows while retaining the
+// shared schema registry and tables owned by other modules.
+func (store *SQLiteStore) BackupAndDeleteAll(
+	ctx context.Context,
+	backupDir string,
+	now time.Time,
+) (ResetResult, error) {
+	if store == nil || store.db == nil {
+		return ResetResult{}, errors.New("MediaInfo store is unavailable")
+	}
+	backupDir = filepath.Clean(backupDir)
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		return ResetResult{}, fmt.Errorf("create Gateway backup directory: %w", err)
+	}
+	if err := os.Chmod(backupDir, 0o700); err != nil {
+		return ResetResult{}, fmt.Errorf("protect Gateway backup directory: %w", err)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	backupPath := filepath.Join(
+		backupDir,
+		"plex-gateway-before-mediainfo-reset-"+now.Format("20060102T150405.000000000Z")+".db",
+	)
+
+	connection, err := store.db.Conn(ctx)
+	if err != nil {
+		return ResetResult{}, fmt.Errorf("reserve Gateway database connection: %w", err)
+	}
+	defer connection.Close()
+	var quotedPath string
+	if err := connection.QueryRowContext(ctx, "SELECT quote(?)", backupPath).Scan(&quotedPath); err != nil {
+		return ResetResult{}, fmt.Errorf("quote Gateway backup path: %w", err)
+	}
+	if _, err := connection.ExecContext(ctx, "VACUUM INTO "+quotedPath); err != nil {
+		return ResetResult{}, fmt.Errorf("backup Gateway database: %w", err)
+	}
+	if err := os.Chmod(backupPath, 0o600); err != nil {
+		return ResetResult{}, fmt.Errorf("protect Gateway database backup: %w", err)
+	}
+
+	transaction, err := connection.BeginTx(ctx, nil)
+	if err != nil {
+		return ResetResult{}, fmt.Errorf("begin MediaInfo cache reset: %w", err)
+	}
+	defer transaction.Rollback()
+	result, err := transaction.ExecContext(ctx, "DELETE FROM media_info_records")
+	if err != nil {
+		return ResetResult{}, fmt.Errorf("delete all MediaInfo records: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return ResetResult{}, fmt.Errorf("read deleted MediaInfo count: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return ResetResult{}, fmt.Errorf("commit MediaInfo cache reset: %w", err)
+	}
+	return ResetResult{DeletedRecords: deleted, BackupPath: backupPath}, nil
 }
 
 // Touch extends retention without rewriting the MediaInfo JSON payload.

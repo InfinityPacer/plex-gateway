@@ -20,13 +20,15 @@ import (
 )
 
 const (
-	defaultMediaInfoColdWait        = 5 * time.Second
+	defaultMediaInfoCacheLookupWait = 100 * time.Millisecond
 	defaultMediaInfoResponseLimit   = 8 << 20
-	defaultMediaInfoEnrichmentSlots = 4
+	defaultMediaInfoEnrichmentSlots = 8
 )
 
 type mediaInfoEnsurer interface {
-	Ensure(context.Context, mediainfo.Request) (mediainfo.Record, error)
+	GetMemory(mediainfo.Key) (mediainfo.Record, bool)
+	GetContext(context.Context, mediainfo.Key) (mediainfo.Record, bool)
+	Offer(mediainfo.Request) mediainfo.SubmitResult
 }
 
 // metadataEnrichmentOptions keeps analysis collaborators outside the playback
@@ -37,7 +39,6 @@ type metadataEnrichmentOptions struct {
 	Mapper          *pathmap.Mapper
 	Resolver        resolver.ControlResolver
 	CloudExtensions []string
-	ColdWait        time.Duration
 	ResponseLimit   int64
 	Concurrency     int
 	Metrics         *metrics.Metrics
@@ -49,7 +50,6 @@ type metadataEnrichmentHandler struct {
 	mapper          *pathmap.Mapper
 	resolver        resolver.ControlResolver
 	cloudExtensions map[string]struct{}
-	coldWait        time.Duration
 	responseLimit   int64
 	waiters         chan struct{}
 	metrics         *metrics.Metrics
@@ -58,10 +58,6 @@ type metadataEnrichmentHandler struct {
 func newMetadataEnrichmentHandler(options metadataEnrichmentOptions, next http.Handler) http.Handler {
 	if next == nil || options.Service == nil || options.Mapper == nil || options.Resolver == nil {
 		return next
-	}
-	coldWait := options.ColdWait
-	if coldWait <= 0 {
-		coldWait = defaultMediaInfoColdWait
 	}
 	responseLimit := options.ResponseLimit
 	if responseLimit <= 0 {
@@ -77,14 +73,18 @@ func newMetadataEnrichmentHandler(options metadataEnrichmentOptions, next http.H
 	}
 	return &metadataEnrichmentHandler{
 		next: next, service: options.Service, mapper: options.Mapper, resolver: options.Resolver,
-		cloudExtensions: normalizedExtensionSet(options.CloudExtensions), coldWait: coldWait,
-		responseLimit: responseLimit, waiters: make(chan struct{}, concurrency), metrics: registry,
+		cloudExtensions: normalizedExtensionSet(options.CloudExtensions),
+		responseLimit:   responseLimit, waiters: make(chan struct{}, concurrency), metrics: registry,
 	}
 }
 
 func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	ratingKey, eligible := mediaInfoMetadataRequest(request)
 	if !eligible {
+		if mediaInfoCollectionRequest(request) {
+			handler.serveCachedCollection(w, request)
+			return
+		}
 		handler.next.ServeHTTP(w, request)
 		return
 	}
@@ -136,16 +136,27 @@ func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, reque
 		handler.failOpen(capture, rawBody)
 		return
 	}
-	waitContext, cancel := context.WithTimeout(request.Context(), handler.coldWait)
-	record, err := handler.service.Ensure(waitContext, mediainfo.Request{
-		Key:       mediainfo.Key{PartID: target.Part.ID, STRMFingerprint: fingerprint},
-		RatingKey: ratingKey, Target: strmTarget, Priority: mediainfo.PriorityInteractive,
-		ClientUserAgent: request.UserAgent(),
-	})
-	cancel()
-	if err != nil {
-		handler.failOpen(capture, rawBody)
-		return
+	key := mediainfo.Key{PartID: target.Part.ID, STRMFingerprint: fingerprint}
+	record, found := handler.service.GetMemory(key)
+	if !found {
+		cacheOnly := mediaInfoCacheOnlyRequest(request)
+		if cacheOnly {
+			lookupContext, cancel := context.WithTimeout(request.Context(), defaultMediaInfoCacheLookupWait)
+			record, found = handler.service.GetContext(lookupContext, key)
+			cancel()
+			if !found {
+				handler.replay(capture, rawBody)
+				return
+			}
+		} else {
+			probeRequest := mediainfo.Request{
+				Key: key, RatingKey: ratingKey, Target: strmTarget,
+				Priority: mediainfo.PriorityMetadata, ClientUserAgent: request.UserAgent(),
+			}
+			_ = handler.service.Offer(probeRequest)
+			handler.replay(capture, rawBody)
+			return
+		}
 	}
 	currentTarget, err := handler.resolver.ReadTarget(localPath)
 	if err != nil {
@@ -162,10 +173,98 @@ func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, reque
 		handler.failOpen(capture, rawBody)
 		return
 	}
-	wireBody, err := encodeMetadataBody(enriched, encoding)
+	if err := handler.writeEnrichedResponse(w, capture, enriched, encoding); err != nil {
+		handler.failOpen(capture, rawBody)
+		return
+	}
+	handler.metrics.IncMediaInfoEnriched()
+}
+
+// serveCachedCollection enriches already-probed items without admitting remote
+// analysis. Browsing a season therefore cannot turn one response into a burst
+// of MediaVault or CDN requests.
+func (handler *metadataEnrichmentHandler) serveCachedCollection(w http.ResponseWriter, request *http.Request) {
+	capture := newBoundedResponseCapture(w, handler.responseLimit)
+	handler.next.ServeHTTP(capture, request)
+	if capture.passthrough {
+		return
+	}
+	rawBody := capture.body.Bytes()
+	decoded, encoding, err := decodeMetadataBody(rawBody, capture.header.Get("Content-Encoding"), handler.responseLimit)
 	if err != nil {
 		handler.failOpen(capture, rawBody)
 		return
+	}
+	targets, err := plexmeta.SelectEnrichmentTargets(decoded, capture.header.Get("Content-Type"))
+	if err != nil {
+		handler.failOpen(capture, rawBody)
+		return
+	}
+	records := make(map[string]mediainfo.Media)
+	lookupContext, cancel := context.WithTimeout(request.Context(), defaultMediaInfoCacheLookupWait)
+	defer cancel()
+	for _, target := range targets {
+		if !target.NeedsEnrichment || !handler.cloudPart(target.Part) {
+			continue
+		}
+		media, found := handler.cachedMedia(lookupContext, target.Part)
+		if found {
+			records[target.RatingKey] = media
+		}
+	}
+	if len(records) == 0 {
+		handler.replay(capture, rawBody)
+		return
+	}
+	enriched, changed, err := plexmeta.EnrichMetadataTargets(decoded, capture.header.Get("Content-Type"), records)
+	if err != nil || changed == 0 {
+		handler.failOpen(capture, rawBody)
+		return
+	}
+	if err := handler.writeEnrichedResponse(w, capture, enriched, encoding); err != nil {
+		handler.failOpen(capture, rawBody)
+		return
+	}
+	handler.metrics.IncMediaInfoEnriched()
+}
+
+func (handler *metadataEnrichmentHandler) cachedMedia(ctx context.Context, part plexmeta.Part) (mediainfo.Media, bool) {
+	localPath, err := handler.mapper.Resolve(part.File)
+	if err != nil {
+		return mediainfo.Media{}, false
+	}
+	strmTarget, err := handler.resolver.ReadTarget(localPath)
+	if err != nil {
+		return mediainfo.Media{}, false
+	}
+	fingerprint, err := mediainfo.FingerprintSTRMTarget(strmTarget)
+	if err != nil {
+		return mediainfo.Media{}, false
+	}
+	record, found := handler.service.GetContext(ctx, mediainfo.Key{PartID: part.ID, STRMFingerprint: fingerprint})
+	if !found {
+		return mediainfo.Media{}, false
+	}
+	currentTarget, err := handler.resolver.ReadTarget(localPath)
+	if err != nil {
+		return mediainfo.Media{}, false
+	}
+	currentFingerprint, err := mediainfo.FingerprintSTRMTarget(currentTarget)
+	if err != nil || currentFingerprint != fingerprint {
+		return mediainfo.Media{}, false
+	}
+	return record.Media, true
+}
+
+func (handler *metadataEnrichmentHandler) writeEnrichedResponse(
+	w http.ResponseWriter,
+	capture *boundedResponseCapture,
+	enriched []byte,
+	encoding string,
+) error {
+	wireBody, err := encodeMetadataBody(enriched, encoding)
+	if err != nil {
+		return err
 	}
 	headers := capture.header.Clone()
 	for _, name := range []string{"ETag", "Last-Modified", "Content-MD5", "Digest"} {
@@ -176,7 +275,7 @@ func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, reque
 	}
 	headers.Set("Content-Length", strconv.Itoa(len(wireBody)))
 	writeCapturedResponse(w, headers, capture.statusCode(), wireBody)
-	handler.metrics.IncMediaInfoEnriched()
+	return nil
 }
 
 func (handler *metadataEnrichmentHandler) cloudPart(part plexmeta.Part) bool {
@@ -202,6 +301,36 @@ func mediaInfoMetadataRequest(request *http.Request) (string, bool) {
 		return "", false
 	}
 	return strings.TrimPrefix(request.URL.Path, "/library/metadata/"), true
+}
+
+func mediaInfoCollectionRequest(request *http.Request) bool {
+	if request == nil || request.URL == nil || request.Method != http.MethodGet || request.Header.Get("Range") != "" {
+		return false
+	}
+	_, tokenPresent, tokenValid := requestIdentity(request, "X-Plex-Token")
+	if !tokenPresent || !tokenValid {
+		return false
+	}
+	const prefix = "/library/metadata/"
+	const suffix = "/children"
+	value := strings.TrimPrefix(request.URL.Path, prefix)
+	if value == request.URL.Path || !strings.HasSuffix(value, suffix) {
+		return false
+	}
+	ratingKey := strings.TrimSuffix(value, suffix)
+	return ratingKey != "" && !strings.Contains(ratingKey, "/") && isMetadataItemPath(prefix+ratingKey)
+}
+
+// mediaInfoCacheOnlyRequest identifies background library crawlers that may
+// enumerate every item. They can consume an existing record, while active
+// playback remains responsible for admitting new remote analysis work.
+func mediaInfoCacheOnlyRequest(request *http.Request) bool {
+	if request == nil || request.URL == nil {
+		return false
+	}
+	product := strings.ToLower(strings.TrimSpace(request.Header.Get("X-Plex-Product")))
+	_, skipsRefresh := request.URL.Query()["skipRefresh"]
+	return skipsRefresh && strings.HasSuffix(product, "-library")
 }
 
 func normalizedExtensionSet(extensions []string) map[string]struct{} {

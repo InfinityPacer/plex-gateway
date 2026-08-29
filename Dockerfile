@@ -18,6 +18,7 @@ RUN apk add --no-cache ca-certificates ffmpeg \
     && adduser -D -H -u 1000 -G gateway -s /sbin/nologin gateway \
     && install -d -o gateway -g gateway /app_data
 COPY --from=build /plex-gateway /usr/local/bin/plex-gateway
+COPY --chmod=755 scripts/reset-mediainfo-cache.sh /usr/local/bin/plex-gateway-reset-mediainfo-cache
 WORKDIR /app_data
 USER gateway
 EXPOSE 32400

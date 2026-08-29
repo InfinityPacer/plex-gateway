@@ -3,8 +3,10 @@ package gateway
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -132,6 +134,44 @@ func (w *decisionResponseCapture) body() []byte {
 		return nil
 	}
 	return decoded
+}
+
+// replaceDecodedBody swaps one complete bounded decision response before it is
+// exposed to the client. The replacement is emitted without upstream content
+// coding because the response representation has changed.
+func (w *decisionResponseCapture) replaceDecodedBody(body []byte) error {
+	if !w.successful() || w.committed || w.passthrough {
+		return errors.New("decision response is not replaceable")
+	}
+	if int64(len(body)) > w.limit {
+		return errors.New("enriched decision response exceeds the limit")
+	}
+	w.captured.Reset()
+	_, _ = w.captured.Write(body)
+	resetDecisionBodyHeaders(w.Header(), len(body))
+	return nil
+}
+
+// resetDecisionBodyHeaders removes representation metadata that describes the
+// upstream body before installing a replacement. Validators and transfer
+// framing are no longer valid once the decision document has changed.
+func resetDecisionBodyHeaders(header http.Header, bodyLength int) {
+	for _, name := range []string{
+		"Accept-Ranges",
+		"Content-Encoding",
+		"Content-Length",
+		"Content-MD5",
+		"Content-Range",
+		"Digest",
+		"ETag",
+		"Last-Modified",
+		"Trailer",
+		"Transfer-Encoding",
+		"Vary",
+	} {
+		header.Del(name)
+	}
+	header.Set("Content-Length", strconv.Itoa(bodyLength))
 }
 
 var _ interface{ Unwrap() http.ResponseWriter } = (*decisionResponseCapture)(nil)

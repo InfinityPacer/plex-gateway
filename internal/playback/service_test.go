@@ -39,11 +39,12 @@ func TestServicePreparationOwnsCloudClassificationAndTargetRead(t *testing.T) {
 	}
 	cache.Put(partcache.PartInfo{
 		PartID:       "cloud",
+		RatingKey:    "42",
 		PartKey:      "/library/parts/cloud/1/file",
 		PlexFilePath: "/media/cloud/Movie.strm",
 	})
 	got := service.PrepareCached("cloud")
-	if got.State != PreparationReady || got.Part.Target != control.target {
+	if got.State != PreparationReady || got.Part.Target != control.target || got.Part.RatingKey != "42" {
 		t.Fatalf("cloud preparation = %#v", got)
 	}
 	if control.readPath != filepath.Join(localRoot, "Movie.strm") {
@@ -105,7 +106,7 @@ func TestServicePlayPreservesClientContextAndRefreshesCache(t *testing.T) {
 		control.playback.Header.Get("Range") != "bytes=100-200" {
 		t.Fatalf("resolver request = %#v", control.playback)
 	}
-	if cached, ok := cache.Get(part.Part.ID); !ok || cached.PartKey != part.Part.Key {
+	if cached, ok := cache.Get(part.Part.ID); !ok || cached.PartKey != part.Part.Key || cached.RatingKey != part.RatingKey {
 		t.Fatalf("refreshed cache = %#v, found = %v", cached, ok)
 	}
 }

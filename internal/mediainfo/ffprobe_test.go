@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -101,6 +102,60 @@ func TestParseFFProbePreservesPlexRelevantFields(t *testing.T) {
 	}
 }
 
+func TestParseFFProbeDoesNotInferCodecFieldsFromDolbyVisionProfile(t *testing.T) {
+	body := []byte(`{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "hevc",
+      "codec_type": "video",
+      "width": 3840,
+      "height": 2160,
+      "side_data_list": [
+        {"side_data_type":"DOVI configuration record","dv_version_major":1,"dv_version_minor":0,"dv_profile":5,"dv_level":6,"rpu_present_flag":1,"el_present_flag":0,"bl_present_flag":1,"dv_bl_signal_compatibility_id":0}
+      ]
+    }
+  ],
+  "format":{"format_name":"matroska","duration":"60"}
+}`)
+
+	media, err := parseFFProbe(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(media.Streams) != 1 {
+		t.Fatalf("streams = %#v", media.Streams)
+	}
+	video := media.Streams[0]
+	if video.DolbyVision == nil || video.DolbyVision.Profile != 5 || video.HDRFormat != "dolby_vision" {
+		t.Fatalf("Dolby Vision fields = %#v", video)
+	}
+	if video.Profile != "" || video.BitDepth != 0 || video.PixelFormat != "" ||
+		video.ColorSpace != "" || video.ColorRange != "" ||
+		video.ColorPrimaries != "" || video.ColorTransfer != "" {
+		t.Fatalf("codec or color fields were inferred from Dolby Vision profile = %#v", video)
+	}
+}
+
+func TestParseFFProbeInfersBitDepthFromPixelFormat(t *testing.T) {
+	body := []byte(`{
+  "streams": [
+    {"index":0,"codec_name":"hevc","codec_type":"video","width":3840,"height":2160,"pix_fmt":"yuv420p10le"},
+    {"index":1,"codec_name":"hevc","codec_type":"video","width":1920,"height":1080,"pix_fmt":"p010le"},
+    {"index":2,"codec_name":"h264","codec_type":"video","width":1280,"height":720,"pix_fmt":"yuv420p"}
+  ],
+  "format":{"format_name":"matroska","duration":"60"}
+}`)
+
+	media, err := parseFFProbe(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(media.Streams) != 3 || media.Streams[0].BitDepth != 10 || media.Streams[1].BitDepth != 10 || media.Streams[2].BitDepth != 8 {
+		t.Fatalf("inferred bit depths = %#v", media.Streams)
+	}
+}
+
 func TestParseFFProbeRejectsIncompleteVideo(t *testing.T) {
 	_, err := parseFFProbe([]byte(`{
       "streams":[{"index":0,"codec_type":"video","codec_name":"hevc"}],
@@ -162,6 +217,90 @@ func TestFFProberAgainstHTTPMedia(t *testing.T) {
 	}
 }
 
+func TestFFProberFillsMissingSizeFromContentRange(t *testing.T) {
+	transport := &rangeProbeTransport{status: http.StatusPartialContent, contentRange: "bytes 0-0/123456"}
+	prober := newOutputScriptProber(t, completeFFProbeJSONWithoutSize, &http.Client{Transport: transport})
+
+	media, err := prober.Probe(t.Context(), "https://cdn.example.test/movie.mkv", "Infuse-Library/8.4.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if media.Size != 123456 {
+		t.Fatalf("media size = %d", media.Size)
+	}
+	if transport.calls.Load() != 1 || transport.request == nil {
+		t.Fatalf("range requests = %d request=%#v", transport.calls.Load(), transport.request)
+	}
+	if transport.request.Method != http.MethodGet ||
+		transport.request.Header.Get("Range") != "bytes=0-0" ||
+		transport.request.Header.Get("User-Agent") != "Infuse-Library/8.4.4" {
+		t.Fatalf("range request = %#v", transport.request)
+	}
+}
+
+func TestFFProberSizeFallbackFailsOpenForInvalidResponses(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       int
+		contentRange string
+	}{
+		{name: "full response", status: http.StatusOK, contentRange: "bytes 0-0/123456"},
+		{name: "missing total", status: http.StatusPartialContent, contentRange: "bytes 0-0/*"},
+		{name: "invalid unit", status: http.StatusPartialContent, contentRange: "octets 0-0/123456"},
+		{name: "invalid range", status: http.StatusPartialContent, contentRange: "bytes 0-0"},
+		{name: "zero total", status: http.StatusPartialContent, contentRange: "bytes 0-0/0"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transport := &rangeProbeTransport{status: test.status, contentRange: test.contentRange}
+			prober := newOutputScriptProber(t, completeFFProbeJSONWithoutSize, &http.Client{Transport: transport})
+			media, err := prober.Probe(t.Context(), "https://cdn.example.test/movie.mkv", "Infuse-Library/8.4.4")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if media.Size != 0 {
+				t.Fatalf("invalid size was accepted = %d", media.Size)
+			}
+			if transport.calls.Load() != 1 {
+				t.Fatalf("range requests = %d", transport.calls.Load())
+			}
+		})
+	}
+}
+
+func TestFFProberSizeFallbackTimeoutFailsOpen(t *testing.T) {
+	transport := &deadlineErrorTransport{}
+	prober := newOutputScriptProber(t, completeFFProbeJSONWithoutSize, &http.Client{Transport: transport})
+	media, err := prober.Probe(t.Context(), "https://cdn.example.test/movie.mkv", "Infuse-Library/8.4.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if media.Size != 0 {
+		t.Fatalf("timeout changed size = %d", media.Size)
+	}
+	if transport.calls.Load() != 1 || transport.deadline.IsZero() {
+		t.Fatalf("timeout request calls=%d deadline=%s", transport.calls.Load(), transport.deadline)
+	}
+	if transport.deadline.After(transport.observedAt.Add(defaultSizeProbeTimeout + 100*time.Millisecond)) {
+		t.Fatalf("size probe deadline = %s, exceeds %s cap", transport.deadline.Sub(transport.observedAt), defaultSizeProbeTimeout)
+	}
+}
+
+func TestFFProberDoesNotRangeProbeExistingSize(t *testing.T) {
+	transport := &rangeProbeTransport{status: http.StatusPartialContent, contentRange: "bytes 0-0/123456"}
+	prober := newOutputScriptProber(t, completeFFProbeJSONWithSize, &http.Client{Transport: transport})
+	media, err := prober.Probe(t.Context(), "https://cdn.example.test/movie.mkv", "Infuse-Library/8.4.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if media.Size != 987654 {
+		t.Fatalf("existing size changed = %d", media.Size)
+	}
+	if transport.calls.Load() != 0 {
+		t.Fatalf("unexpected range requests = %d", transport.calls.Load())
+	}
+}
+
 func TestFFProberPreservesCancellation(t *testing.T) {
 	prober := newScriptProber(t, "exec sleep 5", 5*time.Second, defaultProbeOutputLimit)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -203,3 +342,69 @@ func newScriptProber(t *testing.T, body string, timeout time.Duration, outputLim
 	}
 	return prober
 }
+
+const (
+	completeFFProbeJSONWithoutSize = `{"streams":[{"index":0,"codec_name":"hevc","codec_type":"video","width":1920,"height":1080}],"format":{"format_name":"matroska","duration":"60"}}`
+	completeFFProbeJSONWithSize    = `{"streams":[{"index":0,"codec_name":"hevc","codec_type":"video","width":1920,"height":1080}],"format":{"format_name":"matroska","duration":"60","size":"987654"}}`
+)
+
+func newOutputScriptProber(t *testing.T, output string, client *http.Client) *FFProber {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffprobe-output-test")
+	script := "#!/bin/sh\nprintf '%s' '" + output + "'\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prober, err := NewFFProber(FFProbeOptions{
+		Binary: path, Timeout: defaultProbeTimeout, ProbeSize: defaultProbeSize,
+		AnalyzeDuration: defaultAnalyzeDuration, OutputLimit: defaultProbeOutputLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prober.sizeClient = client
+	return prober
+}
+
+type rangeProbeTransport struct {
+	calls        atomic.Int64
+	request      *http.Request
+	status       int
+	contentRange string
+}
+
+func (transport *rangeProbeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.calls.Add(1)
+	transport.request = request.Clone(request.Context())
+	header := make(http.Header)
+	if transport.contentRange != "" {
+		header.Set("Content-Range", transport.contentRange)
+	}
+	return &http.Response{
+		StatusCode: transport.status,
+		Header:     header,
+		Body:       unreadableResponseBody{},
+		Request:    request,
+	}, nil
+}
+
+type deadlineErrorTransport struct {
+	calls      atomic.Int64
+	deadline   time.Time
+	observedAt time.Time
+}
+
+func (transport *deadlineErrorTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.calls.Add(1)
+	transport.observedAt = time.Now()
+	transport.deadline, _ = request.Context().Deadline()
+	return nil, context.DeadlineExceeded
+}
+
+type unreadableResponseBody struct{}
+
+func (unreadableResponseBody) Read([]byte) (int, error) {
+	panic("media response body was read")
+}
+
+func (unreadableResponseBody) Close() error { return nil }

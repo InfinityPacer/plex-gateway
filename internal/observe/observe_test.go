@@ -205,6 +205,38 @@ func TestRoundTripperFailsOpenOnEarlyClose(t *testing.T) {
 	}
 }
 
+func TestRoundTripperSkipsObservationBeforeWrappingBody(t *testing.T) {
+	raw := []byte(`<MediaContainer><Video><Media><Part id="123" file="/media/cloud/A.strm" /></Media></Video></MediaContainer>`)
+	called := false
+	transport := NewRoundTripper(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/xml"}},
+			Body:       io.NopCloser(bytes.NewReader(raw)),
+			Request:    request,
+		}, nil
+	}), Config{
+		MetadataPaths: []string{"/library/metadata/*"},
+		SkipRequest:   func(*http.Request) bool { return true },
+		OnParts: func(Observation) {
+			called = true
+		},
+	})
+
+	response, err := transport.RoundTrip(httptest.NewRequest(http.MethodGet, "http://plex.test/library/metadata/42", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, wrapped := response.Body.(*observedBody); wrapped {
+		t.Fatal("skipped request body was wrapped for observation")
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if called {
+		t.Fatal("observer callback ran for a skipped request")
+	}
+}
+
 func TestRoundTripperSkipsUnconfiguredOrUnsuccessfulResponses(t *testing.T) {
 	for _, test := range []struct {
 		name        string

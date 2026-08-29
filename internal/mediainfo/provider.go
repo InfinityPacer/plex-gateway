@@ -61,7 +61,7 @@ func NewMediaVaultFFProbeProvider(controlResolver resolver.ControlResolver, prob
 
 // Descriptor returns the durable compatibility identity for this provider.
 func (*MediaVaultFFProbeProvider) Descriptor() ProviderDescriptor {
-	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV1}
+	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV3}
 }
 
 // Probe forwards only the transport headers required for deterministic

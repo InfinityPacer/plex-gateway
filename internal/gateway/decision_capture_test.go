@@ -6,8 +6,53 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 )
+
+func TestDecisionCaptureReplacesGzipBodyAndRepresentationHeaders(t *testing.T) {
+	destination := httptest.NewRecorder()
+	capture := newDecisionResponseCapture(destination, 1<<20)
+	capture.Header().Set("Content-Encoding", "gzip")
+	capture.Header().Set("Content-Length", "1")
+	for _, name := range []string{
+		"Accept-Ranges", "Content-MD5", "Content-Range", "Digest", "ETag",
+		"Last-Modified", "Trailer", "Transfer-Encoding", "Vary",
+	} {
+		capture.Header().Set(name, "stale")
+	}
+	capture.Header().Set("Content-Type", "application/xml")
+	capture.WriteHeader(http.StatusOK)
+
+	var original bytes.Buffer
+	writer := gzip.NewWriter(&original)
+	_, _ = writer.Write([]byte("original"))
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = capture.Write(original.Bytes())
+
+	if err := capture.replaceDecodedBody([]byte("enriched")); err != nil {
+		t.Fatal(err)
+	}
+	if err := capture.commit(); err != nil {
+		t.Fatal(err)
+	}
+	if destination.Body.String() != "enriched" || destination.Header().Get("Content-Encoding") != "" || destination.Header().Get("Content-Length") != strconv.Itoa(len("enriched")) {
+		t.Fatalf("headers=%#v body=%q", destination.Header(), destination.Body.String())
+	}
+	if destination.Header().Get("Content-Type") != "application/xml" {
+		t.Fatalf("Content-Type = %q", destination.Header().Get("Content-Type"))
+	}
+	for _, name := range []string{
+		"Accept-Ranges", "Content-MD5", "Content-Range", "Digest", "ETag",
+		"Last-Modified", "Trailer", "Transfer-Encoding", "Vary",
+	} {
+		if got := destination.Header().Get(name); got != "" {
+			t.Errorf("%s = %q, want empty", name, got)
+		}
+	}
+}
 
 func TestNormalizePlaybackAttemptUsesStableSessionIdentity(t *testing.T) {
 	decision := grantTestRequest("")

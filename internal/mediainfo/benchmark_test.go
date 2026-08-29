@@ -24,6 +24,105 @@ func BenchmarkMediaInfoL1Get(b *testing.B) {
 	}
 }
 
+func BenchmarkMediaInfoServiceGetMemory(b *testing.B) {
+	now := time.Now().UTC()
+	record := completeRecord(now)
+	service, err := NewService(ServiceOptions{
+		Cache: NewCache([]Record{record}, now), Store: &fakeRecordStore{},
+		Provider: &fakeProvider{}, PlexServerID: record.Key.PlexServerID,
+		BackgroundUserAgent: "Infuse-Library/8.5.1", Now: func() time.Time { return now },
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Close(ctx); err != nil {
+			b.Error(err)
+		}
+	})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, ok := service.GetMemory(record.Key); !ok {
+			b.Fatal("service L1 miss")
+		}
+	}
+}
+
+func BenchmarkMediaInfoServiceOfferFresh(b *testing.B) {
+	now := time.Now().UTC()
+	record := completeRecord(now)
+	request := Request{
+		Key: record.Key, RatingKey: record.RatingKey, Target: "https://control.example.test/fresh",
+		Priority: PriorityPlayback, ClientUserAgent: "Infuse-Library/8.5.1",
+	}
+	service, err := NewService(ServiceOptions{
+		Cache: NewCache([]Record{record}, now), Store: &fakeRecordStore{},
+		Provider: &fakeProvider{}, PlexServerID: record.Key.PlexServerID,
+		BackgroundUserAgent: "Infuse-Library/8.5.1", Now: func() time.Time { return now },
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Close(ctx); err != nil {
+			b.Error(err)
+		}
+	})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if result := service.Offer(request); result.Disposition != SubmitFreshCache || result.Err != nil {
+			b.Fatalf("Offer() = %#v", result)
+		}
+	}
+}
+
+func BenchmarkMediaInfoServiceOfferJoin(b *testing.B) {
+	prober := &blockingProber{started: make(chan string, 1), release: make(chan struct{})}
+	service, err := NewService(ServiceOptions{
+		Cache: NewCache(nil, time.Now()), Store: &fakeRecordStore{},
+		Provider: &fakeProvider{prober: prober}, PlexServerID: "server",
+		BackgroundUserAgent: "Infuse-Library/8.5.1", BackgroundInterval: time.Millisecond,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	request := testRequest("benchmark-join", PriorityPlayback)
+	if result := service.Offer(request); result.Err != nil {
+		b.Fatal(result.Err)
+	}
+	<-prober.started
+	b.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Close(ctx); err != nil {
+			b.Error(err)
+		}
+	})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if result := service.Offer(request); result.Disposition != SubmitJoinedExistingFlight || result.Err != nil {
+			b.Fatalf("Offer() = %#v", result)
+		}
+	}
+}
+
+func BenchmarkFingerprintSTRMTarget(b *testing.B) {
+	const target = "http://mediavault:7811/redirect/pickcode/movie.mkv"
+	b.ReportAllocs()
+	for range b.N {
+		if _, err := FingerprintSTRMTarget(target); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkMediaInfoL1PutAtCapacity(b *testing.B) {
 	now := time.Now()
 	records := make([]Record, defaultCacheEntries)

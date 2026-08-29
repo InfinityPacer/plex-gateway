@@ -14,83 +14,107 @@ import (
 )
 
 const (
-	defaultListenAddr         = ":32400"
-	defaultReadHeaderTimeout  = 15 * time.Second
-	defaultIdleTimeout        = 90 * time.Second
-	defaultShutdownTimeout    = 15 * time.Second
-	defaultPartTTL            = 24 * time.Hour
-	defaultResolverTimeout    = 15 * time.Second
-	defaultObserveMaxBytes    = 8 << 20
-	defaultPartProbeTimeout   = 15 * time.Second
-	defaultMetadataGlobal     = 8
-	defaultMetadataPerClient  = 4
-	defaultMetadataBatch      = 3
-	defaultMetadataQueueWait  = 10 * time.Second
-	defaultDatabasePath       = "./data/plex-gateway.db"
-	defaultMediaInfoProbe     = 20 * time.Second
-	defaultMediaInfoSize      = 8 << 20
-	defaultMediaInfoAnalyze   = 5 * time.Second
-	defaultMediaInfoOutput    = 2 << 20
-	defaultMediaInfoWorkers   = 1
-	defaultMediaInfoQueue     = 256
-	defaultMediaInfoTTL       = 30 * 24 * time.Hour
-	defaultMediaInfoRetention = 180 * 24 * time.Hour
-	defaultMediaInfoL1Entries = 10_000
-	defaultMediaInfoNegative  = 15 * time.Minute
-	defaultMediaInfoAgent     = "Infuse-Library/8.4.4"
-	defaultMediaInfoColdWait  = 5 * time.Second
-	defaultMediaInfoBodyLimit = 8 << 20
-	defaultMediaInfoWaiters   = 4
+	defaultListenAddr               = ":32400"
+	defaultReadHeaderTimeout        = 15 * time.Second
+	defaultIdleTimeout              = 90 * time.Second
+	defaultShutdownTimeout          = 15 * time.Second
+	defaultPartTTL                  = 24 * time.Hour
+	defaultResolverTimeout          = 15 * time.Second
+	defaultObserveMaxBytes          = 8 << 20
+	defaultPartProbeTimeout         = 15 * time.Second
+	defaultMetadataGlobal           = 16
+	defaultMetadataPerClient        = 16
+	defaultMetadataBatch            = 4
+	defaultMetadataQueueWait        = 10 * time.Second
+	defaultMetadataCoalesceWindow   = 20 * time.Millisecond
+	defaultMetadataCoalesceMaxItems = 32
+	defaultMetadataCoalesceTimeout  = 5 * time.Second
+	maxMetadataCoalesceWindow       = 100 * time.Millisecond
+	maxMetadataCoalesceItems        = 32
+	defaultDatabasePath             = "./data/plex-gateway.db"
+	defaultMediaInfoProbe           = 20 * time.Second
+	defaultMediaInfoSize            = 8 << 20
+	defaultMediaInfoAnalyze         = 5 * time.Second
+	defaultMediaInfoOutput          = 2 << 20
+	defaultMediaInfoWorkers         = 1
+	defaultPlaybackQueue            = 16
+	defaultNeighborQueue            = 50
+	defaultMetadataQueue            = 50
+	defaultPendingTTL               = 5 * time.Minute
+	defaultBackgroundInterval       = 5 * time.Second
+	defaultMediaInfoTTL             = 30 * 24 * time.Hour
+	defaultMediaInfoRetention       = 180 * 24 * time.Hour
+	defaultMediaInfoL1Entries       = 10_000
+	defaultMediaInfoNegative        = 15 * time.Minute
+	defaultMediaInfoAgent           = "Infuse-Library/8.5.1"
+	defaultMediaInfoColdWait        = 5 * time.Second
+	defaultMediaInfoBodyLimit       = 8 << 20
+	defaultMediaInfoWaiters         = 8
+	defaultPrewarmBefore            = 2
+	defaultPrewarmAfter             = 3
+	maxPrewarmWindow                = 50
 )
 
 // Config contains process-level settings for transparent Plex proxying and
-// optional STRM redirect handling. Credentials remain request-scoped and are
-// never loaded into this structure.
+// optional STRM redirect handling. PlexToken is an isolated management
+// credential for nearby-item discovery and is never mixed into client playback
+// context.
 type Config struct {
-	ListenAddr        string
-	DatabasePath      string
-	PlexURL           *url.URL
-	MediaVaultURL     *url.URL
-	PathMappings      []pathmap.Mapping
-	CloudExtensions   []string
-	PartTTL           time.Duration
-	ResolverTimeout   time.Duration
-	ObserveMaxBytes   int64
-	PartProbeTimeout  time.Duration
-	MetadataGuard     MetadataGuardConfig
-	MediaInfo         MediaInfoConfig
-	LogLevel          string
-	TraceEnabled      bool
-	ReadHeaderTimeout time.Duration
-	IdleTimeout       time.Duration
-	ShutdownTimeout   time.Duration
+	ListenAddr             string
+	DatabasePath           string
+	PlexURL                *url.URL
+	PlexToken              string
+	MediaVaultURL          *url.URL
+	PathMappings           []pathmap.Mapping
+	CloudExtensions        []string
+	PartTTL                time.Duration
+	ResolverTimeout        time.Duration
+	ObserveMaxBytes        int64
+	PartProbeTimeout       time.Duration
+	MetadataAnalysisFilter bool
+	MetadataGuard          MetadataGuardConfig
+	MetadataCoalesce       MetadataCoalesceConfig
+	MediaInfo              MediaInfoConfig
+	PlaybackVeto           bool
+	LogLevel               string
+	TraceEnabled           bool
+	ReadHeaderTimeout      time.Duration
+	IdleTimeout            time.Duration
+	ShutdownTimeout        time.Duration
 }
 
 // MediaInfoConfig bounds the optional analysis plane. It is enabled by default
 // but capability initialization remains fail-open for transparent Plex proxying.
 type MediaInfoConfig struct {
-	Enabled              bool
-	FFProbePath          string
-	ProbeTimeout         time.Duration
-	ProbeSize            int64
-	AnalyzeDuration      time.Duration
-	OutputMaxBytes       int64
-	Concurrency          int
-	InteractiveQueueSize int
-	BackgroundQueueSize  int
-	RecordTTL            time.Duration
-	RecordRetention      time.Duration
-	L1MaxEntries         int
-	NegativeTTL          time.Duration
-	UserAgent            string
-	ColdWait             time.Duration
-	ResponseMaxBytes     int64
-	EnrichmentWaiters    int
+	Enabled            bool
+	FFProbePath        string
+	ProbeTimeout       time.Duration
+	ProbeSize          int64
+	AnalyzeDuration    time.Duration
+	OutputMaxBytes     int64
+	Concurrency        int
+	PlaybackQueueSize  int
+	NeighborQueueSize  int
+	MetadataQueueSize  int
+	PendingTTL         time.Duration
+	BackgroundInterval time.Duration
+	RecordTTL          time.Duration
+	RecordRetention    time.Duration
+	L1MaxEntries       int
+	NegativeTTL        time.Duration
+	UserAgent          string
+	ColdWait           time.Duration
+	ResponseMaxBytes   int64
+	EnrichmentWaiters  int
+	// PrewarmBefore and PrewarmAfter bound speculative neighbors around a
+	// cloud redirect. Remote starts remain governed by BackgroundInterval.
+	PrewarmBefore int
+	PrewarmAfter  int
 }
 
 // MetadataGuardConfig bounds detailed metadata fan-out before requests enter
-// Plex. The protection is opt-in because client behavior and Plex capacity vary
-// across deployments.
+// Plex. It remains independently configurable from metadata analysis filtering
+// so operators can validate Plex capacity without restoring file inspection.
 type MetadataGuardConfig struct {
 	Enabled              bool
 	GlobalConcurrency    int
@@ -98,6 +122,15 @@ type MetadataGuardConfig struct {
 	BatchEnabled         bool
 	BatchConcurrency     int
 	QueueTimeout         time.Duration
+}
+
+// MetadataCoalesceConfig bounds transparent aggregation of equivalent
+// single-item reads into Plex's native comma-separated metadata endpoint.
+type MetadataCoalesceConfig struct {
+	Enabled  bool
+	Window   time.Duration
+	MaxItems int
+	Timeout  time.Duration
 }
 
 // Load reads environment configuration and rejects values that would make the
@@ -123,6 +156,10 @@ func Load() (Config, error) {
 	}
 	plexURL.RawQuery = ""
 	plexURL.Fragment = ""
+	plexToken := strings.TrimSpace(os.Getenv("PLEX_TOKEN"))
+	if strings.ContainsAny(plexToken, "\r\n") {
+		return Config{}, errors.New("PLEX_TOKEN must not contain line breaks")
+	}
 
 	mediaVaultURL, err := optionalHTTPURL("MEDIAVAULT_URL")
 	if err != nil {
@@ -157,11 +194,15 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	traceEnabled, err := envBool("TRACE_ENABLED", false)
+	traceEnabled, err := envBool("TRACE_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}
-	metadataGuardEnabled, err := envBool("METADATA_GUARD_ENABLED", false)
+	metadataGuardEnabled, err := envBool("METADATA_GUARD_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataAnalysisFilter, err := envBool("METADATA_ANALYSIS_FILTER_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}
@@ -176,7 +217,7 @@ func Load() (Config, error) {
 	if metadataPerClient > metadataGlobal {
 		return Config{}, errors.New("METADATA_GUARD_CLIENT_CONCURRENCY must not exceed METADATA_GUARD_GLOBAL_CONCURRENCY")
 	}
-	metadataBatchEnabled, err := envBool("METADATA_GUARD_BATCH_ENABLED", false)
+	metadataBatchEnabled, err := envBool("METADATA_GUARD_BATCH_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}
@@ -187,6 +228,31 @@ func Load() (Config, error) {
 	metadataQueueWait, err := envDuration("METADATA_GUARD_QUEUE_TIMEOUT", defaultMetadataQueueWait)
 	if err != nil {
 		return Config{}, err
+	}
+	metadataCoalesceEnabled, err := envBool("METADATA_COALESCE_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataCoalesceWindow, err := envDuration("METADATA_COALESCE_WINDOW", defaultMetadataCoalesceWindow)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataCoalesceMaxItems, err := envPositiveInt("METADATA_COALESCE_MAX_ITEMS", defaultMetadataCoalesceMaxItems)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataCoalesceTimeout, err := envDuration("METADATA_COALESCE_TIMEOUT", defaultMetadataCoalesceTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	if metadataCoalesceWindow > maxMetadataCoalesceWindow {
+		return Config{}, fmt.Errorf("METADATA_COALESCE_WINDOW must not exceed %s", maxMetadataCoalesceWindow)
+	}
+	if metadataCoalesceMaxItems < 2 {
+		return Config{}, errors.New("METADATA_COALESCE_MAX_ITEMS must be at least 2")
+	}
+	if metadataCoalesceMaxItems > maxMetadataCoalesceItems {
+		return Config{}, fmt.Errorf("METADATA_COALESCE_MAX_ITEMS must not exceed %d", maxMetadataCoalesceItems)
 	}
 	mediaInfoEnabled, err := envBool("MEDIAINFO_ENABLED", true)
 	if err != nil {
@@ -220,11 +286,23 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	mediaInfoInteractiveQueue, err := envPositiveInt("MEDIAINFO_INTERACTIVE_QUEUE_SIZE", defaultMediaInfoQueue)
+	mediaInfoPlaybackQueue, err := envPositiveInt("MEDIAINFO_PLAYBACK_QUEUE_SIZE", defaultPlaybackQueue)
 	if err != nil {
 		return Config{}, err
 	}
-	mediaInfoBackgroundQueue, err := envPositiveInt("MEDIAINFO_BACKGROUND_QUEUE_SIZE", defaultMediaInfoQueue)
+	mediaInfoNeighborQueue, err := envPositiveInt("MEDIAINFO_NEIGHBOR_QUEUE_SIZE", defaultNeighborQueue)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoMetadataQueue, err := envPositiveInt("MEDIAINFO_METADATA_QUEUE_SIZE", defaultMetadataQueue)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoPendingTTL, err := envDuration("MEDIAINFO_PENDING_TTL", defaultPendingTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoBackgroundInterval, err := envDuration("MEDIAINFO_BACKGROUND_INTERVAL", defaultBackgroundInterval)
 	if err != nil {
 		return Config{}, err
 	}
@@ -266,6 +344,21 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mediaInfoPrewarmBefore, err := envNonNegativeInt("MEDIAINFO_PREWARM_BEFORE", defaultPrewarmBefore)
+	if err != nil {
+		return Config{}, err
+	}
+	mediaInfoPrewarmAfter, err := envNonNegativeInt("MEDIAINFO_PREWARM_AFTER", defaultPrewarmAfter)
+	if err != nil {
+		return Config{}, err
+	}
+	if mediaInfoPrewarmBefore+mediaInfoPrewarmAfter > maxPrewarmWindow {
+		return Config{}, fmt.Errorf("MEDIAINFO_PREWARM_BEFORE and MEDIAINFO_PREWARM_AFTER must total at most %d", maxPrewarmWindow)
+	}
+	playbackVeto, err := envBool("PLAYBACK_VETO_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	readHeaderTimeout, err := envDuration("READ_HEADER_TIMEOUT", defaultReadHeaderTimeout)
 	if err != nil {
@@ -293,16 +386,18 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		ListenAddr:       listenAddr,
-		DatabasePath:     databasePath,
-		PlexURL:          plexURL,
-		MediaVaultURL:    mediaVaultURL,
-		PathMappings:     pathMappings,
-		CloudExtensions:  cloudExtensions,
-		PartTTL:          partTTL,
-		ResolverTimeout:  resolverTimeout,
-		ObserveMaxBytes:  observeMaxBytes,
-		PartProbeTimeout: partProbeTimeout,
+		ListenAddr:             listenAddr,
+		DatabasePath:           databasePath,
+		PlexURL:                plexURL,
+		PlexToken:              plexToken,
+		MediaVaultURL:          mediaVaultURL,
+		PathMappings:           pathMappings,
+		CloudExtensions:        cloudExtensions,
+		PartTTL:                partTTL,
+		ResolverTimeout:        resolverTimeout,
+		ObserveMaxBytes:        observeMaxBytes,
+		PartProbeTimeout:       partProbeTimeout,
+		MetadataAnalysisFilter: metadataAnalysisFilter,
 		MetadataGuard: MetadataGuardConfig{
 			Enabled:              metadataGuardEnabled,
 			GlobalConcurrency:    metadataGlobal,
@@ -311,16 +406,23 @@ func Load() (Config, error) {
 			BatchConcurrency:     metadataBatch,
 			QueueTimeout:         metadataQueueWait,
 		},
+		MetadataCoalesce: MetadataCoalesceConfig{
+			Enabled: metadataCoalesceEnabled, Window: metadataCoalesceWindow,
+			MaxItems: metadataCoalesceMaxItems, Timeout: metadataCoalesceTimeout,
+		},
 		MediaInfo: MediaInfoConfig{
 			Enabled: mediaInfoEnabled, FFProbePath: mediaInfoFFProbe,
 			ProbeTimeout: mediaInfoProbeTimeout,
 			ProbeSize:    mediaInfoProbeSize, AnalyzeDuration: mediaInfoAnalyze, OutputMaxBytes: mediaInfoOutput,
-			Concurrency: mediaInfoWorkers, InteractiveQueueSize: mediaInfoInteractiveQueue,
-			BackgroundQueueSize: mediaInfoBackgroundQueue,
-			RecordTTL:           mediaInfoTTL, RecordRetention: mediaInfoRetention, L1MaxEntries: mediaInfoL1Entries,
+			Concurrency: mediaInfoWorkers, PlaybackQueueSize: mediaInfoPlaybackQueue,
+			NeighborQueueSize: mediaInfoNeighborQueue, MetadataQueueSize: mediaInfoMetadataQueue,
+			PendingTTL: mediaInfoPendingTTL, BackgroundInterval: mediaInfoBackgroundInterval,
+			RecordTTL: mediaInfoTTL, RecordRetention: mediaInfoRetention, L1MaxEntries: mediaInfoL1Entries,
 			NegativeTTL: mediaInfoNegativeTTL, UserAgent: mediaInfoUserAgent,
 			ColdWait: mediaInfoColdWait, ResponseMaxBytes: mediaInfoBodyLimit, EnrichmentWaiters: mediaInfoWaiters,
+			PrewarmBefore: mediaInfoPrewarmBefore, PrewarmAfter: mediaInfoPrewarmAfter,
 		},
+		PlaybackVeto:      playbackVeto,
 		LogLevel:          logLevel,
 		TraceEnabled:      traceEnabled,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -441,6 +543,21 @@ func envPositiveInt(name string, fallback int) (int, error) {
 	}
 	if value <= 0 {
 		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return value, nil
+}
+
+func envNonNegativeInt(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("%s must not be negative", name)
 	}
 	return value, nil
 }

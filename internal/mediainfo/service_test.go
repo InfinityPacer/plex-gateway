@@ -14,6 +14,7 @@ type fakeRecordStore struct {
 	mu      sync.Mutex
 	records map[string]Record
 	touches atomic.Int64
+	gets    atomic.Int64
 }
 
 func (store *fakeRecordStore) Put(_ context.Context, record Record) error {
@@ -27,10 +28,30 @@ func (store *fakeRecordStore) Put(_ context.Context, record Record) error {
 }
 
 func (store *fakeRecordStore) Get(_ context.Context, key Key) (Record, bool, error) {
+	store.gets.Add(1)
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	record, ok := store.records[key.cacheKey()]
 	return cloneRecord(record), ok, nil
+}
+
+func TestServiceGetMemoryNeverLoadsDurableStorage(t *testing.T) {
+	now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+	record := completeRecord(now)
+	store := &fakeRecordStore{records: map[string]Record{record.Key.cacheKey(): record}}
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache(nil, now), Store: store,
+		Provider: &fakeProvider{prober: &blockingProber{}}, PlexServerID: record.Key.PlexServerID,
+		Now: func() time.Time { return now },
+	})
+	if _, found := service.GetMemory(record.Key); found || store.gets.Load() != 0 {
+		t.Fatalf("cold GetMemory found=%v store_gets=%d", found, store.gets.Load())
+	}
+	service.cache.Put(record, now)
+	got, found := service.GetMemory(record.Key)
+	if !found || got.Key != record.Key || store.gets.Load() != 0 {
+		t.Fatalf("warm GetMemory found=%v key=%#v store_gets=%d", found, got.Key, store.gets.Load())
+	}
 }
 
 func (store *fakeRecordStore) Touch(_ context.Context, key Key, accessedAt, retainUntil time.Time) error {
@@ -49,6 +70,14 @@ func (store *fakeRecordStore) Touch(_ context.Context, key Key, accessedAt, reta
 	return nil
 }
 
+func (store *fakeRecordStore) BackupAndDeleteAll(_ context.Context, backupDir string, _ time.Time) (ResetResult, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	deleted := int64(len(store.records))
+	store.records = make(map[string]Record)
+	return ResetResult{DeletedRecords: deleted, BackupPath: backupDir + "/backup.db"}, nil
+}
+
 type fakeProvider struct {
 	calls      atomic.Int64
 	prober     Prober
@@ -56,7 +85,7 @@ type fakeProvider struct {
 }
 
 func (*fakeProvider) Descriptor() ProviderDescriptor {
-	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV1}
+	return ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV3}
 }
 
 func (fake *fakeProvider) Probe(ctx context.Context, request ProviderRequest) (ProviderResult, error) {
@@ -75,6 +104,25 @@ type blockingProber struct {
 	calls   atomic.Int64
 	started chan string
 	release chan struct{}
+}
+
+type deadlineResultProber struct {
+	deadlineObserved chan struct{}
+	release          chan struct{}
+}
+
+func (prober deadlineResultProber) Probe(ctx context.Context, _, _ string) (Media, error) {
+	<-ctx.Done()
+	if prober.deadlineObserved != nil {
+		close(prober.deadlineObserved)
+	}
+	if prober.release != nil {
+		<-prober.release
+	}
+	return Media{
+		Complete: true, Container: "mkv", DurationMS: 60_000,
+		Streams: []Stream{{Index: 0, Type: "video", Codec: "hevc", Width: 1920, Height: 1080}},
+	}, nil
 }
 
 func (prober *blockingProber) Probe(ctx context.Context, target, _ string) (Media, error) {
@@ -144,6 +192,26 @@ func TestServiceOwnsPlexServerIdentity(t *testing.T) {
 	}
 }
 
+func TestServiceResetCacheClearsL1AndDurableRecords(t *testing.T) {
+	now := time.Now().UTC()
+	record := completeRecord(now)
+	store := &fakeRecordStore{records: map[string]Record{record.Key.cacheKey(): record}}
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache([]Record{record}, now), Store: store,
+		Provider: &fakeProvider{prober: &blockingProber{}}, PlexServerID: record.Key.PlexServerID,
+	})
+	result, err := service.ResetCache(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedRecords != 1 || service.Status().CacheEntries != 0 {
+		t.Fatalf("reset result=%#v status=%#v", result, service.Status())
+	}
+	if _, found := service.Get(record.Key); found {
+		t.Fatal("reset record remained readable")
+	}
+}
+
 func TestServiceClientWaitCancellationDoesNotCancelBackgroundJob(t *testing.T) {
 	prober := &blockingProber{release: make(chan struct{})}
 	service := newTestService(t, prober, 1)
@@ -159,6 +227,59 @@ func TestServiceClientWaitCancellationDoesNotCancelBackgroundJob(t *testing.T) {
 		_, ok := service.Get(request.Key)
 		return ok
 	})
+}
+
+func TestServicePreservesSuccessfulResultReturnedAtProbeDeadline(t *testing.T) {
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache(nil, time.Now()), Store: &fakeRecordStore{},
+		Provider:     &fakeProvider{prober: deadlineResultProber{}},
+		PlexServerID: "server", ProbeTimeout: 20 * time.Millisecond,
+	})
+
+	record, err := service.Ensure(t.Context(), testRequest("deadline-success", PriorityInteractive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Media.Complete || len(record.Media.Streams) != 1 || record.Media.Streams[0].Codec != "hevc" {
+		t.Fatalf("record = %#v", record)
+	}
+}
+
+func TestServiceRejectsSuccessfulResultReturnedAfterShutdownCancellation(t *testing.T) {
+	prober := deadlineResultProber{
+		deadlineObserved: make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	store := &fakeRecordStore{}
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache(nil, time.Now()), Store: store,
+		Provider:     &fakeProvider{prober: prober},
+		PlexServerID: "server", ProbeTimeout: 20 * time.Millisecond,
+	})
+	request := testRequest("shutdown-canceled", PriorityBackground)
+	if err := service.Submit(request); err != nil {
+		t.Fatal(err)
+	}
+	<-prober.deadlineObserved
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	closed := make(chan error, 1)
+	go func() { closed <- service.Close(ctx) }()
+	<-service.ctx.Done()
+	close(prober.release)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.cache.GetKnown(request.Key, time.Now()); ok {
+		t.Fatal("result returned after shutdown cancellation was written to L1")
+	}
+	store.mu.Lock()
+	_, persisted := store.records[request.Key.cacheKey()]
+	store.mu.Unlock()
+	if persisted {
+		t.Fatal("result returned after shutdown cancellation was persisted")
+	}
 }
 
 func TestServicePrioritizesRapidInteractiveSwitchesOverPrewarm(t *testing.T) {
@@ -323,8 +444,36 @@ func TestServiceReprobesIncompatibleProviderRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ProviderRevision != ProviderRevisionFFProbeJSONV1 || provider.calls.Load() != 1 {
+	if got.ProviderRevision != ProviderRevisionFFProbeJSONV3 || provider.calls.Load() != 1 {
 		t.Fatalf("Ensure() revision=%q provider_calls=%d", got.ProviderRevision, provider.calls.Load())
+	}
+}
+
+func TestServiceGetNormalizesPlexServerIdentity(t *testing.T) {
+	now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+	record := completeRecord(now.Add(-31 * 24 * time.Hour))
+	record.Key.PlexServerID = "server"
+	store := &fakeRecordStore{records: map[string]Record{record.Key.cacheKey(): record}}
+	provider := &fakeProvider{prober: &blockingProber{}}
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache(nil, now), Store: store,
+		Provider:     provider,
+		PlexServerID: "server", Now: func() time.Time { return now },
+	})
+
+	key := record.Key
+	key.PlexServerID = ""
+	got, found := service.Get(key)
+	if !found || got.Key != record.Key || got.Fresh(now) {
+		t.Fatalf("Get() found=%v key=%#v, want %#v", found, got.Key, record.Key)
+	}
+	if provider.calls.Load() != 0 {
+		t.Fatalf("cache-only Get scheduled %d provider calls", provider.calls.Load())
+	}
+
+	key.PlexServerID = "other-server"
+	if _, found := service.Get(key); found {
+		t.Fatal("Get() returned a record for another Plex server")
 	}
 }
 
@@ -448,6 +597,9 @@ func newServiceForTest(t *testing.T, options ServiceOptions) *Service {
 	}
 	if options.NegativeTTL == 0 {
 		options.NegativeTTL = time.Minute
+	}
+	if options.BackgroundInterval == 0 {
+		options.BackgroundInterval = time.Millisecond
 	}
 	if options.BackgroundUserAgent == "" {
 		options.BackgroundUserAgent = "Infuse-Library/8.4.4"

@@ -174,7 +174,7 @@ func completeRecord(now time.Time) Record {
 		},
 		RatingKey:        "456",
 		Provider:         ProviderMediaVaultFFProbe,
-		ProviderRevision: ProviderRevisionFFProbeJSONV1,
+		ProviderRevision: ProviderRevisionFFProbeJSONV3,
 		SchemaVersion:    SchemaVersion,
 		Media: Media{
 			Complete:   true,

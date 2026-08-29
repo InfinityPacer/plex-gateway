@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"strconv"
@@ -18,6 +19,7 @@ const (
 	defaultProbeSize        = 8 << 20
 	defaultAnalyzeDuration  = 5 * time.Second
 	defaultProbeOutputLimit = 2 << 20
+	defaultSizeProbeTimeout = 2 * time.Second
 )
 
 var (
@@ -49,6 +51,7 @@ type FFProber struct {
 	probeSize       int64
 	analyzeDuration time.Duration
 	outputLimit     int64
+	sizeClient      *http.Client
 }
 
 // NewFFProber resolves the ffprobe binary and validates all resource limits.
@@ -83,6 +86,7 @@ func NewFFProber(options FFProbeOptions) (*FFProber, error) {
 		probeSize:       probeSize,
 		analyzeDuration: analyzeDuration,
 		outputLimit:     outputLimit,
+		sizeClient:      newSizeProbeClient(),
 	}, nil
 }
 
@@ -111,7 +115,8 @@ func (prober *FFProber) Probe(ctx context.Context, directURL, userAgent string) 
 
 	stdout := &limitedBuffer{limit: prober.outputLimit, cancel: cancelCommand}
 	stderr := &limitedBuffer{limit: 64 << 10, cancel: cancelCommand}
-	command := exec.CommandContext(commandCtx, prober.binary, prober.arguments(parsed.String(), userAgent)...)
+	target := parsed.String()
+	command := exec.CommandContext(commandCtx, prober.binary, prober.arguments(target, userAgent)...)
 	command.Stdout = stdout
 	command.Stderr = stderr
 	if err := command.Run(); err != nil {
@@ -133,7 +138,94 @@ func (prober *FFProber) Probe(ctx context.Context, directURL, userAgent string) 
 	if err != nil {
 		return Media{}, err
 	}
+	if media.Size <= 0 {
+		if size, ok := prober.probeRemoteSize(probeCtx, target, userAgent); ok {
+			media.Size = size
+		}
+	}
 	return media, nil
+}
+
+func newSizeProbeClient() *http.Client {
+	return &http.Client{
+		Timeout: defaultSizeProbeTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// probeRemoteSize asks only for the first byte so a format with missing
+// ffprobe size can still expose its authoritative Content-Range total. The
+// body is deliberately never read because the media path must stay outside
+// the gateway.
+func (prober *FFProber) probeRemoteSize(ctx context.Context, directURL, userAgent string) (int64, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sizeCtx, cancel := context.WithTimeout(ctx, defaultSizeProbeTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(sizeCtx, http.MethodGet, directURL, nil)
+	if err != nil {
+		return 0, false
+	}
+	request.Header.Set("Range", "bytes=0-0")
+	request.Header.Set("User-Agent", userAgent)
+
+	client := prober.sizeClient
+	if client == nil {
+		client = newSizeProbeClient()
+	}
+	response, err := client.Do(request)
+	if err != nil || response == nil || response.Body == nil {
+		return 0, false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusPartialContent {
+		return 0, false
+	}
+	return contentRangeTotal(response.Header.Get("Content-Range"))
+}
+
+func contentRangeTotal(value string) (int64, bool) {
+	fields := strings.Fields(value)
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "bytes") {
+		return 0, false
+	}
+	rangeAndTotal := strings.Split(fields[1], "/")
+	if len(rangeAndTotal) != 2 || rangeAndTotal[1] == "*" {
+		return 0, false
+	}
+	bounds := strings.Split(rangeAndTotal[0], "-")
+	if len(bounds) != 2 {
+		return 0, false
+	}
+	start, ok := nonNegativeInt64(bounds[0])
+	if !ok {
+		return 0, false
+	}
+	end, ok := nonNegativeInt64(bounds[1])
+	if !ok {
+		return 0, false
+	}
+	total, ok := nonNegativeInt64(rangeAndTotal[1])
+	if !ok || total == 0 || start > end || end >= total {
+		return 0, false
+	}
+	return total, true
+}
+
+func nonNegativeInt64(value string) (int64, bool) {
+	if value == "" {
+		return 0, false
+	}
+	for index := 0; index < len(value); index++ {
+		if !isASCIIDigit(value[index]) {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	return parsed, err == nil
 }
 
 func (prober *FFProber) arguments(directURL, userAgent string) []string {
@@ -333,6 +425,9 @@ func normalizeStream(raw ffprobeStream) Stream {
 	if raw.BitsPerRawSample.integer() > int64(bitDepth) {
 		bitDepth = int(raw.BitsPerRawSample.integer())
 	}
+	if bitDepth == 0 {
+		bitDepth = pixelFormatBitDepth(raw.PixelFormat)
+	}
 	stream := Stream{
 		Index:              raw.Index,
 		Type:               strings.ToLower(raw.CodecType),
@@ -376,6 +471,60 @@ func normalizeStream(raw ffprobeStream) Stream {
 	stream.Atmos = strings.Contains(searchableAudio, "atmos")
 	stream.DTSX = strings.Contains(searchableAudio, "dts:x") || strings.Contains(searchableAudio, "dts-x")
 	return stream
+}
+
+// pixelFormatBitDepth recovers the nominal component depth from common
+// ffmpeg pixel-format spellings when ffprobe omits both bits_per_sample and
+// bits_per_raw_sample. It intentionally returns zero for ambiguous formats.
+func pixelFormatBitDepth(value string) int {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return 0
+	}
+	if strings.HasPrefix(value, "gray") {
+		if depth := pixelFormatDigits(value[len("gray"):]); depth > 0 {
+			return depth
+		}
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] != 'p' {
+			continue
+		}
+		if index+1 == len(value) {
+			if strings.HasPrefix(value, "yuv") || strings.HasPrefix(value, "gbr") || strings.HasPrefix(value, "rgb") {
+				return 8
+			}
+			continue
+		}
+		if value[index+1] == '0' && index+3 < len(value) && isASCIIDigit(value[index+2]) && isASCIIDigit(value[index+3]) {
+			if depth := pixelFormatDigits(value[index+1 : index+4]); depth > 0 {
+				return depth
+			}
+		}
+		if depth := pixelFormatDigits(value[index+1:]); depth > 0 {
+			return depth
+		}
+	}
+	return 0
+}
+
+func pixelFormatDigits(value string) int {
+	end := 0
+	for end < len(value) && isASCIIDigit(value[end]) {
+		end++
+	}
+	if end == 0 {
+		return 0
+	}
+	depth, err := strconv.Atoi(value[:end])
+	if err != nil || depth < 8 || depth > 32 {
+		return 0
+	}
+	return depth
+}
+
+func isASCIIDigit(value byte) bool {
+	return value >= '0' && value <= '9'
 }
 
 func normalizeDisposition(raw ffprobeDisposition) Disposition {
@@ -436,7 +585,7 @@ func hdrFormat(stream Stream) string {
 }
 
 func applyMediaSummary(media *Media, stream Stream) {
-	if media == nil {
+	if media == nil || !primaryStream(stream) {
 		return
 	}
 	switch stream.Type {
@@ -465,6 +614,9 @@ func mediaComplete(media Media) bool {
 	}
 	mediaStreams := 0
 	for _, stream := range media.Streams {
+		if !primaryStream(stream) {
+			continue
+		}
 		switch stream.Type {
 		case "video":
 			mediaStreams++
@@ -483,6 +635,18 @@ func mediaComplete(media Media) bool {
 		}
 	}
 	return mediaStreams > 0
+}
+
+func primaryStream(stream Stream) bool {
+	if stream.Disposition.AttachedPicture {
+		return false
+	}
+	switch stream.Type {
+	case "video", "audio", "subtitle":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeContainer(formatName string) string {

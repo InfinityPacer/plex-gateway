@@ -41,13 +41,14 @@ Runtime evidence from Plex Web and the official mobile client established a
 separate compatibility leaf: their original universal decision requested
 neither Direct Play nor Direct Stream and Plex rejected an STRM Part before the
 client reached `/library/parts`. With the same complete client profile, changing
-only those two flags produced Plex's normal Direct Play decision and Part key.
+those playback flags plus `hasMDE` produced Plex's normal Direct Play decision
+and Part key.
 
 The compatibility adapter therefore:
 
 - performs an authenticated, bounded metadata read using the active client;
 - selects `Metadata -> Media[mediaIndex] -> Part[partIndex]` without flattening;
-- rewrites only `directPlay` and `directStream` for a mapped STRM Part;
+- rewrites `directPlay`, `directStream`, and `hasMDE` for a mapped STRM Part;
 - keeps Plex responsible for the decision response and playback session;
 - fails open for local media, ambiguous indices, authorization failures, and
   every unrecognized request.
@@ -68,28 +69,57 @@ Supporting that path would require a media proxy, packaging service, or client
 modification, each outside the redirect-only data plane. Local Plex Web media,
 manifest segments, and every genuine transcode request remain Plex-owned.
 
-## MediaInfo Phase D
+## MediaInfo fallback and projection
 
-MediaInfo is not an active dependency of redirect playback. The production Plex
-snapshot currently exposes STRM Parts without container, codec, resolution, or
-stream elements; the current playback plane does not synthesize those fields.
+MediaInfo is not a dependency of redirect playback. Eligible single-item
+metadata and Direct Play decision responses can be enriched from the fail-open
+L1 and SQLite cache. A cold decision may wait up to `MEDIAINFO_COLD_WAIT` for an
+interactive probe; missing, slow, or failed probes preserve the original Plex
+response. Part and universal-start redirects never wait for MediaInfo. All
+clients use the same projection rules. An L1 hit does not synchronously read
+SQLite for the request, although access renewal may touch SQLite asynchronously.
+A metadata browsing miss returns the original Plex response immediately and may
+only offer bounded P2 work in memory. It never waits for SQLite, MediaVault, or
+the CDN. Background work writes L1 and SQLite only after a successful probe.
+A default-disabled experimental veto may reuse an already available fresh record
+for the Apple TV Plex DV Profile 5 combination, but it performs no additional
+probe and owns no Part state.
 
-MediaInfo remains isolated from redirect playback. Phase D prioritizes the
-Gateway fallback while preserving the broader lifecycle design:
+MediaInfo probing and persistence remain isolated from redirect playback. Phase
+D prioritizes the Gateway fallback while preserving the broader lifecycle design:
 
 1. use L1 and SQLite for single-instance fallback storage;
 2. accept optional `PLEX_TOKEN` from an ignored deployment `app.env` for
-   discovery and prewarming;
-3. evaluate bounded remote `ffprobe`, with an initial `5s` cold metadata wait
-   ceiling based on the current sample;
-4. support exact single-Part analysis and one-step next-episode prefetch after
-   confirmed playback without blocking decision, Part, universal start, or 302;
+   nearby-item discovery; current-item prewarming remains token-independent;
+3. use bounded remote `ffprobe` with a default `5s` cold playback-decision wait
+   ceiling; metadata browsing does not consume that budget;
+4. support exact current-Part analysis and a configurable nearby-item window
+   after a cloud redirect is ready. P0 actual playback, P1 nearby items, and P2
+   foreground metadata misses share one exact-key scheduler. P1/P2 remote starts
+   are rate-limited without blocking Part, universal start, or 302. Queue
+   priority cannot preempt a probe already running;
    defer season, show, and configured STRM-root batch tasks;
-5. enrich authorized Plex metadata responses first, then evaluate an official
-   Plex API, other supported PMS interfaces, and an isolated database helper
-   without selecting a persistence path in advance;
+5. enrich authorized Plex metadata responses first. This release writes fallback
+   records only to Gateway SQLite. Production Plex DB writing is a next-stage
+   evaluation across an official Plex API, another supported PMS interface, and
+   an isolated database helper, with coverage, backup, and rollback tests before
+   any path is selected. Parts without Plex Streams may receive descriptive
+   ffprobe-indexed Streams, while existing Stream sets are never expanded and
+   Plex IDs or playback-selection state are never synthesized. Background
+   `-Library` synchronization remains cache-only. Foreground fan-out can only
+   offer bounded, expiring P2 work and never waits for that background queue;
 6. add Redis or replace SQLite with PostgreSQL only after measured
    multi-instance or capacity requirements exist.
+
+The performance matrix in [performance-matrix.md](performance-matrix.md) is a
+delivery gate for this work. Local media must remain transparent, Part and
+universal-start routes must remain free of analysis I/O, an L1 hit must not
+block on SQLite, and one decision may consume at most one configured cold-wait
+budget. The current Guard defaults are global 16, per-client 16, and batch 4.
+Equivalent single-item metadata GET requests may use the bounded native Plex
+micro-batch adapter before Guard admission; invalid batches return through the
+single-item limits. Guard changes remain evidence-driven rather than tied to a
+future Plex MediaInfo write strategy.
 
 The complete MoviePilot, MediaVault, 115 share, ownership, seeding, cleanup,
 MediaInfo, and projection design is documented in

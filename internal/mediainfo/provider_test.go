@@ -57,7 +57,7 @@ func TestMediaVaultProviderUsesSameClientUserAgentForRedirectAndProbe(t *testing
 	if probe.target != "https://cdn.example.test/movie.mkv" || probe.userAgent != "Infuse-Library/8.4.4" {
 		t.Fatalf("probe target=%q User-Agent=%q", probe.target, probe.userAgent)
 	}
-	if provider.Descriptor() != (ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV1}) || !result.Media.Complete {
+	if provider.Descriptor() != (ProviderDescriptor{Name: ProviderMediaVaultFFProbe, Revision: ProviderRevisionFFProbeJSONV3}) || !result.Media.Complete {
 		t.Fatalf("provider result = %#v", result)
 	}
 }

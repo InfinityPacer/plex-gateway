@@ -6,34 +6,8 @@ services:
     restart: unless-stopped
     ports:
       - "32400:32400"
-    environment:
-      PLEX_URL: "http://plex:32400"
-      MEDIAVAULT_URL: "http://mediavault:7811"
-      PATH_MAPPINGS: >-
-        [{"plex_prefix":"/media/cloud","local_prefix":"/strm"},{"plex_prefix":"/media/archive","local_prefix":"/archive-strm"}]
-      LISTEN_ADDR: ":32400"
-      DATABASE_PATH: "/app_data/plex-gateway.db"
-      LOG_LEVEL: "info"
-      TRACE_ENABLED: "false"
-      PART_CACHE_TTL: "24h"
-      RESOLVER_TIMEOUT: "15s"
-      OBSERVE_MAX_BYTES: "8388608"
-      PART_PROBE_TIMEOUT: "15s"
-      METADATA_GUARD_ENABLED: "false"
-      METADATA_GUARD_GLOBAL_CONCURRENCY: "8"
-      METADATA_GUARD_CLIENT_CONCURRENCY: "4"
-      METADATA_GUARD_BATCH_ENABLED: "false"
-      METADATA_GUARD_BATCH_CONCURRENCY: "3"
-      METADATA_GUARD_QUEUE_TIMEOUT: "10s"
-      MEDIAINFO_ENABLED: "true"
-      # Background probes use this only when no active client request supplies a User-Agent.
-      MEDIAINFO_USER_AGENT: "Infuse-Library/8.4.4"
-      MEDIAINFO_COLD_WAIT: "5s"
-      MEDIAINFO_RESPONSE_MAX_BYTES: "8388608"
-      MEDIAINFO_ENRICHMENT_CONCURRENCY: "4"
-      READ_HEADER_TIMEOUT: "15s"
-      IDLE_TIMEOUT: "90s"
-      SHUTDOWN_TIMEOUT: "15s"
+    env_file:
+      - ./app.env
     volumes:
       - ./strm:/strm:ro
       - ./archive-strm:/archive-strm:ro

@@ -46,7 +46,7 @@ func (provider *delayedIntegrationProvider) Probe(ctx context.Context, _ mediain
 	return mediainfo.ProviderResult{Media: completeProjectionMedia()}, nil
 }
 
-func TestGatewayColdMetadataTimeoutContinuesProbeAndWarmsNextResponse(t *testing.T) {
+func TestGatewayColdMetadataReturnsBeforeProbeAndWarmsNextResponse(t *testing.T) {
 	raw := []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="9" file="/media/cloud/episode.strm"><Stream id="101" streamType="1" index="0"/></Part></Media></Video></MediaContainer>`)
 	gzippedRaw := gzipBytes(t, raw)
 	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -136,7 +136,7 @@ func TestGatewayColdMetadataTimeoutContinuesProbeAndWarmsNextResponse(t *testing
 	}
 	select {
 	case <-provider.started:
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("cold request did not start the background probe")
 	}
 	close(provider.release)
@@ -163,7 +163,7 @@ func TestGatewayColdMetadataTimeoutContinuesProbeAndWarmsNextResponse(t *testing
 		t.Fatalf("provider calls = %d, want 1", provider.calls.Load())
 	}
 	snapshot := registry.Snapshot()
-	if snapshot.MediaInfoFailOpenTotal != 1 || snapshot.MediaInfoEnrichedTotal != 1 {
+	if snapshot.MediaInfoFailOpenTotal != 0 || snapshot.MediaInfoEnrichedTotal != 1 {
 		t.Fatalf("metrics = %#v", snapshot)
 	}
 

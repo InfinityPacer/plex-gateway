@@ -19,6 +19,7 @@ import (
 	"github.com/InfinityPacer/plex-gateway/internal/metrics"
 	"github.com/InfinityPacer/plex-gateway/internal/partcache"
 	"github.com/InfinityPacer/plex-gateway/internal/pathmap"
+	"github.com/InfinityPacer/plex-gateway/internal/prewarm"
 	"github.com/InfinityPacer/plex-gateway/internal/resolver"
 	"github.com/InfinityPacer/plex-gateway/internal/trace"
 )
@@ -63,6 +64,43 @@ func TestTransparentProxyPreservesRequestAndResponse(t *testing.T) {
 	}
 	if recorder.Body.String() != "plex-response" {
 		t.Fatalf("body = %q", recorder.Body.String())
+	}
+}
+
+func TestMetadataAnalysisFilterIsAppliedBeforePlexProxy(t *testing.T) {
+	registry := metrics.New()
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.URL.RawQuery; got != "checkFiles=1&X-Plex-Token=a%2Bb&includeMarkers=1" {
+			t.Fatalf("upstream query = %q", got)
+		}
+		if got := request.Header.Get("X-Plex-Client-Identifier"); got != "client-id" {
+			t.Fatalf("client identifier = %q", got)
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Options{
+		Upstream:               upstreamURL,
+		Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Tracer:                 trace.New(false, nil),
+		Metrics:                registry,
+		MetadataAnalysisFilter: true,
+	})
+	request := httptest.NewRequest(http.MethodGet, "/library/metadata/42?checkFiles=1&X-Plex-Token=a%2Bb&asyncAugmentMetadata=1&includeMarkers=1", nil)
+	request.Header.Set("X-Plex-Client-Identifier", "client-id")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if got := registry.Snapshot().MetadataAnalysisParamsRemovedTotal; got != 1 {
+		t.Fatalf("removed total = %d, want 1", got)
 	}
 }
 
@@ -143,11 +181,14 @@ func TestMetadataObservationEnablesCloudPartRedirect(t *testing.T) {
 	}))
 	defer plex.Close()
 
-	handler, registry, _ := newCloudHandler(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{PlexPrefix: plexRoot, LocalPrefix: localRoot}})
+	handler, registry, cache := newCloudHandler(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{PlexPrefix: plexRoot, LocalPrefix: localRoot}})
 	metadata := httptest.NewRecorder()
 	handler.ServeHTTP(metadata, httptest.NewRequest(http.MethodGet, "/library/metadata/42", nil))
 	if metadata.Code != http.StatusOK {
 		t.Fatalf("metadata status = %d", metadata.Code)
+	}
+	if observed, ok := cache.Get("123"); !ok || observed.RatingKey != "42" {
+		t.Fatalf("observed Part = %#v, found = %v", observed, ok)
 	}
 
 	playback := httptest.NewRecorder()
@@ -173,6 +214,63 @@ func TestMetadataObservationEnablesCloudPartRedirect(t *testing.T) {
 	snapshot := registry.Snapshot()
 	if snapshot.CloudPartHits != 1 || snapshot.RedirectSuccess != 1 || snapshot.PlexRequestsTotal != 1 {
 		t.Fatalf("metrics = %#v", snapshot)
+	}
+}
+
+func TestSuccessfulCloudRedirectEnqueuesCredentialFreePlaybackContext(t *testing.T) {
+	localRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localRoot, "Episode.strm"), []byte("http://public.invalid/redirect/pickcode\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://public.invalid/redirect/pickcode")
+		w.WriteHeader(http.StatusMovedPermanently)
+	}))
+	defer plex.Close()
+	mediaVault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://cdn.invalid/Episode.mkv")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer mediaVault.Close()
+	upstream, _ := url.Parse(plex.URL)
+	mapper, err := pathmap.New([]pathmap.Mapping{{PlexPrefix: "/media/cloud", LocalPrefix: localRoot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := resolver.NewMediaVaultSTRMResolver(mediaVault.URL, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := partcache.New(time.Hour)
+	cache.Put(partcache.PartInfo{
+		PartID: "123", RatingKey: "42", PlexFilePath: "/media/cloud/Episode.strm",
+		PartKey: "/library/parts/123/7/file",
+	})
+	events := make(chan prewarm.PlaybackContext, 1)
+	handler := New(Options{
+		Upstream: upstream, PartCache: cache, PathMapper: mapper, Resolver: control,
+		CloudExtensions: []string{".strm"}, MediaInfoPrewarmer: recordingPrewarmer{events: events},
+	})
+	request := httptest.NewRequest(http.MethodGet, "/library/parts/123/7/file?playQueueID=5&playQueueItemID=99&X-Plex-Token=client-secret", nil)
+	request.Header.Set("User-Agent", "Client-Test/1.0")
+	request.Header.Set("X-Plex-Client-Identifier", "client-device")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d", response.Code)
+	}
+	select {
+	case event := <-events:
+		want := prewarm.PlaybackContext{
+			RatingKey: "42", PartID: "123", Target: "http://public.invalid/redirect/pickcode",
+			WindowKey:   "X-Plex-Client-Identifier\x00client-device",
+			PlayQueueID: "5", PlayQueueItemID: "99", UserAgent: "Client-Test/1.0",
+		}
+		if event != want {
+			t.Fatalf("event = %#v, want %#v", event, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prewarm event was not enqueued")
 	}
 }
 
@@ -217,6 +315,52 @@ func TestAuthorizedPlexSTRMRedirectEnablesCloudPartRedirect(t *testing.T) {
 	}
 	if snapshot := registry.Snapshot(); snapshot.RedirectSuccess != 1 || snapshot.PlexFallbackTotal != 0 {
 		t.Fatalf("metrics = %#v", snapshot)
+	}
+}
+
+func TestCloudPartRedirectDoesNotApplyPlaybackVeto(t *testing.T) {
+	localRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localRoot, "Movie.strm"), []byte("http://public.invalid/redirect/pickcode\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mediaVault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://cdn.invalid/Movie.mkv?signature=private")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer mediaVault.Close()
+	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://public.invalid/redirect/pickcode")
+		w.WriteHeader(http.StatusMovedPermanently)
+	}))
+	defer plex.Close()
+
+	handler, _, cache := newCloudHandlerWithVeto(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{
+		PlexPrefix: "/media/cloud", LocalPrefix: localRoot,
+	}}, true)
+	cache.Put(partcache.PartInfo{PartID: "123", PlexFilePath: "/media/cloud/Movie.strm"})
+	clients := []struct {
+		product   string
+		platform  string
+		userAgent string
+	}{
+		{product: "Infuse-Library", platform: "iOS", userAgent: "Infuse-Library/8.5.1"},
+		{product: "Plex for iOS", platform: "iOS", userAgent: "PlexMobile/8.0"},
+		{product: "Plex for Apple TV", platform: "tvOS", userAgent: "PlexTV/8.45"},
+	}
+	for _, client := range clients {
+		request := httptest.NewRequest(http.MethodGet, "/library/parts/123/7/file", nil)
+		request.Header.Set("X-Plex-Token", "valid-token")
+		request.Header.Set("X-Plex-Product", client.product)
+		request.Header.Set("X-Plex-Platform", client.platform)
+		request.Header.Set("User-Agent", client.userAgent)
+		response := httptest.NewRecorder()
+
+		handler.ServeHTTP(response, request)
+
+		if response.Code != http.StatusFound || response.Header().Get("Location") != "https://cdn.invalid/Movie.mkv?signature=private" {
+			t.Fatalf("client %q status=%d Location=%q", client.product, response.Code, response.Header().Get("Location"))
+		}
 	}
 }
 
@@ -851,6 +995,10 @@ func TestMetricsEndpointIsLocalAndStable(t *testing.T) {
 }
 
 func newCloudHandler(t *testing.T, plexURL, mediaVaultURL string, mappings []pathmap.Mapping) (http.Handler, *metrics.Metrics, *partcache.Cache) {
+	return newCloudHandlerWithVeto(t, plexURL, mediaVaultURL, mappings, false)
+}
+
+func newCloudHandlerWithVeto(t *testing.T, plexURL, mediaVaultURL string, mappings []pathmap.Mapping, playbackVeto bool) (http.Handler, *metrics.Metrics, *partcache.Cache) {
 	t.Helper()
 	upstream, err := url.Parse(plexURL)
 	if err != nil {
@@ -876,11 +1024,21 @@ func newCloudHandler(t *testing.T, plexURL, mediaVaultURL string, mappings []pat
 		Resolver:        strmResolver,
 		Metrics:         registry,
 		CloudExtensions: []string{".strm"},
+		PlaybackVeto:    playbackVeto,
 	}), registry, cache
 }
 
 type cancelingResolver struct {
 	cancel context.CancelFunc
+}
+
+type recordingPrewarmer struct {
+	events chan<- prewarm.PlaybackContext
+}
+
+func (prewarmer recordingPrewarmer) TryEnqueue(event prewarm.PlaybackContext) bool {
+	prewarmer.events <- event
+	return true
 }
 
 func (r cancelingResolver) ReadTarget(string) (string, error) {

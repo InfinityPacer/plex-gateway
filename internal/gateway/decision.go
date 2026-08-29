@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -11,25 +12,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/InfinityPacer/plex-gateway/internal/mediainfo"
+	"github.com/InfinityPacer/plex-gateway/internal/metrics"
 	"github.com/InfinityPacer/plex-gateway/internal/playback"
 	"github.com/InfinityPacer/plex-gateway/internal/plexmeta"
 )
 
 const (
-	defaultDecisionMetadataMaxBytes = 4 << 20
-	defaultDecisionGrantTTL         = 5 * time.Minute
-	defaultDecisionGrantLimit       = 4096
+	defaultDecisionMetadataMaxBytes  = 4 << 20
+	defaultDecisionGrantTTL          = 5 * time.Minute
+	defaultDecisionGrantLimit        = 4096
+	defaultDecisionMediaInfoColdWait = 5 * time.Second
 )
 
 // decisionHandler opts an eligible STRM Part into Plex Direct Play while
 // leaving Plex responsible for the decision response and session semantics.
 // Any uncertainty preserves the original request unchanged.
 type decisionHandler struct {
-	plex    http.Handler
-	probe   *decisionMetadataProbe
-	service *playback.Service
-	grants  *playback.GrantStore
-	logger  *slog.Logger
+	plex      http.Handler
+	probe     *decisionMetadataProbe
+	service   *playback.Service
+	mediaInfo decisionMediaInfoService
+	coldWait  time.Duration
+	grants    *playback.GrantStore
+	veto      playbackVeto
+	logger    *slog.Logger
+	metrics   *metrics.Metrics
+}
+
+type decisionMediaInfoService interface {
+	GetMemory(mediainfo.Key) (mediainfo.Record, bool)
+	Ensure(context.Context, mediainfo.Request) (mediainfo.Record, error)
 }
 
 func (h *decisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +59,6 @@ func (h *decisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.plex.ServeHTTP(w, r)
 		return
 	}
-
 	h.service.Remember(selection)
 	request := r.Clone(r.Context())
 	requestURL := *r.URL
@@ -59,12 +71,74 @@ func (h *decisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	capture := newDecisionResponseCapture(w, defaultDecisionMetadataMaxBytes)
 	h.plex.ServeHTTP(capture, request)
 	granted := false
-	if capture.successful() && plexmeta.IsDirectPlayDecision(capture.body(), capture.Header().Get("Content-Type"), selection.Part) {
-		granted = h.grants.Put(attempt, selection)
+	if capture.successful() {
+		body := capture.body()
+		if plexmeta.IsDirectPlayDecision(body, capture.Header().Get("Content-Type"), selection.Part) {
+			if record, found := h.mediaInfoForDecision(r, selection); found {
+				enriched, changed, err := plexmeta.EnrichDecision(body, capture.Header().Get("Content-Type"), selection.Part, record.Media)
+				if err != nil {
+					h.logger.Warn("decision_mediainfo_fail_open", "part", selection.Part.ID, "error_kind", errorKind(err))
+				} else if changed {
+					if h.veto != nil && record.Fresh(time.Now().UTC()) {
+						if reason, reject := h.veto(r, record.Media); reject {
+							h.logger.Info("playback_veto", "part", selection.Part.ID, "reason", reason)
+							writeIncompatibleDecision(w, r)
+							return
+						}
+					}
+					if err := capture.replaceDecodedBody(enriched); err != nil {
+						h.logger.Warn("decision_mediainfo_fail_open", "part", selection.Part.ID, "error_kind", errorKind(err))
+					} else if h.metrics != nil {
+						h.metrics.IncMediaInfoEnriched()
+					}
+				}
+			}
+			granted = h.grants.Put(attempt, selection)
+		}
 	}
 	if err := capture.commit(); err != nil && granted {
 		h.grants.Delete(attempt)
 	}
+}
+
+func writeIncompatibleDecision(w http.ResponseWriter, r *http.Request) {
+	contentType, body := plexmeta.IncompatibleDecision(r.Header.Get("Accept"))
+	resetDecisionBodyHeaders(w.Header(), len(body))
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(body)
+	}
+}
+
+// mediaInfoForDecision reuses an exact cached STRM identity and admits at most
+// one bounded interactive probe on a cold playback. Failure leaves Plex's
+// original decision response usable and the shared worker may still warm a
+// later request after the client's wait expires.
+func (h *decisionHandler) mediaInfoForDecision(request *http.Request, part playback.PreparedPart) (mediainfo.Record, bool) {
+	if h == nil || h.mediaInfo == nil || request == nil {
+		return mediainfo.Record{}, false
+	}
+	fingerprint, err := mediainfo.FingerprintSTRMTarget(part.Target)
+	if err != nil {
+		return mediainfo.Record{}, false
+	}
+	key := mediainfo.Key{PartID: part.Part.ID, STRMFingerprint: fingerprint}
+	if record, found := h.mediaInfo.GetMemory(key); found {
+		return record, true
+	}
+	wait := h.coldWait
+	if wait <= 0 {
+		wait = defaultDecisionMediaInfoColdWait
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), wait)
+	defer cancel()
+	record, err := h.mediaInfo.Ensure(ctx, mediainfo.Request{
+		Key: key, RatingKey: part.RatingKey, Target: part.Target,
+		Priority: mediainfo.PriorityPlayback, ClientUserAgent: request.UserAgent(),
+	})
+	return record, err == nil && record.Media.Complete
 }
 
 func (h *decisionHandler) selectCloudPart(r *http.Request, attempt playback.Attempt, query url.Values) (playback.PreparedPart, decisionSelectionState) {
@@ -92,6 +166,7 @@ func (h *decisionHandler) selectCloudPart(r *http.Request, attempt playback.Atte
 	if preparation.State != playback.PreparationReady {
 		return playback.PreparedPart{}, decisionSelectionPassthrough
 	}
+	preparation.Part.RatingKey = strings.TrimPrefix(attempt.MetadataPath, "/library/metadata/")
 	return preparation.Part, decisionSelectionCloud
 }
 

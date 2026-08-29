@@ -21,22 +21,32 @@ import (
 	"github.com/InfinityPacer/plex-gateway/internal/metrics"
 	"github.com/InfinityPacer/plex-gateway/internal/partcache"
 	"github.com/InfinityPacer/plex-gateway/internal/pathmap"
+	"github.com/InfinityPacer/plex-gateway/internal/playback"
+	"github.com/InfinityPacer/plex-gateway/internal/prewarm"
 	"github.com/InfinityPacer/plex-gateway/internal/resolver"
 	"github.com/InfinityPacer/plex-gateway/internal/trace"
 	"github.com/InfinityPacer/plex-gateway/internal/version"
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "version" {
-		fmt.Println(version.String())
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
-		if err := healthcheck(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version":
+			fmt.Println(version.String())
+			return
+		case "healthcheck":
+			if err := healthcheck(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "cache-reset":
+			if err := requestMediaInfoCacheReset(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		}
-		return
 	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -73,21 +83,31 @@ func run() error {
 	mediaInfoService, mediaInfoReason := initializeMediaInfo(
 		context.Background(), databaseStore, databaseReason, cfg.MediaInfo, cfg.PlexURL, cfg.PartProbeTimeout, strmResolver, registry, logger,
 	)
-	defer closeRuntime(mediaInfoService, databaseStore, cfg.ShutdownTimeout, logger)
+	prewarmService, prewarmReason := initializePrewarm(
+		context.Background(), cfg.PlexToken, cfg.PlexURL, cfg.PartProbeTimeout,
+		playback.NewPartPreparer(mapper, strmResolver, cfg.CloudExtensions),
+		mediaInfoService, cfg.MediaInfo.PrewarmBefore, cfg.MediaInfo.PrewarmAfter,
+		registry, logger,
+	)
+	defer closeRuntime(prewarmService, mediaInfoService, databaseStore, cfg.ShutdownTimeout, logger)
 	mediaInfoStatus := func() mediainfo.Status {
 		return mediaInfoService.Status()
 	}
-	handler := gateway.New(gateway.Options{
-		Upstream:         cfg.PlexURL,
-		Logger:           logger,
-		Tracer:           trace.New(cfg.TraceEnabled, logger),
-		PartCache:        cache,
-		PathMapper:       mapper,
-		Resolver:         strmResolver,
-		Metrics:          registry,
-		CloudExtensions:  cfg.CloudExtensions,
-		ObserveMaxBytes:  cfg.ObserveMaxBytes,
-		PartProbeTimeout: cfg.PartProbeTimeout,
+	prewarmStatus := func() prewarm.Status {
+		return prewarmService.Status()
+	}
+	gatewayHandler := gateway.New(gateway.Options{
+		Upstream:               cfg.PlexURL,
+		Logger:                 logger,
+		Tracer:                 trace.New(cfg.TraceEnabled, logger),
+		PartCache:              cache,
+		PathMapper:             mapper,
+		Resolver:               strmResolver,
+		Metrics:                registry,
+		CloudExtensions:        cfg.CloudExtensions,
+		ObserveMaxBytes:        cfg.ObserveMaxBytes,
+		PartProbeTimeout:       cfg.PartProbeTimeout,
+		MetadataAnalysisFilter: cfg.MetadataAnalysisFilter,
 		MetadataGuard: gateway.MetadataGuardOptions{
 			Enabled:              cfg.MetadataGuard.Enabled,
 			GlobalConcurrency:    cfg.MetadataGuard.GlobalConcurrency,
@@ -96,13 +116,24 @@ func run() error {
 			BatchConcurrency:     cfg.MetadataGuard.BatchConcurrency,
 			QueueTimeout:         cfg.MetadataGuard.QueueTimeout,
 		},
+		MetadataCoalesce: gateway.MetadataCoalesceOptions{
+			Enabled:  cfg.MetadataCoalesce.Enabled,
+			Trace:    cfg.TraceEnabled,
+			Window:   cfg.MetadataCoalesce.Window,
+			MaxItems: cfg.MetadataCoalesce.MaxItems,
+			Timeout:  cfg.MetadataCoalesce.Timeout,
+		},
 		MediaInfoEnabled:               cfg.MediaInfo.Enabled,
 		MediaInfoStatus:                mediaInfoStatus,
 		MediaInfoService:               mediaInfoService,
 		MediaInfoColdWait:              cfg.MediaInfo.ColdWait,
 		MediaInfoResponseMaxBytes:      cfg.MediaInfo.ResponseMaxBytes,
 		MediaInfoEnrichmentConcurrency: cfg.MediaInfo.EnrichmentWaiters,
+		MediaInfoPrewarmer:             prewarmService,
+		MediaInfoPrewarmStatus:         prewarmStatus,
+		PlaybackVeto:                   cfg.PlaybackVeto,
 	})
+	handler := newMaintenanceHandler(gatewayHandler, mediaInfoService, cfg.DatabasePath, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
@@ -121,11 +152,21 @@ func run() error {
 			"cloud_redirect", cfg.MediaVaultURL != nil,
 			"path_mappings", len(cfg.PathMappings),
 			"trace", cfg.TraceEnabled,
+			"metadata_analysis_filter", cfg.MetadataAnalysisFilter,
 			"metadata_guard", cfg.MetadataGuard.Enabled,
 			"metadata_batch_guard", cfg.MetadataGuard.BatchEnabled,
+			"metadata_coalesce", cfg.MetadataCoalesce.Enabled,
+			"metadata_coalesce_window_ms", cfg.MetadataCoalesce.Window.Milliseconds(),
+			"metadata_coalesce_max_items", cfg.MetadataCoalesce.MaxItems,
 			"mediainfo_enabled", cfg.MediaInfo.Enabled,
 			"mediainfo_available", mediaInfoService != nil,
 			"mediainfo_reason", mediaInfoReason,
+			"mediainfo_prewarm_available", prewarmService != nil,
+			"mediainfo_prewarm_reason", prewarmReason,
+			"mediainfo_prewarm_before", cfg.MediaInfo.PrewarmBefore,
+			"mediainfo_prewarm_after", cfg.MediaInfo.PrewarmAfter,
+			"mediainfo_background_interval_ms", cfg.MediaInfo.BackgroundInterval.Milliseconds(),
+			"playback_veto_enabled", cfg.PlaybackVeto,
 		)
 		serveErrors <- server.ListenAndServe()
 	}()
@@ -147,6 +188,65 @@ func run() error {
 	}
 	logger.Info("gateway_stopped")
 	return nil
+}
+
+func initializePrewarm(
+	ctx context.Context,
+	token string,
+	plexURL *url.URL,
+	timeout time.Duration,
+	partPreparer *playback.PartPreparer,
+	mediaInfoService *mediainfo.Service,
+	beforeCount int,
+	afterCount int,
+	registry *metrics.Metrics,
+	logger *slog.Logger,
+) (*prewarm.Service, string) {
+	if mediaInfoService == nil || partPreparer == nil {
+		return nil, "mediainfo_unavailable"
+	}
+	var discovery *prewarm.Discovery
+	reason := "ready"
+	if beforeCount+afterCount == 0 {
+		reason = "current_only_window_disabled"
+	} else if strings.TrimSpace(token) == "" {
+		reason = "current_only_token_unconfigured"
+	} else {
+		client := &http.Client{Timeout: timeout}
+		candidate, err := prewarm.NewDiscovery(prewarm.DiscoveryOptions{
+			BaseURL: plexURL, Token: token, Client: client,
+			UserAgent: "plex-gateway/" + version.String(),
+		})
+		if err != nil {
+			reason = "current_only_configuration_invalid"
+		} else {
+			validateContext, cancel := context.WithTimeout(ctx, timeout)
+			err = candidate.Validate(validateContext)
+			cancel()
+			if err != nil {
+				reason = "current_only_plex_token_invalid"
+			} else {
+				discovery = candidate
+			}
+		}
+		if discovery == nil {
+			logger.Warn("mediainfo_neighbor_prewarm_unavailable", "reason", reason)
+		}
+	}
+	serviceOptions := prewarm.ServiceOptions{
+		Playback: partPreparer, MediaInfo: mediaInfoService,
+		Logger: logger, Metrics: registry, DiscoveryTimeout: timeout,
+		BeforeCount: beforeCount, AfterCount: afterCount,
+	}
+	if discovery != nil {
+		serviceOptions.Discovery = discovery
+	}
+	service, err := prewarm.NewService(serviceOptions)
+	if err != nil {
+		logger.Warn("mediainfo_prewarm_unavailable", "reason", "coordinator")
+		return nil, "coordinator_unavailable"
+	}
+	return service, reason
 }
 
 func initializeMediaInfo(
@@ -205,8 +305,10 @@ func initializeMediaInfo(
 	service, err := mediainfo.NewService(mediainfo.ServiceOptions{
 		Cache: cache, Store: store, Janitor: store, Provider: provider, PlexServerID: plexServerID,
 		Logger: logger, Metrics: registry, Concurrency: cfg.Concurrency,
-		InteractiveQueueSize: cfg.InteractiveQueueSize, BackgroundQueueSize: cfg.BackgroundQueueSize,
-		ProbeTimeout: cfg.ProbeTimeout, RecordTTL: cfg.RecordTTL,
+		PlaybackQueueSize: cfg.PlaybackQueueSize, NeighborQueueSize: cfg.NeighborQueueSize,
+		MetadataQueueSize: cfg.MetadataQueueSize, PendingTTL: cfg.PendingTTL,
+		BackgroundInterval: cfg.BackgroundInterval,
+		ProbeTimeout:       cfg.ProbeTimeout, RecordTTL: cfg.RecordTTL,
 		RecordRetention: cfg.RecordRetention, NegativeTTL: cfg.NegativeTTL,
 		BackgroundUserAgent: cfg.UserAgent,
 	})
@@ -229,7 +331,14 @@ func initializeDatabase(ctx context.Context, path string, required bool, logger 
 	return store, "ready"
 }
 
-func closeRuntime(service *mediainfo.Service, store *database.SQLite, timeout time.Duration, logger *slog.Logger) {
+func closeRuntime(prewarmService *prewarm.Service, service *mediainfo.Service, store *database.SQLite, timeout time.Duration, logger *slog.Logger) {
+	if prewarmService != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		if err := prewarmService.Close(ctx); err != nil {
+			logger.Warn("mediainfo_prewarm_shutdown_incomplete", "error_kind", "timeout")
+		}
+		cancel()
+	}
 	serviceClosed := true
 	if service != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)

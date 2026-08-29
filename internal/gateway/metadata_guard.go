@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	defaultMetadataGlobalConcurrency    = 8
-	defaultMetadataPerClientConcurrency = 4
-	defaultMetadataBatchConcurrency     = 3
+	defaultMetadataGlobalConcurrency    = 16
+	defaultMetadataPerClientConcurrency = 16
+	defaultMetadataBatchConcurrency     = 4
 	defaultMetadataQueueTimeout         = 10 * time.Second
 )
 
@@ -98,6 +98,7 @@ func (g *metadataGuard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	queuedAt := time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), g.queueTimeout)
 	defer cancel()
 	var release func()
@@ -124,6 +125,15 @@ func (g *metadataGuard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	timing, _ := r.Context().Value(metadataCoalesceTimingContextKey{}).(*metadataCoalesceTiming)
+	if kind == metadataRequestBatch && timing != nil {
+		timing.guardWait = time.Since(queuedAt)
+		plexStarted := time.Now()
+		g.next.ServeHTTP(w, r)
+		timing.plex = time.Since(plexStarted)
+		timing.guardSeen = true
+		return
+	}
 	g.next.ServeHTTP(w, r)
 }
 

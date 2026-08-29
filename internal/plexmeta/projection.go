@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 
@@ -15,10 +16,11 @@ import (
 
 // Target identifies the single Plex item and reports whether the response is
 // missing a whitelisted technical field that a MediaInfo record can project.
-// A missing Stream is not itself a reason to enrich: projection never creates
-// Stream elements because their Plex identity is not known to the gateway.
+// A Part with no Stream elements is eligible for descriptive Stream creation
+// because ffprobe supplies the stable stream type and source index.
 type Target struct {
-	Part Part
+	RatingKey string
+	Part      Part
 	// NeedsEnrichment is true when a whitelisted field is absent from the
 	// selected Media, Part, or matchable existing Stream elements.
 	NeedsEnrichment bool
@@ -46,10 +48,10 @@ func SelectEnrichmentPart(body []byte, contentType, ratingKey string) (Part, err
 	return target.Part, nil
 }
 
-// EnrichMetadata fills only absent whitelisted Media, Part, and already
-// present Stream attributes. SelectEnrichmentTarget supplies the exact Part
-// to callers that need to build a probe request before this function runs.
-// The input body is never modified in place. When no field is filled, the
+// EnrichMetadata fills only absent whitelisted Media, Part, and matching
+// Stream attributes. When a Part has no Stream elements, it creates
+// descriptive video, audio, and subtitle elements from the probe record. The
+// input body is never modified in place. When no field is filled, the
 // original bytes are returned unchanged.
 func EnrichMetadata(body []byte, contentType, ratingKey string, media mediainfo.Media) ([]byte, bool, error) {
 	document, selection, err := parseProjection(body, contentType, ratingKey)
@@ -70,8 +72,63 @@ func EnrichMetadata(body []byte, contentType, ratingKey string, media mediainfo.
 	return result, true, nil
 }
 
+// SelectEnrichmentTargets returns independently projectable items from a Plex
+// collection response. Items with multiple Media versions or Parts are left
+// untouched because a cache record cannot be mapped to them without guessing.
+func SelectEnrichmentTargets(body []byte, contentType string) ([]Target, error) {
+	document, err := parseProjectionDocument(body, contentType)
+	if err != nil {
+		return nil, err
+	}
+	selections, err := document.selectTargets()
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]Target, 0, len(selections))
+	for _, selection := range selections {
+		targets = append(targets, selection.target())
+	}
+	return targets, nil
+}
+
+// EnrichMetadataTargets projects cached MediaInfo into matching items of one
+// collection response. Missing records leave their items unchanged.
+func EnrichMetadataTargets(body []byte, contentType string, records map[string]mediainfo.Media) ([]byte, int, error) {
+	document, err := parseProjectionDocument(body, contentType)
+	if err != nil {
+		return nil, 0, err
+	}
+	selections, err := document.selectTargets()
+	if err != nil {
+		return nil, 0, err
+	}
+	changedItems := 0
+	for _, selection := range selections {
+		media, ok := records[selection.target().RatingKey]
+		if !ok {
+			continue
+		}
+		changed, err := selection.enrich(media)
+		if err != nil {
+			return nil, 0, err
+		}
+		if changed {
+			changedItems++
+		}
+	}
+	if changedItems == 0 {
+		return append([]byte(nil), body...), 0, nil
+	}
+	result, err := document.encode()
+	if err != nil {
+		return nil, 0, err
+	}
+	return result, changedItems, nil
+}
+
 type projectionDocument interface {
 	selectTarget(string) (projectionSelection, error)
+	selectTargets() ([]projectionSelection, error)
 	encode() ([]byte, error)
 }
 
@@ -85,22 +142,7 @@ func parseProjection(body []byte, contentType, ratingKey string) (projectionDocu
 	if err != nil {
 		return nil, nil, err
 	}
-	trimmed := trimProjectionBody(body)
-	if len(trimmed) == 0 {
-		return nil, nil, errors.New("Plex metadata response is empty")
-	}
-	if strings.Contains(strings.ToLower(contentType), "json") || trimmed[0] == '{' || trimmed[0] == '[' {
-		document, err := parseJSONProjectionDocument(body)
-		if err != nil {
-			return nil, nil, err
-		}
-		selection, err := document.selectTarget(ratingKey)
-		if err != nil {
-			return nil, nil, err
-		}
-		return document, selection, nil
-	}
-	document, err := parseXMLProjectionDocument(body)
+	document, err := parseProjectionDocument(body, contentType)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -109,6 +151,25 @@ func parseProjection(body []byte, contentType, ratingKey string) (projectionDocu
 		return nil, nil, err
 	}
 	return document, selection, nil
+}
+
+func parseProjectionDocument(body []byte, contentType string) (projectionDocument, error) {
+	trimmed := trimProjectionBody(body)
+	if len(trimmed) == 0 {
+		return nil, errors.New("Plex metadata response is empty")
+	}
+	if strings.Contains(strings.ToLower(contentType), "json") || trimmed[0] == '{' || trimmed[0] == '[' {
+		document, err := parseJSONProjectionDocument(body)
+		if err != nil {
+			return nil, err
+		}
+		return document, nil
+	}
+	document, err := parseXMLProjectionDocument(body)
+	if err != nil {
+		return nil, err
+	}
+	return document, nil
 }
 
 func normalizeProjectionRatingKey(value string) (string, error) {
@@ -129,9 +190,10 @@ func trimProjectionBody(body []byte) []byte {
 // whitelist contains only descriptive technical Plex fields; identifiers and
 // playback-selection fields are never generated.
 type projectionAttribute struct {
-	name   string
-	value  string
-	number bool
+	name    string
+	value   string
+	number  bool
+	boolean bool
 }
 
 func textProjectionAttribute(name, value string) projectionAttribute {
@@ -140,6 +202,29 @@ func textProjectionAttribute(name, value string) projectionAttribute {
 
 func integerProjectionAttribute(name string, value int64) projectionAttribute {
 	return projectionAttribute{name: name, value: strconv.FormatInt(value, 10), number: true}
+}
+
+func booleanProjectionAttribute(name string, value bool) projectionAttribute {
+	if value {
+		return projectionAttribute{name: name, value: "1", boolean: true}
+	}
+	return projectionAttribute{name: name, value: "0", boolean: true}
+}
+
+const strmControlSizeThreshold int64 = 1 << 20
+
+// bitrateKbps converts ffprobe's bits-per-second value to Plex's integer
+// kilobits-per-second representation. A positive sub-kilobit value remains
+// visible as one rather than being rounded down to zero.
+func bitrateKbps(value int64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	value /= 1000
+	if value == 0 {
+		return 1
+	}
+	return value
 }
 
 func mediaProjectionAttributes(media mediainfo.Media) []projectionAttribute {
@@ -151,7 +236,7 @@ func mediaProjectionAttributes(media mediainfo.Media) []projectionAttribute {
 		attributes = append(attributes, integerProjectionAttribute("duration", media.DurationMS))
 	}
 	if media.Bitrate > 0 {
-		attributes = append(attributes, integerProjectionAttribute("bitrate", media.Bitrate))
+		attributes = append(attributes, integerProjectionAttribute("bitrate", bitrateKbps(media.Bitrate)))
 	}
 	if media.Width > 0 {
 		attributes = append(attributes, integerProjectionAttribute("width", int64(media.Width)))
@@ -174,8 +259,8 @@ func mediaProjectionAttributes(media mediainfo.Media) []projectionAttribute {
 	if media.VideoResolution != "" {
 		attributes = append(attributes, textProjectionAttribute("videoResolution", media.VideoResolution))
 	}
-	if media.FrameRate != "" {
-		attributes = append(attributes, textProjectionAttribute("videoFrameRate", media.FrameRate))
+	if frameRate := plexMediaFrameRate(media.FrameRate); frameRate != "" {
+		attributes = append(attributes, textProjectionAttribute("videoFrameRate", frameRate))
 	}
 	if media.VideoProfile != "" {
 		attributes = append(attributes, textProjectionAttribute("videoProfile", media.VideoProfile))
@@ -207,9 +292,12 @@ func partProjectionAttributes(media mediainfo.Media) []projectionAttribute {
 }
 
 func streamProjectionAttributes(stream mediainfo.Stream) []projectionAttribute {
-	attributes := make([]projectionAttribute, 0, 20)
+	attributes := make([]projectionAttribute, 0, 35)
 	if stream.Codec != "" {
-		attributes = append(attributes, textProjectionAttribute("codec", stream.Codec))
+		attributes = append(attributes, textProjectionAttribute("codec", plexCodec(stream.Codec)))
+	}
+	if codecID := plexCodecID(stream.CodecTag); codecID != "" {
+		attributes = append(attributes, textProjectionAttribute("codecID", codecID))
 	}
 	if stream.Profile != "" {
 		attributes = append(attributes, textProjectionAttribute("profile", stream.Profile))
@@ -218,7 +306,7 @@ func streamProjectionAttributes(stream mediainfo.Stream) []projectionAttribute {
 		attributes = append(attributes, integerProjectionAttribute("level", int64(stream.Level)))
 	}
 	if stream.Bitrate > 0 {
-		attributes = append(attributes, integerProjectionAttribute("bitrate", stream.Bitrate))
+		attributes = append(attributes, integerProjectionAttribute("bitrate", bitrateKbps(stream.Bitrate)))
 	}
 	if stream.Width > 0 {
 		attributes = append(attributes, integerProjectionAttribute("width", int64(stream.Width)))
@@ -226,9 +314,9 @@ func streamProjectionAttributes(stream mediainfo.Stream) []projectionAttribute {
 	if stream.Height > 0 {
 		attributes = append(attributes, integerProjectionAttribute("height", int64(stream.Height)))
 	}
-	frameRate := firstProjectionString(stream.FrameRate, stream.AverageFrameRate)
+	frameRate := plexFrameRate(firstProjectionString(stream.FrameRate, stream.AverageFrameRate))
 	if frameRate != "" {
-		attributes = append(attributes, textProjectionAttribute("frameRate", frameRate))
+		attributes = append(attributes, projectionAttribute{name: "frameRate", value: frameRate, number: true})
 	}
 	if stream.ReferenceFrames > 0 {
 		attributes = append(attributes, integerProjectionAttribute("refFrames", int64(stream.ReferenceFrames)))
@@ -266,14 +354,215 @@ func streamProjectionAttributes(stream mediainfo.Stream) []projectionAttribute {
 	if stream.Channels > 0 {
 		attributes = append(attributes, integerProjectionAttribute("channels", int64(stream.Channels)))
 	}
-	if stream.ChannelLayout != "" {
-		attributes = append(attributes, textProjectionAttribute("channelLayout", stream.ChannelLayout))
+	if stream.ChannelLayout != "" && canonicalStreamType(stream.Type) == "2" {
+		attributes = append(attributes, textProjectionAttribute("audioChannelLayout", stream.ChannelLayout))
 	}
-	if stream.Language != "" {
-		attributes = append(attributes, textProjectionAttribute("language", stream.Language))
+	if code, ok := plexLanguageCode(stream.Language); ok {
+		attributes = append(attributes, textProjectionAttribute("languageCode", code))
 	}
 	if stream.Title != "" {
 		attributes = append(attributes, textProjectionAttribute("title", stream.Title))
+	}
+	if canonicalStreamType(stream.Type) == "1" {
+		if displayTitle, extendedDisplayTitle := videoDisplayTitles(stream); displayTitle != "" {
+			attributes = append(attributes, textProjectionAttribute("displayTitle", displayTitle))
+			if extendedDisplayTitle != "" {
+				attributes = append(attributes, textProjectionAttribute("extendedDisplayTitle", extendedDisplayTitle))
+			}
+		}
+	}
+	if stream.DolbyVision != nil && canonicalStreamType(stream.Type) == "1" {
+		attributes = append(attributes, dolbyVisionProjectionAttributes(stream.DolbyVision)...)
+	}
+	attributes = append(attributes, dispositionProjectionAttributes(stream.Disposition)...)
+	return attributes
+}
+
+func plexCodecID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, "[0]") || strings.EqualFold(value, "0x0000") {
+		return ""
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return ""
+		}
+	}
+	return value
+}
+
+// plexCodec keeps the normalized codec vocabulary expected by Plex clients.
+// ffprobe may expose a container-specific subtitle codec name that Plex
+// represents using its short format name.
+func plexCodec(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "hdmv_pgs_subtitle", "pgs":
+		return "pgs"
+	case "subrip":
+		return "srt"
+	default:
+		return value
+	}
+}
+
+func plexLanguageCode(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) != 2 && len(value) != 3 {
+		return "", false
+	}
+	for index := 0; index < len(value); index++ {
+		if (value[index] < 'a' || value[index] > 'z') && (value[index] < 'A' || value[index] > 'Z') {
+			return "", false
+		}
+	}
+	return strings.ToLower(value), true
+}
+
+func videoDisplayTitles(stream mediainfo.Stream) (string, string) {
+	label := ""
+	switch strings.ToLower(strings.TrimSpace(stream.HDRFormat)) {
+	case "dolby_vision", "dolbyvision", "dovi", "dv":
+		label = "DoVi"
+		if stream.DolbyVision != nil && dolbyVisionHDR10Compatible(stream.DolbyVision.BLCompatID) {
+			label = "DoVi/HDR10"
+		}
+	case "hdr10":
+		label = "HDR10"
+	case "hlg":
+		label = "HLG"
+	}
+	resolution := plexVideoResolution(stream)
+	displayTitle := strings.TrimSpace(strings.Join([]string{resolution, label}, " "))
+	if displayTitle == "" {
+		return "", ""
+	}
+	codec := plexDisplayCodec(stream.Codec)
+	codecAndProfile := strings.TrimSpace(strings.Join([]string{codec, strings.TrimSpace(stream.Profile)}, " "))
+	if codecAndProfile == "" {
+		return displayTitle, ""
+	}
+	return displayTitle, displayTitle + " (" + codecAndProfile + ")"
+}
+
+func dolbyVisionHDR10Compatible(compatibilityID int) bool {
+	// Plex labels the two observed HDR10-compatible signal identifiers as a
+	// combined DoVi/HDR10 presentation. Other identifiers may describe SDR or
+	// HLG compatibility and must not be promoted to HDR10.
+	return compatibilityID == 1 || compatibilityID == 6
+}
+
+// plexFrameRate converts ffprobe ratios to the decimal representation emitted
+// by Plex Stream metadata while preserving already-decimal values.
+func plexFrameRate(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	numerator, denominator, fraction := strings.Cut(value, "/")
+	if !fraction {
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil || parsed <= 0 {
+			return ""
+		}
+		return strings.TrimRight(strings.TrimRight(strconv.FormatFloat(parsed, 'f', 3, 64), "0"), ".")
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(numerator), 64)
+	if err != nil || n <= 0 {
+		return ""
+	}
+	d, err := strconv.ParseFloat(strings.TrimSpace(denominator), 64)
+	if err != nil || d <= 0 {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimRight(strconv.FormatFloat(n/d, 'f', 3, 64), "0"), ".")
+}
+
+// plexMediaFrameRate converts ffprobe's measured frame rate to Plex's nominal
+// media classification. Stream metadata retains the precise decimal value so
+// clients can distinguish a 23.976 stream from the Media-level 24p label.
+func plexMediaFrameRate(value string) string {
+	decimal := plexFrameRate(value)
+	if decimal == "" {
+		return ""
+	}
+	fps, err := strconv.ParseFloat(decimal, 64)
+	if err != nil || fps <= 0 || math.IsNaN(fps) || math.IsInf(fps, 0) {
+		return ""
+	}
+	nominal := math.Round(fps)
+	if nominal <= 0 || math.IsInf(nominal, 0) {
+		return ""
+	}
+	return strconv.FormatFloat(nominal, 'f', 0, 64) + "p"
+}
+
+func plexVideoResolution(stream mediainfo.Stream) string {
+	switch {
+	case stream.Width >= 3800 || stream.Height >= 2100:
+		return "4K"
+	case stream.Height >= 1400:
+		return "2K"
+	case stream.Height >= 1000:
+		return "1080p"
+	case stream.Height >= 700:
+		return "720p"
+	case stream.Height > 0:
+		return strconv.Itoa(stream.Height) + "p"
+	}
+	return ""
+}
+
+func plexDisplayCodec(value string) string {
+	switch plexCodec(value) {
+	case "hevc":
+		return "HEVC"
+	case "h264":
+		return "H.264"
+	case "mpeg4":
+		return "MPEG-4"
+	case "av1":
+		return "AV1"
+	case "vp9":
+		return "VP9"
+	default:
+		return strings.ToUpper(plexCodec(value))
+	}
+}
+
+func dolbyVisionProjectionAttributes(dolby *mediainfo.DolbyVision) []projectionAttribute {
+	if dolby == nil {
+		return nil
+	}
+	attributes := []projectionAttribute{
+		integerProjectionAttribute("DOVIBLCompatID", int64(dolby.BLCompatID)),
+		booleanProjectionAttribute("DOVIBLPresent", dolby.BLPresent != 0),
+		booleanProjectionAttribute("DOVIELPresent", dolby.ELPresent != 0),
+		booleanProjectionAttribute("DOVIPresent", true),
+		booleanProjectionAttribute("DOVIRPUPresent", dolby.RPUPresent != 0),
+	}
+	if dolby.Level > 0 {
+		attributes = append(attributes, integerProjectionAttribute("DOVILevel", int64(dolby.Level)))
+	}
+	if dolby.Profile > 0 {
+		attributes = append(attributes, integerProjectionAttribute("DOVIProfile", int64(dolby.Profile)))
+	}
+	if dolby.VersionMajor > 0 || dolby.VersionMinor > 0 {
+		attributes = append(attributes, textProjectionAttribute("DOVIVersion", fmt.Sprintf("%d.%d", dolby.VersionMajor, dolby.VersionMinor)))
+	}
+	return attributes
+}
+
+func dispositionProjectionAttributes(disposition mediainfo.Disposition) []projectionAttribute {
+	attributes := make([]projectionAttribute, 0, 3)
+	if disposition.Forced {
+		attributes = append(attributes, booleanProjectionAttribute("forced", true))
+	}
+	if disposition.HearingImpaired {
+		attributes = append(attributes, booleanProjectionAttribute("hearingImpaired", true))
+	}
+	if disposition.VisualImpaired {
+		attributes = append(attributes, booleanProjectionAttribute("visualImpaired", true))
 	}
 	return attributes
 }
@@ -296,16 +585,21 @@ var mediaProjectionAttributeNames = []string{
 var partProjectionAttributeNames = []string{"duration", "size", "container", "videoProfile", "audioProfile"}
 
 var commonStreamProjectionAttributeNames = []string{
-	"codec", "profile", "level", "bitrate", "language", "title",
+	"codec", "profile", "level", "bitrate", "languageCode", "title",
 }
 
 var videoStreamProjectionAttributeNames = []string{
 	"width", "height", "frameRate", "refFrames", "pixelFormat", "bitDepth",
 	"colorSpace", "colorRange", "colorPrimaries", "colorTrc", "chromaLocation",
-	"sampleAspectRatio", "displayAspectRatio",
+	"sampleAspectRatio", "displayAspectRatio", "displayTitle", "extendedDisplayTitle",
 }
 
-var audioStreamProjectionAttributeNames = []string{"samplingRate", "channels", "channelLayout"}
+var dolbyVisionProjectionAttributeNames = []string{
+	"DOVIBLCompatID", "DOVIBLPresent", "DOVIELPresent", "DOVILevel",
+	"DOVIPresent", "DOVIProfile", "DOVIRPUPresent", "DOVIVersion",
+}
+
+var audioStreamProjectionAttributeNames = []string{"samplingRate", "channels", "audioChannelLayout"}
 
 type streamKey struct {
 	typeName string
@@ -321,6 +615,9 @@ func buildStreamProjections(media mediainfo.Media) ([]streamProjection, error) {
 	projections := make([]streamProjection, 0, len(media.Streams))
 	seen := make(map[streamKey]struct{}, len(media.Streams))
 	for _, stream := range media.Streams {
+		if !projectableStream(stream) {
+			continue
+		}
 		key, ok := mediaStreamKey(stream.Type, stream.Index)
 		if !ok {
 			continue
@@ -335,6 +632,18 @@ func buildStreamProjections(media mediainfo.Media) ([]streamProjection, error) {
 		})
 	}
 	return projections, nil
+}
+
+func projectableStream(stream mediainfo.Stream) bool {
+	if stream.Disposition.AttachedPicture {
+		return false
+	}
+	switch canonicalStreamType(stream.Type) {
+	case "1", "2", "3":
+		return true
+	default:
+		return false
+	}
 }
 
 func mediaStreamKey(typeName string, index int) (streamKey, bool) {
@@ -481,13 +790,45 @@ func (document *xmlProjectionDocument) selectTarget(ratingKey string) (projectio
 	if len(videos) != 1 {
 		return nil, errors.New("Plex XML metadata must contain one Video item")
 	}
-	item := videos[0]
+	selection, err := xmlProjectionSelectionFromItem(videos[0])
+	if err != nil {
+		return nil, err
+	}
+	if selection.value.RatingKey != ratingKey {
+		return nil, errors.New("Plex XML metadata ratingKey does not match the requested item")
+	}
+	return selection, nil
+}
+
+func (document *xmlProjectionDocument) selectTargets() ([]projectionSelection, error) {
+	roots := xmlProjectionElements(document.nodes)
+	if len(roots) != 1 || roots[0].start.Name.Local != "MediaContainer" {
+		return nil, errors.New("Plex XML metadata has no unique MediaContainer root")
+	}
+	videos := directXMLElements(roots[0], "Video")
+	selections := make([]projectionSelection, 0, len(videos))
+	seen := make(map[string]struct{}, len(videos))
+	for _, item := range videos {
+		selection, err := xmlProjectionSelectionFromItem(item)
+		if err != nil {
+			continue
+		}
+		if _, duplicate := seen[selection.value.RatingKey]; duplicate {
+			return nil, errors.New("Plex XML metadata has duplicate ratingKey items")
+		}
+		seen[selection.value.RatingKey] = struct{}{}
+		selections = append(selections, selection)
+	}
+	return selections, nil
+}
+
+func xmlProjectionSelectionFromItem(item *xmlProjectionElement) (*xmlProjectionSelection, error) {
 	itemRatingKey, present, err := xmlAttribute(item.start.Attr, "ratingKey")
 	if err != nil {
 		return nil, err
 	}
-	if !present || itemRatingKey == "" || itemRatingKey != ratingKey {
-		return nil, errors.New("Plex XML metadata ratingKey does not match the requested item")
+	if !present || itemRatingKey == "" {
+		return nil, errors.New("Plex XML metadata item has no ratingKey")
 	}
 	mediaItems := directXMLElements(item, "Media")
 	if len(mediaItems) != 1 {
@@ -506,7 +847,7 @@ func (document *xmlProjectionDocument) selectTarget(ratingKey string) (projectio
 		return nil, err
 	}
 	return &xmlProjectionSelection{
-		value: Target{Part: part, NeedsEnrichment: needs},
+		value: Target{RatingKey: itemRatingKey, Part: part, NeedsEnrichment: needs},
 		media: mediaItems[0],
 		part:  parts[0],
 	}, nil
@@ -529,10 +870,18 @@ func (selection *xmlProjectionSelection) enrich(media mediainfo.Media) (bool, er
 	}
 	changed := addMissingXMLAttributes(selection.media, mediaProjectionAttributes(media))
 	changed = addMissingXMLAttributes(selection.part, partProjectionAttributes(media)) || changed
+	changed = replaceSTRMPartSizeXML(selection.part, media.Size) || changed
 	streamElements := directXMLElements(selection.part, "Stream")
 	streamIndex, err := indexXMLStreams(streamElements)
 	if err != nil {
 		return false, err
+	}
+	if len(streamElements) == 0 {
+		for _, projection := range streamProjections {
+			selection.part.children = append(selection.part.children, &xmlProjectionNode{element: newXMLStream(projection)})
+			changed = true
+		}
+		return changed, nil
 	}
 	for _, projection := range streamProjections {
 		stream, ok := streamIndex[projection.key]
@@ -542,6 +891,44 @@ func (selection *xmlProjectionSelection) enrich(media mediainfo.Media) (bool, er
 		changed = addMissingXMLAttributes(stream, projection.attributes) || changed
 	}
 	return changed, nil
+}
+
+func newXMLStream(projection streamProjection) *xmlProjectionElement {
+	attributes := make([]xml.Attr, 0, len(projection.attributes)+2)
+	attributes = append(attributes,
+		xml.Attr{Name: xml.Name{Local: "streamType"}, Value: projection.key.typeName},
+		xml.Attr{Name: xml.Name{Local: "index"}, Value: strconv.Itoa(projection.key.index)},
+	)
+	for _, attribute := range projection.attributes {
+		attributes = append(attributes, xml.Attr{Name: xml.Name{Local: attribute.name}, Value: attribute.value})
+	}
+	return &xmlProjectionElement{start: xml.StartElement{Name: xml.Name{Local: "Stream"}, Attr: attributes}}
+}
+
+func replaceSTRMPartSizeXML(part *xmlProjectionElement, mediaSize int64) bool {
+	if mediaSize <= strmControlSizeThreshold {
+		return false
+	}
+	file, present, err := xmlAttribute(part.start.Attr, "file")
+	if err != nil || !present || !isSTRMPath(file) {
+		return false
+	}
+	for index := range part.start.Attr {
+		if part.start.Attr[index].Name.Local != "size" {
+			continue
+		}
+		current, err := strconv.ParseInt(strings.TrimSpace(part.start.Attr[index].Value), 10, 64)
+		if err != nil || current < 0 || current > strmControlSizeThreshold || mediaSize <= current {
+			return false
+		}
+		part.start.Attr[index].Value = strconv.FormatInt(mediaSize, 10)
+		return true
+	}
+	return false
+}
+
+func isSTRMPath(value string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(value)), ".strm")
 }
 
 func partFromXML(element *xmlProjectionElement) (Part, error) {
@@ -602,9 +989,17 @@ func xmlTargetNeedsEnrichment(media, part *xmlProjectionElement) (bool, error) {
 			needs = true
 		}
 	}
+	if correction, err := xmlSTRMPartSizeNeedsCorrection(part); err != nil {
+		return false, err
+	} else if correction {
+		needs = true
+	}
 	streams := directXMLElements(part, "Stream")
 	if _, err := indexXMLStreams(streams); err != nil {
 		return false, err
+	}
+	if len(streams) == 0 {
+		return true, nil
 	}
 	for _, stream := range streams {
 		key, present, err := xmlStreamIdentity(stream)
@@ -615,7 +1010,7 @@ func xmlTargetNeedsEnrichment(media, part *xmlProjectionElement) (bool, error) {
 			continue
 		}
 		for _, name := range streamProjectionAttributeNames(key.typeName) {
-			_, present, err := xmlAttribute(stream.start.Attr, name)
+			present, err := xmlProjectionAttributePresent(stream, name)
 			if err != nil {
 				return false, err
 			}
@@ -623,8 +1018,78 @@ func xmlTargetNeedsEnrichment(media, part *xmlProjectionElement) (bool, error) {
 				needs = true
 			}
 		}
+		if key.typeName == "1" {
+			incomplete, err := xmlDolbyVisionFieldsIncomplete(stream)
+			if err != nil {
+				return false, err
+			}
+			needs = needs || incomplete
+		}
 	}
 	return needs, nil
+}
+
+func xmlSTRMPartSizeNeedsCorrection(part *xmlProjectionElement) (bool, error) {
+	file, present, err := xmlAttribute(part.start.Attr, "file")
+	if err != nil || !present || !isSTRMPath(file) {
+		return false, err
+	}
+	size, present, err := xmlAttribute(part.start.Attr, "size")
+	if err != nil || !present {
+		return false, err
+	}
+	value, err := strconv.ParseInt(strings.TrimSpace(size), 10, 64)
+	return err == nil && value >= 0 && value <= strmControlSizeThreshold, nil
+}
+
+func xmlDolbyVisionFieldsIncomplete(stream *xmlProjectionElement) (bool, error) {
+	displayTitle, present, err := xmlAttribute(stream.start.Attr, "displayTitle")
+	if err != nil {
+		return false, err
+	}
+	dolbyKnown := present && strings.Contains(strings.ToLower(displayTitle), "dovi")
+	for _, name := range dolbyVisionProjectionAttributeNames {
+		_, fieldPresent, err := xmlAttribute(stream.start.Attr, name)
+		if err != nil {
+			return false, err
+		}
+		dolbyKnown = dolbyKnown || fieldPresent
+	}
+	if !dolbyKnown {
+		return false, nil
+	}
+	for _, name := range dolbyVisionProjectionAttributeNames {
+		_, fieldPresent, err := xmlAttribute(stream.start.Attr, name)
+		if err != nil || !fieldPresent {
+			return !fieldPresent, err
+		}
+	}
+	return false, nil
+}
+
+func xmlProjectionAttributePresent(stream *xmlProjectionElement, name string) (bool, error) {
+	_, present, err := xmlAttribute(stream.start.Attr, name)
+	if err != nil || present {
+		return present, err
+	}
+	for _, alias := range projectionAttributeAliases(name) {
+		_, present, err = xmlAttribute(stream.start.Attr, alias)
+		if err != nil || present {
+			return present, err
+		}
+	}
+	return false, nil
+}
+
+func projectionAttributeAliases(name string) []string {
+	switch name {
+	case "languageCode":
+		return []string{"language"}
+	case "audioChannelLayout":
+		return []string{"channelLayout"}
+	default:
+		return nil
+	}
 }
 
 func indexXMLStreams(streams []*xmlProjectionElement) (map[streamKey]*xmlProjectionElement, error) {
@@ -889,32 +1354,73 @@ func encodeJSONProjectionList(list jsonProjectionList) (json.RawMessage, error) 
 }
 
 func (document *jsonProjectionDocument) selectTarget(ratingKey string) (projectionSelection, error) {
-	containerRaw, ok := document.root["MediaContainer"]
-	if !ok {
-		return nil, errors.New("Plex JSON metadata has no MediaContainer")
-	}
-	container, err := decodeJSONProjectionObject(bytes.TrimSpace(containerRaw))
-	if err != nil {
-		return nil, fmt.Errorf("parse Plex JSON MediaContainer: %w", err)
-	}
-	metadataRaw, ok := container["Metadata"]
-	if !ok {
-		return nil, errors.New("Plex JSON metadata has no Metadata item")
-	}
-	metadata, err := decodeJSONProjectionList(metadataRaw, "Metadata")
+	container, metadata, err := document.directMetadata()
 	if err != nil {
 		return nil, err
 	}
 	if len(metadata.items) != 1 {
 		return nil, errors.New("Plex JSON metadata must contain one Metadata item")
 	}
-	item := metadata.items[0]
-	itemRatingKey, err := requiredJSONScalarString(*item, "ratingKey")
+	selection, err := jsonProjectionSelectionFromItem(document, container, metadata, metadata.items[0])
 	if err != nil {
 		return nil, err
 	}
-	if itemRatingKey != ratingKey {
+	if selection.value.RatingKey != ratingKey {
 		return nil, errors.New("Plex JSON metadata ratingKey does not match the requested item")
+	}
+	return selection, nil
+}
+
+func (document *jsonProjectionDocument) selectTargets() ([]projectionSelection, error) {
+	container, metadata, err := document.directMetadata()
+	if err != nil {
+		return nil, err
+	}
+	selections := make([]projectionSelection, 0, len(metadata.items))
+	seen := make(map[string]struct{}, len(metadata.items))
+	for _, item := range metadata.items {
+		selection, err := jsonProjectionSelectionFromItem(document, container, metadata, item)
+		if err != nil {
+			continue
+		}
+		if _, duplicate := seen[selection.value.RatingKey]; duplicate {
+			return nil, errors.New("Plex JSON metadata has duplicate ratingKey items")
+		}
+		seen[selection.value.RatingKey] = struct{}{}
+		selections = append(selections, selection)
+	}
+	return selections, nil
+}
+
+func (document *jsonProjectionDocument) directMetadata() (jsonObject, jsonProjectionList, error) {
+	containerRaw, ok := document.root["MediaContainer"]
+	if !ok {
+		return nil, jsonProjectionList{}, errors.New("Plex JSON metadata has no MediaContainer")
+	}
+	container, err := decodeJSONProjectionObject(bytes.TrimSpace(containerRaw))
+	if err != nil {
+		return nil, jsonProjectionList{}, fmt.Errorf("parse Plex JSON MediaContainer: %w", err)
+	}
+	metadataRaw, ok := container["Metadata"]
+	if !ok {
+		return nil, jsonProjectionList{}, errors.New("Plex JSON metadata has no Metadata item")
+	}
+	metadata, err := decodeJSONProjectionList(metadataRaw, "Metadata")
+	if err != nil {
+		return nil, jsonProjectionList{}, err
+	}
+	return container, metadata, nil
+}
+
+func jsonProjectionSelectionFromItem(
+	document *jsonProjectionDocument,
+	container jsonObject,
+	metadata jsonProjectionList,
+	item *jsonObject,
+) (*jsonProjectionSelection, error) {
+	itemRatingKey, err := requiredJSONScalarString(*item, "ratingKey")
+	if err != nil {
+		return nil, err
 	}
 	mediaRaw, ok := (*item)["Media"]
 	if !ok {
@@ -949,26 +1455,28 @@ func (document *jsonProjectionDocument) selectTarget(ratingKey string) (projecti
 		return nil, err
 	}
 	return &jsonProjectionSelection{
-		value:     Target{Part: part, NeedsEnrichment: needs},
-		document:  document,
-		container: container,
-		metadata:  metadata,
-		media:     mediaItems,
-		parts:     parts,
-		mediaItem: mediaItem,
-		part:      partItem,
+		value:        Target{RatingKey: itemRatingKey, Part: part, NeedsEnrichment: needs},
+		document:     document,
+		container:    container,
+		metadata:     metadata,
+		metadataItem: item,
+		media:        mediaItems,
+		parts:        parts,
+		mediaItem:    mediaItem,
+		part:         partItem,
 	}, nil
 }
 
 type jsonProjectionSelection struct {
-	value     Target
-	document  *jsonProjectionDocument
-	container jsonObject
-	metadata  jsonProjectionList
-	media     jsonProjectionList
-	parts     jsonProjectionList
-	mediaItem *jsonObject
-	part      *jsonObject
+	value        Target
+	document     *jsonProjectionDocument
+	container    jsonObject
+	metadata     jsonProjectionList
+	metadataItem *jsonObject
+	media        jsonProjectionList
+	parts        jsonProjectionList
+	mediaItem    *jsonObject
+	part         *jsonObject
 }
 
 func (selection *jsonProjectionSelection) target() Target {
@@ -989,35 +1497,55 @@ func (selection *jsonProjectionSelection) enrich(media mediainfo.Media) (bool, e
 		return false, err
 	}
 	changed = changed || partChanged
+	partSizeChanged, err := replaceSTRMPartSizeJSON(*selection.part, media.Size)
+	if err != nil {
+		return false, err
+	}
+	changed = changed || partSizeChanged
 	streamRaw, exists := (*selection.part)["Stream"]
 	if !exists {
-		return changed, nil
-	}
-	streams, err := decodeJSONProjectionList(streamRaw, "Stream")
-	if err != nil {
-		return false, err
-	}
-	streamIndex, err := indexJSONStreams(streams.items)
-	if err != nil {
-		return false, err
-	}
-	for _, projection := range streamProjections {
-		stream, ok := streamIndex[projection.key]
-		if !ok {
-			continue
+		if len(streamProjections) > 0 {
+			if err := setGeneratedJSONStreams(*selection.part, streamProjections); err != nil {
+				return false, err
+			}
+			changed = true
 		}
-		streamChanged, err := addMissingJSONAttributes(*stream, projection.attributes)
+	} else {
+		streams, err := decodeJSONProjectionList(streamRaw, "Stream")
 		if err != nil {
 			return false, err
 		}
-		changed = changed || streamChanged
-	}
-	if changed {
-		encoded, err := encodeJSONProjectionList(streams)
-		if err != nil {
-			return false, err
+		if len(streams.items) == 0 {
+			if len(streamProjections) > 0 {
+				if err := setGeneratedJSONStreams(*selection.part, streamProjections); err != nil {
+					return false, err
+				}
+				changed = true
+			}
+		} else {
+			streamIndex, err := indexJSONStreams(streams.items)
+			if err != nil {
+				return false, err
+			}
+			for _, projection := range streamProjections {
+				stream, ok := streamIndex[projection.key]
+				if !ok {
+					continue
+				}
+				streamChanged, err := addMissingJSONAttributes(*stream, projection.attributes)
+				if err != nil {
+					return false, err
+				}
+				changed = changed || streamChanged
+			}
+			if changed {
+				encoded, err := encodeJSONProjectionList(streams)
+				if err != nil {
+					return false, err
+				}
+				(*selection.part)["Stream"] = encoded
+			}
 		}
-		(*selection.part)["Stream"] = encoded
 	}
 	if changed {
 		if err := selection.commit(); err != nil {
@@ -1025,6 +1553,74 @@ func (selection *jsonProjectionSelection) enrich(media mediainfo.Media) (bool, e
 		}
 	}
 	return changed, nil
+}
+
+func setGeneratedJSONStreams(part jsonObject, projections []streamProjection) error {
+	streams := jsonProjectionList{items: make([]*jsonObject, 0, len(projections)), array: true}
+	for _, projection := range projections {
+		stream := make(jsonObject)
+		if _, err := addMissingJSONAttributes(stream, generatedStreamAttributes(projection)); err != nil {
+			return err
+		}
+		streams.items = append(streams.items, &stream)
+	}
+	encoded, err := encodeJSONProjectionList(streams)
+	if err != nil {
+		return err
+	}
+	part["Stream"] = encoded
+	return nil
+}
+
+func generatedStreamAttributes(projection streamProjection) []projectionAttribute {
+	attributes := make([]projectionAttribute, 0, len(projection.attributes)+2)
+	attributes = append(attributes,
+		integerProjectionAttribute("streamType", int64(streamTypeNumber(projection.key.typeName))),
+		integerProjectionAttribute("index", int64(projection.key.index)),
+	)
+	return append(attributes, projection.attributes...)
+}
+
+func streamTypeNumber(typeName string) int {
+	switch typeName {
+	case "1":
+		return 1
+	case "2":
+		return 2
+	case "3":
+		return 3
+	default:
+		return 0
+	}
+}
+
+func replaceSTRMPartSizeJSON(part jsonObject, mediaSize int64) (bool, error) {
+	if mediaSize <= strmControlSizeThreshold {
+		return false, nil
+	}
+	file, err := requiredJSONString(part, "file")
+	if err != nil || !isSTRMPath(file) {
+		return false, nil
+	}
+	raw, present := part["size"]
+	if !present {
+		return false, nil
+	}
+	current, ok := jsonRawInt64(raw)
+	if !ok || current < 0 || current > strmControlSizeThreshold || mediaSize <= current {
+		return false, nil
+	}
+	part["size"] = json.RawMessage(strconv.FormatInt(mediaSize, 10))
+	return true, nil
+}
+
+func jsonRawInt64(raw json.RawMessage) (int64, bool) {
+	value, ok := jsonRawScalarString(raw)
+	if !ok {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	return parsed, err == nil
 }
 
 func (selection *jsonProjectionSelection) commit() error {
@@ -1037,8 +1633,7 @@ func (selection *jsonProjectionSelection) commit() error {
 	if err != nil {
 		return err
 	}
-	// The metadata list has exactly one item by selection contract.
-	(*selection.metadata.items[0])["Media"] = media
+	(*selection.metadataItem)["Media"] = media
 	metadata, err := encodeJSONProjectionList(selection.metadata)
 	if err != nil {
 		return err
@@ -1130,13 +1725,19 @@ func jsonTargetNeedsEnrichment(media, part *jsonObject) (bool, error) {
 			needs = true
 		}
 	}
+	if jsonSTRMPartSizeNeedsCorrection(*part) {
+		needs = true
+	}
 	streamRaw, exists := (*part)["Stream"]
 	if !exists {
-		return needs, nil
+		return true, nil
 	}
 	streams, err := decodeJSONProjectionList(streamRaw, "Stream")
 	if err != nil {
 		return false, err
+	}
+	if len(streams.items) == 0 {
+		return true, nil
 	}
 	if _, err := indexJSONStreams(streams.items); err != nil {
 		return false, err
@@ -1150,12 +1751,62 @@ func jsonTargetNeedsEnrichment(media, part *jsonObject) (bool, error) {
 			continue
 		}
 		for _, name := range streamProjectionAttributeNames(key.typeName) {
-			if _, present := (*stream)[name]; !present {
+			if !jsonProjectionAttributePresent(*stream, name) {
 				needs = true
 			}
 		}
+		if key.typeName == "1" && jsonDolbyVisionFieldsIncomplete(*stream) {
+			needs = true
+		}
 	}
 	return needs, nil
+}
+
+func jsonSTRMPartSizeNeedsCorrection(part jsonObject) bool {
+	file, err := requiredJSONString(part, "file")
+	if err != nil || !isSTRMPath(file) {
+		return false
+	}
+	raw, present := part["size"]
+	if !present {
+		return false
+	}
+	value, ok := jsonRawInt64(raw)
+	return ok && value >= 0 && value <= strmControlSizeThreshold
+}
+
+func jsonDolbyVisionFieldsIncomplete(stream jsonObject) bool {
+	dolbyKnown := false
+	if raw, present := stream["displayTitle"]; present {
+		if value, ok := jsonRawScalarString(raw); ok {
+			dolbyKnown = strings.Contains(strings.ToLower(value), "dovi")
+		}
+	}
+	for _, name := range dolbyVisionProjectionAttributeNames {
+		_, present := stream[name]
+		dolbyKnown = dolbyKnown || present
+	}
+	if !dolbyKnown {
+		return false
+	}
+	for _, name := range dolbyVisionProjectionAttributeNames {
+		if _, present := stream[name]; !present {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonProjectionAttributePresent(stream jsonObject, name string) bool {
+	if _, present := stream[name]; present {
+		return true
+	}
+	for _, alias := range projectionAttributeAliases(name) {
+		if _, present := stream[alias]; present {
+			return true
+		}
+	}
+	return false
 }
 
 func indexJSONStreams(streams []*jsonObject) (map[streamKey]*jsonObject, error) {
@@ -1209,7 +1860,13 @@ func addMissingJSONAttributes(object jsonObject, attributes []projectionAttribut
 		}
 		var raw []byte
 		var err error
-		if attribute.number {
+		if attribute.boolean {
+			if attribute.value == "1" {
+				raw = []byte("true")
+			} else {
+				raw = []byte("false")
+			}
+		} else if attribute.number {
 			raw = []byte(attribute.value)
 		} else {
 			raw, err = json.Marshal(attribute.value)

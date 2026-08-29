@@ -15,35 +15,69 @@ import (
 // surface bounded and prevents request credentials or media URLs from being
 // copied into an operational endpoint.
 type Metrics struct {
-	plexRequestsTotal     atomic.Uint64
-	cloudPartHits         atomic.Uint64
-	cloudPartMisses       atomic.Uint64
-	redirectSuccess       atomic.Uint64
-	redirectFailure       atomic.Uint64
-	plexFallbackTotal     atomic.Uint64
-	activeRequests        atomic.Int64
-	metadataAdmitted      atomic.Uint64
-	metadataTimeouts      atomic.Uint64
-	metadataActive        atomic.Int64
-	metadataQueued        atomic.Int64
-	metadataBatchAdmitted atomic.Uint64
-	metadataBatchTimeouts atomic.Uint64
-	metadataBatchActive   atomic.Int64
-	metadataBatchQueued   atomic.Int64
-	mediaInfoCacheHits    atomic.Uint64
-	mediaInfoCacheMisses  atomic.Uint64
-	mediaInfoProbeQueued  atomic.Uint64
-	mediaInfoProbeSuccess atomic.Uint64
-	mediaInfoProbeFailure atomic.Uint64
-	mediaInfoStoreFailure atomic.Uint64
-	mediaInfoProbeActive  atomic.Int64
-	mediaInfoEnriched     atomic.Uint64
-	mediaInfoFailOpen     atomic.Uint64
-	mediaInfoWaitActive   atomic.Int64
-	mediaInfoWaitRejected atomic.Uint64
-	resolverLatency       latencyMetrics
-	redirectLatency       latencyMetrics
-	mediaInfoProbeLatency latencyMetrics
+	plexRequestsTotal                atomic.Uint64
+	cloudPartHits                    atomic.Uint64
+	cloudPartMisses                  atomic.Uint64
+	redirectSuccess                  atomic.Uint64
+	redirectFailure                  atomic.Uint64
+	plexFallbackTotal                atomic.Uint64
+	activeRequests                   atomic.Int64
+	metadataAnalysisParamsRemoved    atomic.Uint64
+	metadataAdmitted                 atomic.Uint64
+	metadataTimeouts                 atomic.Uint64
+	metadataActive                   atomic.Int64
+	metadataQueued                   atomic.Int64
+	metadataBatchAdmitted            atomic.Uint64
+	metadataBatchTimeouts            atomic.Uint64
+	metadataBatchActive              atomic.Int64
+	metadataBatchQueued              atomic.Int64
+	metadataCoalesceOffered          atomic.Uint64
+	metadataCoalesceBatches          atomic.Uint64
+	metadataCoalesceItems            atomic.Uint64
+	metadataCoalesceFallbacks        atomic.Uint64
+	metadataCoalesceActive           atomic.Int64
+	mediaInfoCacheHits               atomic.Uint64
+	mediaInfoCacheMisses             atomic.Uint64
+	mediaInfoProbeOffered            atomic.Uint64
+	mediaInfoProbeQueued             atomic.Uint64
+	mediaInfoProbeJoined             atomic.Uint64
+	mediaInfoProbePromoted           atomic.Uint64
+	mediaInfoProbeDroppedFull        atomic.Uint64
+	mediaInfoProbeDroppedExpired     atomic.Uint64
+	mediaInfoProbeSuperseded         atomic.Uint64
+	mediaInfoProbeSuccess            atomic.Uint64
+	mediaInfoProbeFailure            atomic.Uint64
+	mediaInfoStoreFailure            atomic.Uint64
+	mediaInfoProbeActive             atomic.Int64
+	mediaInfoEnriched                atomic.Uint64
+	mediaInfoFailOpen                atomic.Uint64
+	mediaInfoWaitActive              atomic.Int64
+	mediaInfoWaitRejected            atomic.Uint64
+	mediaInfoPrewarmTriggered        atomic.Uint64
+	mediaInfoPrewarmReplaced         atomic.Uint64
+	mediaInfoPrewarmDiscoverySuccess atomic.Uint64
+	mediaInfoPrewarmDiscoveryFailure atomic.Uint64
+	mediaInfoPrewarmFreshCache       atomic.Uint64
+	mediaInfoPrewarmJoinedFlight     atomic.Uint64
+	mediaInfoPrewarmQueued           atomic.Uint64
+	mediaInfoPrewarmRejected         atomic.Uint64
+	mediaInfoPrewarmSkipped          atomic.Uint64
+	resolverLatency                  latencyMetrics
+	redirectLatency                  latencyMetrics
+	mediaInfoProbeLatency            latencyMetrics
+	mediaInfoScheduler               schedulerMetrics
+}
+
+const mediaInfoPriorityCount = 3
+
+type schedulerMetrics struct {
+	offered        [mediaInfoPriorityCount]atomic.Uint64
+	queued         [mediaInfoPriorityCount]atomic.Uint64
+	joined         [mediaInfoPriorityCount]atomic.Uint64
+	promoted       [mediaInfoPriorityCount]atomic.Uint64
+	droppedFull    [mediaInfoPriorityCount]atomic.Uint64
+	droppedExpired [mediaInfoPriorityCount]atomic.Uint64
+	superseded     [mediaInfoPriorityCount]atomic.Uint64
 }
 
 type latencyMetrics struct {
@@ -56,33 +90,55 @@ type latencyMetrics struct {
 // Snapshot is the stable JSON representation of the process counters.
 // Counter names match the operational metric names used by the gateway.
 type Snapshot struct {
-	PlexRequestsTotal uint64 `json:"plex_requests_total"`
-	CloudPartHits     uint64 `json:"cloud_part_hits"`
-	CloudPartMisses   uint64 `json:"cloud_part_misses"`
-	RedirectSuccess   uint64 `json:"redirect_success"`
-	RedirectFailure   uint64 `json:"redirect_failure"`
-	PlexFallbackTotal uint64 `json:"plex_fallback_total"`
-	ActiveRequests    int64  `json:"active_requests"`
+	PlexRequestsTotal                  uint64 `json:"plex_requests_total"`
+	CloudPartHits                      uint64 `json:"cloud_part_hits"`
+	CloudPartMisses                    uint64 `json:"cloud_part_misses"`
+	RedirectSuccess                    uint64 `json:"redirect_success"`
+	RedirectFailure                    uint64 `json:"redirect_failure"`
+	PlexFallbackTotal                  uint64 `json:"plex_fallback_total"`
+	ActiveRequests                     int64  `json:"active_requests"`
+	MetadataAnalysisParamsRemovedTotal uint64 `json:"metadata_analysis_params_removed_total"`
 
-	MetadataGuardAdmittedTotal      uint64 `json:"metadata_guard_admitted_total"`
-	MetadataGuardTimeoutsTotal      uint64 `json:"metadata_guard_timeouts_total"`
-	MetadataGuardActive             int64  `json:"metadata_guard_active"`
-	MetadataGuardQueued             int64  `json:"metadata_guard_queued"`
-	MetadataBatchGuardAdmittedTotal uint64 `json:"metadata_batch_guard_admitted_total"`
-	MetadataBatchGuardTimeoutsTotal uint64 `json:"metadata_batch_guard_timeouts_total"`
-	MetadataBatchGuardActive        int64  `json:"metadata_batch_guard_active"`
-	MetadataBatchGuardQueued        int64  `json:"metadata_batch_guard_queued"`
-	MediaInfoCacheHitsTotal         uint64 `json:"mediainfo_cache_hits_total"`
-	MediaInfoCacheMissesTotal       uint64 `json:"mediainfo_cache_misses_total"`
-	MediaInfoProbeQueuedTotal       uint64 `json:"mediainfo_probe_queued_total"`
-	MediaInfoProbeSuccessTotal      uint64 `json:"mediainfo_probe_success_total"`
-	MediaInfoProbeFailureTotal      uint64 `json:"mediainfo_probe_failure_total"`
-	MediaInfoStoreFailureTotal      uint64 `json:"mediainfo_store_failure_total"`
-	MediaInfoProbeActive            int64  `json:"mediainfo_probe_active"`
-	MediaInfoEnrichedTotal          uint64 `json:"mediainfo_enriched_total"`
-	MediaInfoFailOpenTotal          uint64 `json:"mediainfo_fail_open_total"`
-	MediaInfoWaitActive             int64  `json:"mediainfo_wait_active"`
-	MediaInfoWaitRejectedTotal      uint64 `json:"mediainfo_wait_rejected_total"`
+	MetadataGuardAdmittedTotal            uint64            `json:"metadata_guard_admitted_total"`
+	MetadataGuardTimeoutsTotal            uint64            `json:"metadata_guard_timeouts_total"`
+	MetadataGuardActive                   int64             `json:"metadata_guard_active"`
+	MetadataGuardQueued                   int64             `json:"metadata_guard_queued"`
+	MetadataBatchGuardAdmittedTotal       uint64            `json:"metadata_batch_guard_admitted_total"`
+	MetadataBatchGuardTimeoutsTotal       uint64            `json:"metadata_batch_guard_timeouts_total"`
+	MetadataBatchGuardActive              int64             `json:"metadata_batch_guard_active"`
+	MetadataBatchGuardQueued              int64             `json:"metadata_batch_guard_queued"`
+	MetadataCoalesceOfferedTotal          uint64            `json:"metadata_coalesce_offered_total"`
+	MetadataCoalesceBatchesTotal          uint64            `json:"metadata_coalesce_batches_total"`
+	MetadataCoalesceItemsTotal            uint64            `json:"metadata_coalesce_items_total"`
+	MetadataCoalesceFallbacksTotal        uint64            `json:"metadata_coalesce_fallbacks_total"`
+	MetadataCoalesceActive                int64             `json:"metadata_coalesce_active"`
+	MediaInfoCacheHitsTotal               uint64            `json:"mediainfo_cache_hits_total"`
+	MediaInfoCacheMissesTotal             uint64            `json:"mediainfo_cache_misses_total"`
+	MediaInfoProbeOfferedTotal            uint64            `json:"mediainfo_probe_offered_total"`
+	MediaInfoProbeQueuedTotal             uint64            `json:"mediainfo_probe_queued_total"`
+	MediaInfoProbeJoinedTotal             uint64            `json:"mediainfo_probe_joined_total"`
+	MediaInfoProbePromotedTotal           uint64            `json:"mediainfo_probe_promoted_total"`
+	MediaInfoProbeDroppedFullTotal        uint64            `json:"mediainfo_probe_dropped_full_total"`
+	MediaInfoProbeDroppedExpiredTotal     uint64            `json:"mediainfo_probe_dropped_expired_total"`
+	MediaInfoProbeSupersededTotal         uint64            `json:"mediainfo_probe_superseded_total"`
+	MediaInfoProbeSuccessTotal            uint64            `json:"mediainfo_probe_success_total"`
+	MediaInfoProbeFailureTotal            uint64            `json:"mediainfo_probe_failure_total"`
+	MediaInfoStoreFailureTotal            uint64            `json:"mediainfo_store_failure_total"`
+	MediaInfoProbeActive                  int64             `json:"mediainfo_probe_active"`
+	MediaInfoScheduler                    SchedulerSnapshot `json:"mediainfo_scheduler"`
+	MediaInfoEnrichedTotal                uint64            `json:"mediainfo_enriched_total"`
+	MediaInfoFailOpenTotal                uint64            `json:"mediainfo_fail_open_total"`
+	MediaInfoWaitActive                   int64             `json:"mediainfo_wait_active"`
+	MediaInfoWaitRejectedTotal            uint64            `json:"mediainfo_wait_rejected_total"`
+	MediaInfoPrewarmTriggeredTotal        uint64            `json:"mediainfo_prewarm_triggered_total"`
+	MediaInfoPrewarmReplacedTotal         uint64            `json:"mediainfo_prewarm_replaced_total"`
+	MediaInfoPrewarmDiscoverySuccessTotal uint64            `json:"mediainfo_prewarm_discovery_success_total"`
+	MediaInfoPrewarmDiscoveryFailureTotal uint64            `json:"mediainfo_prewarm_discovery_failure_total"`
+	MediaInfoPrewarmFreshCacheTotal       uint64            `json:"mediainfo_prewarm_fresh_cache_total"`
+	MediaInfoPrewarmJoinedFlightTotal     uint64            `json:"mediainfo_prewarm_joined_flight_total"`
+	MediaInfoPrewarmQueuedTotal           uint64            `json:"mediainfo_prewarm_queued_total"`
+	MediaInfoPrewarmRejectedTotal         uint64            `json:"mediainfo_prewarm_rejected_total"`
+	MediaInfoPrewarmSkippedTotal          uint64            `json:"mediainfo_prewarm_skipped_total"`
 
 	ResolverLatencyMSTotal uint64 `json:"resolver_latency_ms_total"`
 	ResolverLatencySamples uint64 `json:"resolver_latency_samples"`
@@ -98,6 +154,25 @@ type Snapshot struct {
 	MediaInfoProbeLatencySamples uint64 `json:"mediainfo_probe_latency_samples"`
 	MediaInfoProbeLatencyMSLast  uint64 `json:"mediainfo_probe_latency_ms_last"`
 	MediaInfoProbeLatencyMSMax   uint64 `json:"mediainfo_probe_latency_ms_max"`
+}
+
+// SchedulerPrioritySnapshot contains one fixed MediaInfo priority class. The
+// shape is intentionally label-free so request identities cannot expand it.
+type SchedulerPrioritySnapshot struct {
+	OfferedTotal        uint64 `json:"offered_total"`
+	QueuedTotal         uint64 `json:"queued_total"`
+	JoinedTotal         uint64 `json:"joined_total"`
+	PromotedTotal       uint64 `json:"promoted_total"`
+	DroppedFullTotal    uint64 `json:"dropped_full_total"`
+	DroppedExpiredTotal uint64 `json:"dropped_expired_total"`
+	SupersededTotal     uint64 `json:"superseded_total"`
+}
+
+// SchedulerSnapshot exposes only the fixed P0, P1, and P2 classes.
+type SchedulerSnapshot struct {
+	P0 SchedulerPrioritySnapshot `json:"p0"`
+	P1 SchedulerPrioritySnapshot `json:"p1"`
+	P2 SchedulerPrioritySnapshot `json:"p2"`
 }
 
 // New creates an empty process-local metrics registry.
@@ -136,14 +211,60 @@ func (m *Metrics) IncPlexFallback() {
 	m.plexFallbackTotal.Add(1)
 }
 
-// IncMediaInfoCacheHits records a fresh L1 result.
+// IncMetadataAnalysisParamsRemoved records one metadata request whose
+// on-demand file-analysis controls were removed before proxying to Plex.
+func (m *Metrics) IncMetadataAnalysisParamsRemoved() {
+	m.metadataAnalysisParamsRemoved.Add(1)
+}
+
+// IncMediaInfoCacheHits records an exact key satisfied by L1 or SQLite,
+// including a retained stale result returned while refresh runs separately.
 func (m *Metrics) IncMediaInfoCacheHits() { m.mediaInfoCacheHits.Add(1) }
 
-// IncMediaInfoCacheMisses records an exact key not satisfied by L1.
+// IncMediaInfoCacheMisses records an exact key not satisfied by L1 or SQLite.
 func (m *Metrics) IncMediaInfoCacheMisses() { m.mediaInfoCacheMisses.Add(1) }
 
+// IncMediaInfoProbeOffered records one valid admission attempt at the scheduler.
+func (m *Metrics) IncMediaInfoProbeOffered(priority uint8) {
+	m.mediaInfoProbeOffered.Add(1)
+	incrementPriority(&m.mediaInfoScheduler.offered, priority)
+}
+
 // IncMediaInfoProbeQueued records a newly scheduled singleflight job.
-func (m *Metrics) IncMediaInfoProbeQueued() { m.mediaInfoProbeQueued.Add(1) }
+func (m *Metrics) IncMediaInfoProbeQueued(priority uint8) {
+	m.mediaInfoProbeQueued.Add(1)
+	incrementPriority(&m.mediaInfoScheduler.queued, priority)
+}
+
+// IncMediaInfoProbeJoined records a signal merged into an exact-key flight.
+func (m *Metrics) IncMediaInfoProbeJoined(priority uint8) {
+	m.mediaInfoProbeJoined.Add(1)
+	incrementPriority(&m.mediaInfoScheduler.joined, priority)
+}
+
+// IncMediaInfoProbePromoted records an exact-key job raised to a higher class.
+func (m *Metrics) IncMediaInfoProbePromoted(priority uint8) {
+	m.mediaInfoProbePromoted.Add(1)
+	incrementPriority(&m.mediaInfoScheduler.promoted, priority)
+}
+
+// IncMediaInfoProbeDroppedFull records work rejected by its bounded queue.
+func (m *Metrics) IncMediaInfoProbeDroppedFull(priority uint8) {
+	m.mediaInfoProbeDroppedFull.Add(1)
+	incrementPriority(&m.mediaInfoScheduler.droppedFull, priority)
+}
+
+// IncMediaInfoProbeDroppedExpired records background work discarded before I/O.
+func (m *Metrics) IncMediaInfoProbeDroppedExpired(priority uint8) {
+	m.mediaInfoProbeDroppedExpired.Add(1)
+	incrementPriority(&m.mediaInfoScheduler.droppedExpired, priority)
+}
+
+// IncMediaInfoProbeSuperseded records stale fingerprint work replaced in queue.
+func (m *Metrics) IncMediaInfoProbeSuperseded(priority uint8) {
+	m.mediaInfoProbeSuperseded.Add(1)
+	incrementPriority(&m.mediaInfoScheduler.superseded, priority)
+}
 
 // IncMediaInfoProbeSuccess records a complete normalized probe result.
 func (m *Metrics) IncMediaInfoProbeSuccess() { m.mediaInfoProbeSuccess.Add(1) }
@@ -183,6 +304,39 @@ func (m *Metrics) DecMediaInfoWaitActive() { decrementGauge(&m.mediaInfoWaitActi
 // IncMediaInfoWaitRejected records an eligible response that skipped waiting
 // because the bounded enrichment pool was full.
 func (m *Metrics) IncMediaInfoWaitRejected() { m.mediaInfoWaitRejected.Add(1) }
+
+// IncMediaInfoPrewarmTriggered records an accepted in-memory redirect event.
+func (m *Metrics) IncMediaInfoPrewarmTriggered() { m.mediaInfoPrewarmTriggered.Add(1) }
+
+// IncMediaInfoPrewarmReplaced records a pending or active nearby-item window
+// replaced by a newer playback in the same client session.
+func (m *Metrics) IncMediaInfoPrewarmReplaced() { m.mediaInfoPrewarmReplaced.Add(1) }
+
+// IncMediaInfoPrewarmDiscoverySuccess records a usable nearby-item window.
+func (m *Metrics) IncMediaInfoPrewarmDiscoverySuccess() {
+	m.mediaInfoPrewarmDiscoverySuccess.Add(1)
+}
+
+// IncMediaInfoPrewarmDiscoveryFailure records a bounded Plex discovery error.
+func (m *Metrics) IncMediaInfoPrewarmDiscoveryFailure() {
+	m.mediaInfoPrewarmDiscoveryFailure.Add(1)
+}
+
+// IncMediaInfoPrewarmFreshCache records a prewarm satisfied by fresh MediaInfo.
+func (m *Metrics) IncMediaInfoPrewarmFreshCache() { m.mediaInfoPrewarmFreshCache.Add(1) }
+
+// IncMediaInfoPrewarmJoinedFlight records a prewarm joined to active work.
+func (m *Metrics) IncMediaInfoPrewarmJoinedFlight() { m.mediaInfoPrewarmJoinedFlight.Add(1) }
+
+// IncMediaInfoPrewarmQueued records a newly queued MediaInfo probe.
+func (m *Metrics) IncMediaInfoPrewarmQueued() { m.mediaInfoPrewarmQueued.Add(1) }
+
+// IncMediaInfoPrewarmRejected records a MediaInfo admission rejection.
+func (m *Metrics) IncMediaInfoPrewarmRejected() { m.mediaInfoPrewarmRejected.Add(1) }
+
+// IncMediaInfoPrewarmSkipped records a duplicate, unsafe, unavailable, or
+// otherwise non-actionable speculative event.
+func (m *Metrics) IncMediaInfoPrewarmSkipped() { m.mediaInfoPrewarmSkipped.Add(1) }
 
 // IncMetadataGuardAdmitted records a detailed metadata request admitted to
 // Plex after both client and global limits were acquired.
@@ -247,6 +401,29 @@ func (m *Metrics) IncMetadataBatchGuardQueued() {
 func (m *Metrics) DecMetadataBatchGuardQueued() {
 	decrementGauge(&m.metadataBatchQueued)
 }
+
+// IncMetadataCoalesceOffered records one eligible single-item read entering
+// the bounded aggregation window.
+func (m *Metrics) IncMetadataCoalesceOffered() { m.metadataCoalesceOffered.Add(1) }
+
+// IncMetadataCoalesceBatch records one native Plex batch and its unique item
+// count. Duplicate waiters do not inflate the item count.
+func (m *Metrics) IncMetadataCoalesceBatch(items int) {
+	m.metadataCoalesceBatches.Add(1)
+	if items > 0 {
+		m.metadataCoalesceItems.Add(uint64(items))
+	}
+}
+
+// IncMetadataCoalesceFallback records a batch that returned through bounded
+// single-item Plex requests because its response was not safely splittable.
+func (m *Metrics) IncMetadataCoalesceFallback() { m.metadataCoalesceFallbacks.Add(1) }
+
+// IncMetadataCoalesceActive marks one native Plex batch in flight.
+func (m *Metrics) IncMetadataCoalesceActive() { m.metadataCoalesceActive.Add(1) }
+
+// DecMetadataCoalesceActive marks one native Plex batch complete.
+func (m *Metrics) DecMetadataCoalesceActive() { decrementGauge(&m.metadataCoalesceActive) }
 
 // ObserveResolverLatency records one MediaVault direct-link lookup without
 // attaching request, client, Part, or URL labels.
@@ -317,33 +494,55 @@ func (m *Metrics) Snapshot() Snapshot {
 	redirectTotal, redirectSamples, redirectLast, redirectMax := m.redirectLatency.snapshot()
 	mediaInfoTotal, mediaInfoSamples, mediaInfoLast, mediaInfoMax := m.mediaInfoProbeLatency.snapshot()
 	return Snapshot{
-		PlexRequestsTotal: m.plexRequestsTotal.Load(),
-		CloudPartHits:     m.cloudPartHits.Load(),
-		CloudPartMisses:   m.cloudPartMisses.Load(),
-		RedirectSuccess:   m.redirectSuccess.Load(),
-		RedirectFailure:   m.redirectFailure.Load(),
-		PlexFallbackTotal: m.plexFallbackTotal.Load(),
-		ActiveRequests:    m.activeRequests.Load(),
+		PlexRequestsTotal:                  m.plexRequestsTotal.Load(),
+		CloudPartHits:                      m.cloudPartHits.Load(),
+		CloudPartMisses:                    m.cloudPartMisses.Load(),
+		RedirectSuccess:                    m.redirectSuccess.Load(),
+		RedirectFailure:                    m.redirectFailure.Load(),
+		PlexFallbackTotal:                  m.plexFallbackTotal.Load(),
+		ActiveRequests:                     m.activeRequests.Load(),
+		MetadataAnalysisParamsRemovedTotal: m.metadataAnalysisParamsRemoved.Load(),
 
-		MetadataGuardAdmittedTotal:      m.metadataAdmitted.Load(),
-		MetadataGuardTimeoutsTotal:      m.metadataTimeouts.Load(),
-		MetadataGuardActive:             m.metadataActive.Load(),
-		MetadataGuardQueued:             m.metadataQueued.Load(),
-		MetadataBatchGuardAdmittedTotal: m.metadataBatchAdmitted.Load(),
-		MetadataBatchGuardTimeoutsTotal: m.metadataBatchTimeouts.Load(),
-		MetadataBatchGuardActive:        m.metadataBatchActive.Load(),
-		MetadataBatchGuardQueued:        m.metadataBatchQueued.Load(),
-		MediaInfoCacheHitsTotal:         m.mediaInfoCacheHits.Load(),
-		MediaInfoCacheMissesTotal:       m.mediaInfoCacheMisses.Load(),
-		MediaInfoProbeQueuedTotal:       m.mediaInfoProbeQueued.Load(),
-		MediaInfoProbeSuccessTotal:      m.mediaInfoProbeSuccess.Load(),
-		MediaInfoProbeFailureTotal:      m.mediaInfoProbeFailure.Load(),
-		MediaInfoStoreFailureTotal:      m.mediaInfoStoreFailure.Load(),
-		MediaInfoProbeActive:            m.mediaInfoProbeActive.Load(),
-		MediaInfoEnrichedTotal:          m.mediaInfoEnriched.Load(),
-		MediaInfoFailOpenTotal:          m.mediaInfoFailOpen.Load(),
-		MediaInfoWaitActive:             m.mediaInfoWaitActive.Load(),
-		MediaInfoWaitRejectedTotal:      m.mediaInfoWaitRejected.Load(),
+		MetadataGuardAdmittedTotal:            m.metadataAdmitted.Load(),
+		MetadataGuardTimeoutsTotal:            m.metadataTimeouts.Load(),
+		MetadataGuardActive:                   m.metadataActive.Load(),
+		MetadataGuardQueued:                   m.metadataQueued.Load(),
+		MetadataBatchGuardAdmittedTotal:       m.metadataBatchAdmitted.Load(),
+		MetadataBatchGuardTimeoutsTotal:       m.metadataBatchTimeouts.Load(),
+		MetadataBatchGuardActive:              m.metadataBatchActive.Load(),
+		MetadataBatchGuardQueued:              m.metadataBatchQueued.Load(),
+		MetadataCoalesceOfferedTotal:          m.metadataCoalesceOffered.Load(),
+		MetadataCoalesceBatchesTotal:          m.metadataCoalesceBatches.Load(),
+		MetadataCoalesceItemsTotal:            m.metadataCoalesceItems.Load(),
+		MetadataCoalesceFallbacksTotal:        m.metadataCoalesceFallbacks.Load(),
+		MetadataCoalesceActive:                m.metadataCoalesceActive.Load(),
+		MediaInfoCacheHitsTotal:               m.mediaInfoCacheHits.Load(),
+		MediaInfoCacheMissesTotal:             m.mediaInfoCacheMisses.Load(),
+		MediaInfoProbeOfferedTotal:            m.mediaInfoProbeOffered.Load(),
+		MediaInfoProbeQueuedTotal:             m.mediaInfoProbeQueued.Load(),
+		MediaInfoProbeJoinedTotal:             m.mediaInfoProbeJoined.Load(),
+		MediaInfoProbePromotedTotal:           m.mediaInfoProbePromoted.Load(),
+		MediaInfoProbeDroppedFullTotal:        m.mediaInfoProbeDroppedFull.Load(),
+		MediaInfoProbeDroppedExpiredTotal:     m.mediaInfoProbeDroppedExpired.Load(),
+		MediaInfoProbeSupersededTotal:         m.mediaInfoProbeSuperseded.Load(),
+		MediaInfoProbeSuccessTotal:            m.mediaInfoProbeSuccess.Load(),
+		MediaInfoProbeFailureTotal:            m.mediaInfoProbeFailure.Load(),
+		MediaInfoStoreFailureTotal:            m.mediaInfoStoreFailure.Load(),
+		MediaInfoProbeActive:                  m.mediaInfoProbeActive.Load(),
+		MediaInfoScheduler:                    m.mediaInfoScheduler.snapshot(),
+		MediaInfoEnrichedTotal:                m.mediaInfoEnriched.Load(),
+		MediaInfoFailOpenTotal:                m.mediaInfoFailOpen.Load(),
+		MediaInfoWaitActive:                   m.mediaInfoWaitActive.Load(),
+		MediaInfoWaitRejectedTotal:            m.mediaInfoWaitRejected.Load(),
+		MediaInfoPrewarmTriggeredTotal:        m.mediaInfoPrewarmTriggered.Load(),
+		MediaInfoPrewarmReplacedTotal:         m.mediaInfoPrewarmReplaced.Load(),
+		MediaInfoPrewarmDiscoverySuccessTotal: m.mediaInfoPrewarmDiscoverySuccess.Load(),
+		MediaInfoPrewarmDiscoveryFailureTotal: m.mediaInfoPrewarmDiscoveryFailure.Load(),
+		MediaInfoPrewarmFreshCacheTotal:       m.mediaInfoPrewarmFreshCache.Load(),
+		MediaInfoPrewarmJoinedFlightTotal:     m.mediaInfoPrewarmJoinedFlight.Load(),
+		MediaInfoPrewarmQueuedTotal:           m.mediaInfoPrewarmQueued.Load(),
+		MediaInfoPrewarmRejectedTotal:         m.mediaInfoPrewarmRejected.Load(),
+		MediaInfoPrewarmSkippedTotal:          m.mediaInfoPrewarmSkipped.Load(),
 
 		ResolverLatencyMSTotal: resolverTotal,
 		ResolverLatencySamples: resolverSamples,
@@ -359,6 +558,32 @@ func (m *Metrics) Snapshot() Snapshot {
 		MediaInfoProbeLatencySamples: mediaInfoSamples,
 		MediaInfoProbeLatencyMSLast:  mediaInfoLast,
 		MediaInfoProbeLatencyMSMax:   mediaInfoMax,
+	}
+}
+
+func incrementPriority(counters *[mediaInfoPriorityCount]atomic.Uint64, priority uint8) {
+	if priority < mediaInfoPriorityCount {
+		counters[priority].Add(1)
+	}
+}
+
+func (metrics *schedulerMetrics) snapshot() SchedulerSnapshot {
+	return SchedulerSnapshot{
+		P0: metrics.prioritySnapshot(0),
+		P1: metrics.prioritySnapshot(1),
+		P2: metrics.prioritySnapshot(2),
+	}
+}
+
+func (metrics *schedulerMetrics) prioritySnapshot(priority int) SchedulerPrioritySnapshot {
+	return SchedulerPrioritySnapshot{
+		OfferedTotal:        metrics.offered[priority].Load(),
+		QueuedTotal:         metrics.queued[priority].Load(),
+		JoinedTotal:         metrics.joined[priority].Load(),
+		PromotedTotal:       metrics.promoted[priority].Load(),
+		DroppedFullTotal:    metrics.droppedFull[priority].Load(),
+		DroppedExpiredTotal: metrics.droppedExpired[priority].Load(),
+		SupersededTotal:     metrics.superseded[priority].Load(),
 	}
 }
 

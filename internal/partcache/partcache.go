@@ -12,6 +12,7 @@ import (
 // stamp may vary after a library refresh.
 type PartInfo struct {
 	PartID       string
+	RatingKey    string
 	PlexFilePath string
 	PartKey      string
 	UpdatedAt    time.Time
@@ -60,6 +61,11 @@ func (c *Cache) Put(info PartInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweepIfDue(now)
+	if info.RatingKey == "" {
+		if current, exists := c.entries[info.PartID]; exists && now.Before(current.expiresAt) {
+			info.RatingKey = current.info.RatingKey
+		}
+	}
 	c.entries[info.PartID] = entry{
 		info:      info,
 		expiresAt: now.Add(c.ttl),
