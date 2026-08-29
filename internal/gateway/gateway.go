@@ -38,6 +38,7 @@ type Options struct {
 	CloudExtensions                []string
 	ObserveMaxBytes                int64
 	PartProbeTimeout               time.Duration
+	MetadataAnalysisFilter         bool
 	MetadataGuard                  MetadataGuardOptions
 	MediaInfoEnabled               bool
 	MediaInfoStatus                func() mediainfo.Status
@@ -214,6 +215,7 @@ func New(options Options) http.Handler {
 	// Admission must happen before response buffering so a queued request does
 	// not consume an enrichment slot or bypass projection under client bursts.
 	metadata = newMetadataGuard(options.MetadataGuard, metadata, registry, logger)
+	metadata = newMetadataAnalysisFilter(options.MetadataAnalysisFilter, metadata, registry)
 	mux.Handle("/", metadata)
 
 	withActiveRequests := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

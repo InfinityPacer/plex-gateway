@@ -55,25 +55,26 @@ const (
 // credential for nearby-item discovery and is never mixed into client playback
 // context.
 type Config struct {
-	ListenAddr        string
-	DatabasePath      string
-	PlexURL           *url.URL
-	PlexToken         string
-	MediaVaultURL     *url.URL
-	PathMappings      []pathmap.Mapping
-	CloudExtensions   []string
-	PartTTL           time.Duration
-	ResolverTimeout   time.Duration
-	ObserveMaxBytes   int64
-	PartProbeTimeout  time.Duration
-	MetadataGuard     MetadataGuardConfig
-	MediaInfo         MediaInfoConfig
-	PlaybackVeto      bool
-	LogLevel          string
-	TraceEnabled      bool
-	ReadHeaderTimeout time.Duration
-	IdleTimeout       time.Duration
-	ShutdownTimeout   time.Duration
+	ListenAddr             string
+	DatabasePath           string
+	PlexURL                *url.URL
+	PlexToken              string
+	MediaVaultURL          *url.URL
+	PathMappings           []pathmap.Mapping
+	CloudExtensions        []string
+	PartTTL                time.Duration
+	ResolverTimeout        time.Duration
+	ObserveMaxBytes        int64
+	PartProbeTimeout       time.Duration
+	MetadataAnalysisFilter bool
+	MetadataGuard          MetadataGuardConfig
+	MediaInfo              MediaInfoConfig
+	PlaybackVeto           bool
+	LogLevel               string
+	TraceEnabled           bool
+	ReadHeaderTimeout      time.Duration
+	IdleTimeout            time.Duration
+	ShutdownTimeout        time.Duration
 }
 
 // MediaInfoConfig bounds the optional analysis plane. It is enabled by default
@@ -106,8 +107,8 @@ type MediaInfoConfig struct {
 }
 
 // MetadataGuardConfig bounds detailed metadata fan-out before requests enter
-// Plex. The protection is opt-in because client behavior and Plex capacity vary
-// across deployments.
+// Plex. It remains independently configurable from metadata analysis filtering
+// so operators can validate Plex capacity without restoring file inspection.
 type MetadataGuardConfig struct {
 	Enabled              bool
 	GlobalConcurrency    int
@@ -183,6 +184,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	metadataGuardEnabled, err := envBool("METADATA_GUARD_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	metadataAnalysisFilter, err := envBool("METADATA_ANALYSIS_FILTER_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}
@@ -341,17 +346,18 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		ListenAddr:       listenAddr,
-		DatabasePath:     databasePath,
-		PlexURL:          plexURL,
-		PlexToken:        plexToken,
-		MediaVaultURL:    mediaVaultURL,
-		PathMappings:     pathMappings,
-		CloudExtensions:  cloudExtensions,
-		PartTTL:          partTTL,
-		ResolverTimeout:  resolverTimeout,
-		ObserveMaxBytes:  observeMaxBytes,
-		PartProbeTimeout: partProbeTimeout,
+		ListenAddr:             listenAddr,
+		DatabasePath:           databasePath,
+		PlexURL:                plexURL,
+		PlexToken:              plexToken,
+		MediaVaultURL:          mediaVaultURL,
+		PathMappings:           pathMappings,
+		CloudExtensions:        cloudExtensions,
+		PartTTL:                partTTL,
+		ResolverTimeout:        resolverTimeout,
+		ObserveMaxBytes:        observeMaxBytes,
+		PartProbeTimeout:       partProbeTimeout,
+		MetadataAnalysisFilter: metadataAnalysisFilter,
 		MetadataGuard: MetadataGuardConfig{
 			Enabled:              metadataGuardEnabled,
 			GlobalConcurrency:    metadataGlobal,

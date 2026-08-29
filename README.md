@@ -107,6 +107,7 @@ go run ./cmd/plex-gateway
 | `PART_PROBE_TIMEOUT` | `15s` | 无 body 的 Plex Part 授权 probe 超时时间。 |
 | `CLOUD_EXTENSIONS` | `.strm` | 以逗号分隔的云端控制文件扩展名。 |
 | `TRACE_ENABLED` | `true` | 启用经过脱敏的 Plex 请求顺序追踪。 |
+| `METADATA_ANALYSIS_FILTER_ENABLED` | `true` | 从详细 metadata 读取中移除会触发 Plex 文件分析的 `checkFiles` 和 `asyncAugmentMetadata`。 |
 | `METADATA_GUARD_ENABLED` | `true` | 限制单项详细 metadata 请求进入 Plex 的并发量。 |
 | `METADATA_GUARD_GLOBAL_CONCURRENCY` | `8` | 所有客户端共享的详细 metadata 并发上限。 |
 | `METADATA_GUARD_CLIENT_CONCURRENCY` | `4` | 每个 Plex 客户端标识的详细 metadata 并发上限。 |
@@ -221,6 +222,12 @@ Provider，未命中时再回退 CDN ffprobe。探测失败由 `MEDIAINFO_NEGATI
 Gateway 会在这些单项详细 metadata 请求进入 Plex 前应用全局和单客户端并发上限。
 客户端标识只用于进程内限流，并以摘要形式保存，不会写入日志或 metrics。
 
+`METADATA_ANALYSIS_FILTER_ENABLED` 默认从单项和逗号分隔的详细 metadata 读取中移除
+`checkFiles` 与 `asyncAugmentMetadata`。这两个客户端控制参数会要求 Plex 检查媒体文件；
+对没有真实视频文件可分析的 STRM 项目，突发请求可能反复启动 Plex Media Scanner。
+过滤器保留其他 query 的原始编码，不修改 Header、响应或 Plex 数据库。Plex 的库扫描
+仍负责本地媒体文件的新鲜度，该开关也可以独立关闭用于兼容性回归。
+
 该保护不处理媒体库列表、时间线、观看状态、播放决策、`/library/parts` 或其他 Plex
 路径。请求最多排队 `METADATA_GUARD_QUEUE_TIMEOUT`，超时后返回 `429`，不会绕过保护
 继续请求 Plex。此功能不缓存 metadata，也不改变 Plex 响应。
@@ -229,9 +236,8 @@ Gateway 会在这些单项详细 metadata 请求进入 Plex 前应用全局和�
 `GET/HEAD /library/metadata/1,2,...`。批量读取不会占用交互式单项 metadata 的全局或
 单客户端槽位，metadata PUT 等修改请求也不会进入批量池。
 
-当前默认 Guard 为单项全局 8、单客户端 4、批量 3。Plex MediaInfo 写库完成较高覆盖率
-并经过重新压测后，才评估单项全局 16、单客户端 4、批量 3 的候选值。当前版本不新增
-Guard 模式或配置项。
+当前默认 Guard 为单项全局 8、单客户端 4、批量 3。只有在分析参数过滤启用、Scanner
+没有被请求触发并完成重新压测后，才评估提高或关闭单项 Guard。
 
 ## 通过 Plex 发布 Gateway 地址
 
@@ -304,7 +310,8 @@ Gateway 重新执行检查。
 
 - `GET /health` 返回进程健康状态，以及不含媒体身份和凭据的 MediaInfo 缓存、探测队列和邻近媒体预热摘要。
 - `GET /metrics` 返回固定结构的 JSON 计数器，以及 resolver 和完整重定向链路的
-  延迟总计、样本数、最近值和最大值。启用 metadata 保护时还会返回准入、超时、
+  延迟总计、样本数、最近值和最大值。`metadata_analysis_params_removed_total` 记录已过滤
+  的详细 metadata 请求；启用 metadata 保护时还会返回准入、超时、
   活动和排队计数；MediaInfo 调度器另按固定 P0/P1/P2 结构返回准入和丢弃结果。所有指标
   都不包含请求标签或凭据。
 - 其他所有 endpoint 都遵循 [docs/architecture.md](docs/architecture.md) 中说明

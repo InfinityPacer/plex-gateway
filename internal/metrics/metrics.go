@@ -22,6 +22,7 @@ type Metrics struct {
 	redirectFailure                  atomic.Uint64
 	plexFallbackTotal                atomic.Uint64
 	activeRequests                   atomic.Int64
+	metadataAnalysisParamsRemoved    atomic.Uint64
 	metadataAdmitted                 atomic.Uint64
 	metadataTimeouts                 atomic.Uint64
 	metadataActive                   atomic.Int64
@@ -84,13 +85,14 @@ type latencyMetrics struct {
 // Snapshot is the stable JSON representation of the process counters.
 // Counter names match the operational metric names used by the gateway.
 type Snapshot struct {
-	PlexRequestsTotal uint64 `json:"plex_requests_total"`
-	CloudPartHits     uint64 `json:"cloud_part_hits"`
-	CloudPartMisses   uint64 `json:"cloud_part_misses"`
-	RedirectSuccess   uint64 `json:"redirect_success"`
-	RedirectFailure   uint64 `json:"redirect_failure"`
-	PlexFallbackTotal uint64 `json:"plex_fallback_total"`
-	ActiveRequests    int64  `json:"active_requests"`
+	PlexRequestsTotal                  uint64 `json:"plex_requests_total"`
+	CloudPartHits                      uint64 `json:"cloud_part_hits"`
+	CloudPartMisses                    uint64 `json:"cloud_part_misses"`
+	RedirectSuccess                    uint64 `json:"redirect_success"`
+	RedirectFailure                    uint64 `json:"redirect_failure"`
+	PlexFallbackTotal                  uint64 `json:"plex_fallback_total"`
+	ActiveRequests                     int64  `json:"active_requests"`
+	MetadataAnalysisParamsRemovedTotal uint64 `json:"metadata_analysis_params_removed_total"`
 
 	MetadataGuardAdmittedTotal            uint64            `json:"metadata_guard_admitted_total"`
 	MetadataGuardTimeoutsTotal            uint64            `json:"metadata_guard_timeouts_total"`
@@ -197,6 +199,12 @@ func (m *Metrics) IncRedirectFailure() {
 // not complete.
 func (m *Metrics) IncPlexFallback() {
 	m.plexFallbackTotal.Add(1)
+}
+
+// IncMetadataAnalysisParamsRemoved records one metadata request whose
+// on-demand file-analysis controls were removed before proxying to Plex.
+func (m *Metrics) IncMetadataAnalysisParamsRemoved() {
+	m.metadataAnalysisParamsRemoved.Add(1)
 }
 
 // IncMediaInfoCacheHits records an exact key satisfied by L1 or SQLite,
@@ -453,13 +461,14 @@ func (m *Metrics) Snapshot() Snapshot {
 	redirectTotal, redirectSamples, redirectLast, redirectMax := m.redirectLatency.snapshot()
 	mediaInfoTotal, mediaInfoSamples, mediaInfoLast, mediaInfoMax := m.mediaInfoProbeLatency.snapshot()
 	return Snapshot{
-		PlexRequestsTotal: m.plexRequestsTotal.Load(),
-		CloudPartHits:     m.cloudPartHits.Load(),
-		CloudPartMisses:   m.cloudPartMisses.Load(),
-		RedirectSuccess:   m.redirectSuccess.Load(),
-		RedirectFailure:   m.redirectFailure.Load(),
-		PlexFallbackTotal: m.plexFallbackTotal.Load(),
-		ActiveRequests:    m.activeRequests.Load(),
+		PlexRequestsTotal:                  m.plexRequestsTotal.Load(),
+		CloudPartHits:                      m.cloudPartHits.Load(),
+		CloudPartMisses:                    m.cloudPartMisses.Load(),
+		RedirectSuccess:                    m.redirectSuccess.Load(),
+		RedirectFailure:                    m.redirectFailure.Load(),
+		PlexFallbackTotal:                  m.plexFallbackTotal.Load(),
+		ActiveRequests:                     m.activeRequests.Load(),
+		MetadataAnalysisParamsRemovedTotal: m.metadataAnalysisParamsRemoved.Load(),
 
 		MetadataGuardAdmittedTotal:            m.metadataAdmitted.Load(),
 		MetadataGuardTimeoutsTotal:            m.metadataTimeouts.Load(),

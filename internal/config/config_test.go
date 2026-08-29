@@ -24,6 +24,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LISTEN_ADDR", "")
 	t.Setenv("LOG_LEVEL", "")
 	t.Setenv("TRACE_ENABLED", "")
+	t.Setenv("METADATA_ANALYSIS_FILTER_ENABLED", "")
 
 	got, err := Load()
 	if err != nil {
@@ -43,6 +44,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if !got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 8 || got.MetadataGuard.PerClientConcurrency != 4 || !got.MetadataGuard.BatchEnabled || got.MetadataGuard.BatchConcurrency != 3 || got.MetadataGuard.QueueTimeout != 10*time.Second {
 		t.Fatalf("unexpected metadata guard defaults: %#v", got.MetadataGuard)
+	}
+	if !got.MetadataAnalysisFilter {
+		t.Fatal("MetadataAnalysisFilter = false")
 	}
 	if got.DatabasePath != "./data/plex-gateway.db" {
 		t.Fatalf("DatabasePath = %q", got.DatabasePath)
@@ -83,6 +87,7 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	t.Setenv("OBSERVE_MAX_BYTES", "4096")
 	t.Setenv("PART_PROBE_TIMEOUT", "3s")
 	t.Setenv("METADATA_GUARD_ENABLED", "true")
+	t.Setenv("METADATA_ANALYSIS_FILTER_ENABLED", "false")
 	t.Setenv("METADATA_GUARD_GLOBAL_CONCURRENCY", "6")
 	t.Setenv("METADATA_GUARD_CLIENT_CONCURRENCY", "3")
 	t.Setenv("METADATA_GUARD_BATCH_ENABLED", "true")
@@ -130,6 +135,9 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	}
 	if !got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 6 || got.MetadataGuard.PerClientConcurrency != 3 || !got.MetadataGuard.BatchEnabled || got.MetadataGuard.BatchConcurrency != 2 || got.MetadataGuard.QueueTimeout != 5*time.Second {
 		t.Fatalf("metadata guard = %#v", got.MetadataGuard)
+	}
+	if got.MetadataAnalysisFilter {
+		t.Fatal("MetadataAnalysisFilter = true")
 	}
 	if got.DatabasePath != "/app_data/test.db" {
 		t.Fatalf("DatabasePath = %q", got.DatabasePath)

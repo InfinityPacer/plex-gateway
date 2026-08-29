@@ -19,6 +19,7 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 	registry.IncRedirectSuccess()
 	registry.IncRedirectFailure()
 	registry.IncPlexFallback()
+	registry.IncMetadataAnalysisParamsRemoved()
 	registry.IncMetadataGuardAdmitted()
 	registry.IncMetadataGuardTimeouts()
 	registry.IncMetadataGuardActive()
@@ -74,13 +75,14 @@ func TestSnapshotAndJSONHandler(t *testing.T) {
 		t.Fatalf("decode JSON: %v", err)
 	}
 	want := Snapshot{
-		PlexRequestsTotal: 1,
-		CloudPartHits:     1,
-		CloudPartMisses:   1,
-		RedirectSuccess:   1,
-		RedirectFailure:   1,
-		PlexFallbackTotal: 1,
-		ActiveRequests:    1,
+		PlexRequestsTotal:                  1,
+		CloudPartHits:                      1,
+		CloudPartMisses:                    1,
+		RedirectSuccess:                    1,
+		RedirectFailure:                    1,
+		PlexFallbackTotal:                  1,
+		ActiveRequests:                     1,
+		MetadataAnalysisParamsRemovedTotal: 1,
 
 		MetadataGuardAdmittedTotal:        1,
 		MetadataGuardTimeoutsTotal:        1,
@@ -226,6 +228,7 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 				registry.IncRedirectSuccess()
 				registry.IncRedirectFailure()
 				registry.IncPlexFallback()
+				registry.IncMetadataAnalysisParamsRemoved()
 				registry.IncMetadataGuardAdmitted()
 				registry.IncMetadataGuardTimeouts()
 				registry.IncMetadataGuardActive()
@@ -279,6 +282,7 @@ func TestCountersAreSafeForConcurrentUpdates(t *testing.T) {
 	got := registry.Snapshot()
 	if got.PlexRequestsTotal != want || got.CloudPartHits != want || got.CloudPartMisses != want ||
 		got.RedirectSuccess != want || got.RedirectFailure != want || got.PlexFallbackTotal != want || got.ActiveRequests != 0 ||
+		got.MetadataAnalysisParamsRemovedTotal != want ||
 		got.MetadataGuardAdmittedTotal != want || got.MetadataGuardTimeoutsTotal != want ||
 		got.MetadataGuardActive != 0 || got.MetadataGuardQueued != 0 ||
 		got.MetadataBatchGuardAdmittedTotal != want || got.MetadataBatchGuardTimeoutsTotal != want ||

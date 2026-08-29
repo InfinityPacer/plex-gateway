@@ -67,6 +67,43 @@ func TestTransparentProxyPreservesRequestAndResponse(t *testing.T) {
 	}
 }
 
+func TestMetadataAnalysisFilterIsAppliedBeforePlexProxy(t *testing.T) {
+	registry := metrics.New()
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.URL.RawQuery; got != "X-Plex-Token=a%2Bb&includeMarkers=1" {
+			t.Fatalf("upstream query = %q", got)
+		}
+		if got := request.Header.Get("X-Plex-Client-Identifier"); got != "client-id" {
+			t.Fatalf("client identifier = %q", got)
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Options{
+		Upstream:               upstreamURL,
+		Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Tracer:                 trace.New(false, nil),
+		Metrics:                registry,
+		MetadataAnalysisFilter: true,
+	})
+	request := httptest.NewRequest(http.MethodGet, "/library/metadata/42?checkFiles=1&X-Plex-Token=a%2Bb&asyncAugmentMetadata=1&includeMarkers=1", nil)
+	request.Header.Set("X-Plex-Client-Identifier", "client-id")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if got := registry.Snapshot().MetadataAnalysisParamsRemovedTotal; got != 1 {
+		t.Fatalf("removed total = %d, want 1", got)
+	}
+}
+
 func TestHealthDoesNotReachPlex(t *testing.T) {
 	reached := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {

@@ -213,6 +213,13 @@ belong to workers. Background synchronization identified by `-Library` plus
 `skipRefresh` remains cache-only and cannot populate P2. Queue state is not
 persisted and is discarded on cache reset, shutdown, or process restart.
 
+Detailed numeric metadata reads pass through an independent analysis-parameter
+filter before admission control. When enabled, it removes only `checkFiles` and
+`asyncAugmentMetadata`, preserving all retained raw query segments and leaving
+headers and responses untouched. This prevents browse bursts over STRM entries
+from asking Plex to start file scanners. The filter and concurrency guard have
+separate switches so capacity tests never need to restore on-demand analysis.
+
 `/metrics` keeps aggregate scheduler counters and a fixed, label-free P0/P1/P2
 breakdown for offers, admissions, joins, promotions, capacity drops, expiry, and
 fingerprint supersession. `/health` reports the current queue depth for each
