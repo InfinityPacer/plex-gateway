@@ -154,10 +154,11 @@ func (m *Metrics) IncPlexFallback() {
 	m.plexFallbackTotal.Add(1)
 }
 
-// IncMediaInfoCacheHits records a fresh L1 result.
+// IncMediaInfoCacheHits records an exact key satisfied by L1 or SQLite,
+// including a retained stale result returned while refresh runs separately.
 func (m *Metrics) IncMediaInfoCacheHits() { m.mediaInfoCacheHits.Add(1) }
 
-// IncMediaInfoCacheMisses records an exact key not satisfied by L1.
+// IncMediaInfoCacheMisses records an exact key not satisfied by L1 or SQLite.
 func (m *Metrics) IncMediaInfoCacheMisses() { m.mediaInfoCacheMisses.Add(1) }
 
 // IncMediaInfoProbeQueued records a newly scheduled singleflight job.

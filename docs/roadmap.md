@@ -81,8 +81,7 @@ Gateway fallback while preserving the broader lifecycle design:
 1. use L1 and SQLite for single-instance fallback storage;
 2. accept optional `PLEX_TOKEN` from an ignored deployment `app.env` for
    nearby-item discovery; current-item prewarming remains token-independent;
-3. evaluate bounded remote `ffprobe`, with an initial `5s` cold metadata wait
-   ceiling based on the current sample;
+3. use bounded remote `ffprobe` with a default `5s` cold metadata wait ceiling;
 4. support exact current-Part analysis and a configurable nearby-item window
    after a cloud redirect is ready, with immediate current-item submission and
    rate-limited background neighbors, without blocking decision, Part,
