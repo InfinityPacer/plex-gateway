@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	defaultMetadataCoalesceWindow        = 3 * time.Millisecond
+	defaultMetadataCoalesceWindow        = 20 * time.Millisecond
 	defaultMetadataCoalesceMaxItems      = 32
 	defaultMetadataCoalesceTimeout       = 5 * time.Second
 	defaultMetadataCoalesceResponseLimit = 8 << 20
@@ -29,7 +29,7 @@ const (
 	defaultMetadataCoalesceMaxWaiters    = 128
 	defaultMetadataCoalesceCooldown      = time.Second
 	maximumMetadataCoalesceWindow        = 100 * time.Millisecond
-	maximumMetadataCoalesceItems         = 64
+	maximumMetadataCoalesceItems         = 32
 )
 
 // MetadataCoalesceOptions controls a bounded aggregation window for equivalent

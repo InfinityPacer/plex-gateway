@@ -43,13 +43,13 @@ func TestLoadDefaults(t *testing.T) {
 	if !got.TraceEnabled {
 		t.Fatal("TraceEnabled = false")
 	}
-	if !got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 8 || got.MetadataGuard.PerClientConcurrency != 4 || !got.MetadataGuard.BatchEnabled || got.MetadataGuard.BatchConcurrency != 3 || got.MetadataGuard.QueueTimeout != 10*time.Second {
+	if !got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 16 || got.MetadataGuard.PerClientConcurrency != 16 || !got.MetadataGuard.BatchEnabled || got.MetadataGuard.BatchConcurrency != 4 || got.MetadataGuard.QueueTimeout != 10*time.Second {
 		t.Fatalf("unexpected metadata guard defaults: %#v", got.MetadataGuard)
 	}
 	if !got.MetadataAnalysisFilter {
 		t.Fatal("MetadataAnalysisFilter = false")
 	}
-	if !got.MetadataCoalesce.Enabled || got.MetadataCoalesce.Window != 3*time.Millisecond || got.MetadataCoalesce.MaxItems != 32 || got.MetadataCoalesce.Timeout != 5*time.Second {
+	if !got.MetadataCoalesce.Enabled || got.MetadataCoalesce.Window != 20*time.Millisecond || got.MetadataCoalesce.MaxItems != 32 || got.MetadataCoalesce.Timeout != 5*time.Second {
 		t.Fatalf("unexpected metadata coalesce defaults: %#v", got.MetadataCoalesce)
 	}
 	if got.DatabasePath != "./data/plex-gateway.db" {
@@ -207,7 +207,7 @@ func TestLoadRejectsUnsafeMetadataCoalesceBounds(t *testing.T) {
 	}{
 		{name: "window", env: "METADATA_COALESCE_WINDOW", value: "101ms"},
 		{name: "too_few_items", env: "METADATA_COALESCE_MAX_ITEMS", value: "1"},
-		{name: "items", env: "METADATA_COALESCE_MAX_ITEMS", value: "65"},
+		{name: "items", env: "METADATA_COALESCE_MAX_ITEMS", value: "33"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -603,8 +603,8 @@ Gateway 应负责：
 - 对所有未知和已知项目的详细 metadata 请求执行通用有界准入，保护冷缓存和首次浏览；
 - 对认证范围、完整 query、客户端 Header、内容协商和远端身份一致的单项读取做短窗口
   微批，不缓存 metadata，禁止跨 Plex 用户、Token、Cookie 或 Authorization 权限域复用；
-- 过载时只对非关键详细 metadata 返回合规的缓存响应或明确 `429/503`，不能 fail-open
-  绕过保护；时间线、观看状态和本地播放请求不进入该限流池；
+- 过载时只对非关键详细 metadata 返回明确 `429`，不使用未验证的缓存响应，也不能
+  fail-open 绕过保护；时间线、观看状态和本地播放请求不进入该限流池；
 - 云项目定向策略只能使用独立、稳定、只读的分类索引，不能依赖 MoviePilot 私有表，
   也不能只依赖 Plex 响应返回后才建立的 PartCache；
 - 本地播放和未纳入保护策略的未知 endpoint 继续透明代理；详细 metadata 过载是明确例外；
@@ -617,8 +617,11 @@ Gateway 不应负责：
 - 自动把借用分享晋升为自有副本；
 - 扫描 MoviePilot 下载历史；
 - 维护做种或本地清理状态；
-- 在播放 decision、Part、universal start 或 302 请求中执行 ffprobe 或数据库访问；
+- 在 Part、universal start 或 302 请求中执行 ffprobe 或数据库访问；
 - 写 Plex 数据库。
+
+Playback decision 是请求路径中唯一允许使用分析面的例外。它只能在配置的冷等待预算内
+读取持久记录或等待一次有界 P0 探测；超时或失败必须保留 Plex 原始决策。
 
 Gateway analysis worker 当前只执行精确当前 Part 和可配置邻近窗口探测。单季、整剧和 STRM
 目录探测保留为后续有界批量能力；这些任务不拥有下载、做种或清理决策，也不能由一次
@@ -748,7 +751,7 @@ provider、目标 backing、decision revision、人工确认或策略依据，�
 ### Phase B：Gateway 请求保护
 
 - 对详细 metadata 建立通用 admission control；
-- 使用认证隔离的 singleflight 和短期缓存；
+- 使用认证隔离的精确去重和短窗口 Plex 原生 metadata 微批，不缓存 metadata；
 - 明确禁止缓存的响应和过载返回策略；
 - 建立独立只读的云项目分类索引契约；
 - 完成 Apple TV 大媒体库浏览压测。
@@ -770,7 +773,7 @@ provider、目标 backing、decision revision、人工确认或策略依据，�
 - 优先实现 Gateway L1、SQLite、受限 ffprobe、`PLEX_TOKEN` 邻近发现和 response
   enrichment；
 - 实现精确当前 Part 和重定向就绪后的双向邻近窗口，以及优先级、限速提交、singleflight、
-  推测任务抢占、负缓存和已知良好保护；
+  排队提升、容量让位、负缓存和已知良好保护；P0 不打断已经运行的探测；
 - 将单季、整剧、STRM 目录任务、批任务 checkpoint 和恢复留到后续批量预热能力；
 - 验证 decision 的 `5s` 冷等待候选上限、首次 metadata 完整率和 metadata p50/p95/p99；
 - 验证 Part、universal start 和 302 不执行分析 I/O，单项 metadata 冷 miss 立即透传且

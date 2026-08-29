@@ -12,10 +12,10 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
 
 - All requests are transparently proxied to Plex by default.
 - Equivalent authenticated single-item metadata `GET` requests can be combined
-  within a three-millisecond window into Plex's native comma-separated endpoint.
+  within a 20-millisecond window into Plex's native comma-separated endpoint.
   A group requires identical raw query, complete request headers, representation
   context, host, protocol, and remote identity. The default batch contains at
-  most 32 unique rating keys, with 64 available for controlled A/B, and is split
+  most 32 unique rating keys and is split
   by rating key into individual XML, JSON, or gzip responses. This is a bounded,
   non-caching protocol transform. `HEAD`,
   Range, conditional requests, bodies, ambiguous credentials, and every
@@ -27,8 +27,8 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   pool. A batch failure issues at most one fallback per unique rating key through
   the single-item pool and fans the result out to duplicate callers. Different
   keys remain bounded by the Guard, and batching is temporarily suspended for
-  the same request context. The current Guard defaults are global 8, per-client
-  4, and batch 3.
+  the same request context. The current Guard defaults are global 16, per-client
+  16, and batch 4.
 - The metadata chain is analysis filter, per-item MediaInfo enrichment,
   coalescer, Guard, and Plex. This ordering lets each original request preserve
   its response projection while one synthesized batch consumes one batch Guard
@@ -56,11 +56,12 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   only when its `Location` matches the validated local STRM control target.
 - A Plex universal playback decision is adapted only after an authenticated
   metadata read identifies the exact `Media[mediaIndex].Part[partIndex]` as a
-  mapped STRM Part. The gateway changes only `directPlay=1` and
-  `directStream=1`; all client profile parameters, credentials, headers, and
-  Plex's response remain intact. The complete XML or JSON decision response is
-  observed without rewriting it; a start grant exists only when the same Part
-  is explicitly marked `directplay`.
+  mapped STRM Part. The gateway changes only `directPlay=1`, `directStream=1`,
+  and `hasMDE=1`; all unrelated client profile parameters, credentials, and
+  headers remain intact. Plex produces the complete XML or JSON decision
+  response. The gateway may then apply the same fail-open, whitelisted technical
+  MediaInfo projection used for metadata responses. A start grant exists only
+  when Plex explicitly marks the same Part `directplay`.
 - After Plex accepts the exact STRM Part for Direct Play, an optional playback
   veto may inspect the fresh MediaInfo record already obtained for response
   enrichment. The built-in veto covers only Plex for Apple TV on tvOS with
@@ -287,8 +288,9 @@ only files uploaded through MediaVault and cannot be consumed by the gateway
 without a stable interface. The gateway does not inspect MediaVault internals,
 mount its private cache, or duplicate those features in the playback plane.
 
-MediaInfo Phase D begins with a provider boundary, L1 and SQLite persistence,
-bounded remote probing, proactive prewarming, and metadata response enrichment.
+The MediaInfo fallback begins with a provider boundary, L1 and SQLite
+persistence, bounded remote probing, proactive prewarming, and metadata response
+enrichment.
 A provider revision separates records whenever normalized probe semantics
 change, preventing an old interpretation from being projected after an upgrade.
 A successful ffprobe result that omits format size may perform one same-UA

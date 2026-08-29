@@ -9,25 +9,14 @@
 
 ## [未发布]
 
+## [0.1.2] - 2026-08-30
+
 ### 新增
 
 - 增加通用 Plex metadata 微批。认证、查询和客户端上下文完全一致的单项 GET 默认可合并为
   最多 32 项的 Plex 原生 batch，并按 ratingKey 拆回 XML、JSON 或 gzip 单项响应。
-
-### 变更
-
-- metadata 分析过滤器只移除 `asyncAugmentMetadata`，继续透传 `checkFiles`，保留 Plex
-  `Part.accessible` 与 `Part.exists` 语义。
-
-### 修复
-
-- batch 异常时每个唯一 ratingKey 只通过既有单项 Guard 回退一次，重复调用者共享结果，
-  并短暂熔断同组微批；取消的请求不会回退，全部调用者取消后终止上游 batch。
-
-## [0.1.2] - 2026-08-29
-
-### 新增
-
+- 脱敏 trace 增加批次条目数，以及聚合等待、Guard 等待、Plex、拆分和分发阶段耗时，
+  不记录 ratingKey、请求身份或认证信息。
 - 增加 MediaInfo L1 LRU 与 SQLite 持久缓存、受限远程 ffprobe 和单项 Plex metadata
   响应增强。浏览冷 miss 立即保持原响应并在后台探测，实际播放 decision 使用独立冷等待。
 - 云端重定向就绪后将当前 Part 投递 P0，并可使用独立 Plex 管理 Token 按默认前 2、后 3
@@ -51,16 +40,20 @@
 
 ### 变更
 
+- metadata 分析过滤器只移除 `asyncAugmentMetadata`，继续透传 `checkFiles`，保留 Plex
+  `Part.accessible` 与 `Part.exists` 语义。
+- 根据 NAS 负载测试和 Apple TV 长剧集 A/B，将 Metadata Guard 默认值调整为单项全局 16、
+  单客户端 16、批量 4；微批窗口调整为 20ms，并将单批上限固定为 32。
 - 本版本只将兜底 MediaInfo 持久化到 Gateway SQLite。Plex DB 生产写入保留到下一阶段，
   待覆盖率、兼容性、备份和回滚方案完成评估后再决定采用 API 或数据库辅助方案。
 
 ### 修复
 
+- batch 异常时每个唯一 ratingKey 只通过既有单项 Guard 回退一次，重复调用者共享结果，
+  并短暂熔断同组微批；取消的请求不会回退，全部调用者取消后终止上游 batch。
 - 单项 metadata 浏览冷 miss 立即透传 Plex，并只进行非阻塞、精确去重的 P2 内存投递；
   请求路径不再同步查询 SQLite、等待 MediaVault/CDN 或持有 5 秒冷探测窗口。后台 worker
   先检查 SQLite，只有真实 miss 才进入远程启动限速。
-- 将单项 metadata Guard 的默认值固定为全局 8、单客户端 4、批量 3。Plex MediaInfo
-  写库获得较高覆盖率并完成重测后，再评估全局 16、单客户端 4、批量 3 的候选值。
 
 ## [0.1.1] - 2026-08-28
 

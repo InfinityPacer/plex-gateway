@@ -9,30 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-30
+
 ### Added
 
 - Added general Plex metadata micro-batching. Single-item GET requests with
   identical authentication, query, and client context can share a native Plex
-  batch of 32 items by default and are split back into XML, JSON, or gzip
-  responses by rating key.
-
-### Changed
-
-- The metadata analysis filter now removes only `asyncAugmentMetadata` and
-  preserves `checkFiles`, retaining Plex `Part.accessible` and `Part.exists`
-  semantics.
-
-### Fixed
-
-- Failed batches issue at most one request per unique rating key through the
-  existing single-item Guard, fan out that result to duplicate callers, and
-  temporarily suspend batching for that request group. Canceled callers do not
-  fall back, and canceling all callers terminates the upstream batch.
-
-## [0.1.2] - 2026-08-29
-
-### Added
-
+  batch of up to 32 items and are split back into XML, JSON, or gzip responses
+  by rating key.
+- Sanitized traces now report batch cardinality and stage timing for collection,
+  Guard admission, Plex, splitting, and dispatch without rating keys, request
+  identity, or authentication data.
 - Added bounded remote ffprobe, an L1 LRU plus SQLite MediaInfo cache, and
   single-item Plex metadata response enrichment. Browsing misses preserve the
   original response immediately while only playback decisions use a cold wait.
@@ -69,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The metadata analysis filter now removes only `asyncAugmentMetadata` and
+  preserves `checkFiles`, retaining Plex `Part.accessible` and `Part.exists`
+  semantics.
+- NAS load tests and real Apple TV long-season A/B set the Metadata Guard
+  defaults to global 16, per-client 16, and batch 4. The micro-batch window is
+  20ms and the batch size is capped at 32.
 - This release persists fallback MediaInfo only in the gateway's SQLite store.
   Production Plex DB writes remain a next-stage evaluation after coverage,
   compatibility, backup, and rollback requirements are measured; the final API
@@ -76,14 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Failed batches issue at most one request per unique rating key through the
+  existing single-item Guard, fan out that result to duplicate callers, and
+  temporarily suspend batching for that request group. Canceled callers do not
+  fall back, and canceling all callers terminates the upstream batch.
 - Single-item metadata browsing misses now preserve the Plex response
   immediately and only perform a non-blocking, exact-key P2 memory offer. The
   request path no longer reads SQLite synchronously, waits for MediaVault/CDN,
   or holds a five-second cold-probe window. Workers check SQLite first, so only
   genuine misses enter the remote-start limiter.
-- Set the Metadata Guard defaults to global 8, per-client 4, and batch 3. After
-  Plex MediaInfo writes provide high coverage and the resulting load is retested,
-  global 16, per-client 4, and batch 3 remains a candidate for evaluation.
 
 ## [0.1.1] - 2026-08-28
 

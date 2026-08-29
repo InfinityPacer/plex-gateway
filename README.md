@@ -20,8 +20,8 @@ Part。Part 缓存未命中时，请求会原样发送给 Plex；Gateway 不会�
 推断媒体是否为 STRM。
 
 部分官方和第三方客户端会先发起通用播放决策，而不是直接请求 Part。对于已认证且
-明确选中的 STRM Part，Gateway 会在保留完整客户端 profile 和 Plex 自身决策响应的
-前提下，请求 Plex 将该播放选择为 Direct Play。只有当该完整响应明确将同一个
+明确选中的 STRM Part，Gateway 会在保留完整客户端 profile、并由 Plex 生成完整决策
+响应的前提下，请求 Plex 将该播放选择为 Direct Play。只有当该完整响应明确将同一个
 Part 标记为 Direct Play 后，Gateway 才会创建短期授权。如果客户端随后请求通用的
 `start`、`start.mpd` 或 `start.m3u8`，Gateway 会要求该播放会话及精确 Media/Part
 对应的授权，再次为 Part 请求授权，并返回同一个 CDN 重定向，而不会启动 Plex
@@ -109,14 +109,14 @@ go run ./cmd/plex-gateway
 | `TRACE_ENABLED` | `true` | 启用经过脱敏的 Plex 请求顺序追踪。 |
 | `METADATA_ANALYSIS_FILTER_ENABLED` | `true` | 从详细 metadata 读取中移除会触发 Plex 后台分析的 `asyncAugmentMetadata`；保留 `checkFiles`。 |
 | `METADATA_GUARD_ENABLED` | `true` | 限制单项详细 metadata 请求进入 Plex 的并发量。 |
-| `METADATA_GUARD_GLOBAL_CONCURRENCY` | `8` | 所有客户端共享的详细 metadata 并发上限。 |
-| `METADATA_GUARD_CLIENT_CONCURRENCY` | `4` | 每个 Plex 客户端标识的详细 metadata 并发上限。 |
+| `METADATA_GUARD_GLOBAL_CONCURRENCY` | `16` | 所有客户端共享的详细 metadata 并发上限。 |
+| `METADATA_GUARD_CLIENT_CONCURRENCY` | `16` | 每个 Plex 客户端标识的详细 metadata 并发上限。 |
 | `METADATA_GUARD_BATCH_ENABLED` | `true` | 限制逗号分隔的批量 metadata 读取进入 Plex 的并发量。 |
-| `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | 所有客户端共享的批量 metadata 并发上限。 |
+| `METADATA_GUARD_BATCH_CONCURRENCY` | `4` | 所有客户端共享的批量 metadata 并发上限。 |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | 等待准入的最长时间，超时返回 `429`。 |
 | `METADATA_COALESCE_ENABLED` | `true` | 将认证和表示上下文完全一致的单项 metadata GET 合并为 Plex 原生 batch。 |
-| `METADATA_COALESCE_WINDOW` | `3ms` | 同组请求的微批聚合窗口，最大 `100ms`。 |
-| `METADATA_COALESCE_MAX_ITEMS` | `32` | 单个合成 batch 的唯一 ratingKey 上限，允许 `2-64`。 |
+| `METADATA_COALESCE_WINDOW` | `20ms` | 同组请求的微批聚合窗口，最大 `100ms`。 |
+| `METADATA_COALESCE_MAX_ITEMS` | `32` | 单个合成 batch 的唯一 ratingKey 上限，允许 `2-32`。 |
 | `METADATA_COALESCE_TIMEOUT` | `5s` | 合成 batch 请求 Plex 并完成拆分的总超时。 |
 | `MEDIAINFO_ENABLED` | `true` | 启用 MediaInfo 缓存、受限探测和单项 metadata 增强；初始化失败不影响透明代理。 |
 | `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite 持久数据库路径；容器镜像默认使用 `/app_data/plex-gateway.db`。 |
@@ -228,9 +228,10 @@ Gateway 会在这些单项详细 metadata 请求进入 Plex 前应用全局和�
 
 `METADATA_COALESCE_ENABLED` 默认将短窗口内认证、原始 query、完整客户端 Header、内容
 协商和远端身份完全一致的单项 `GET` 合成为 Plex 原生逗号 batch，默认最多包含 `32` 个唯一
-ratingKey，可配置上限为 `64`。Gateway 按 ratingKey 拆分 XML 或 JSON 响应，并为每个原请求重新计算
-`Content-Length`；gzip 会解压、拆分后重新编码。相同 ratingKey 的重复请求共享同一 batch
-结果。Token、Cookie、Authorization、客户端 profile、query 或身份不同的请求绝不合批。
+ratingKey，可配置上限同样为 `32`。Gateway 按 ratingKey 拆分 XML 或 JSON 响应，并为每个
+原请求重新计算 `Content-Length`；gzip 会解压、拆分后重新编码。相同 ratingKey 的重复请求
+共享同一 batch 结果。Token、Cookie、Authorization、客户端 profile、query 或身份不同的
+请求绝不合批。
 
 微批不缓存 metadata，也不处理 `HEAD`、Range、条件请求、请求体、播放路径、图片、时间线
 或写请求。Plex batch 超时、返回非 200、结构异常、缺项、编码不支持或超过 body 上限时，
@@ -250,7 +251,7 @@ Guard 并发与排队上限保护。同组请求会短暂停止再次合批，�
 `GET/HEAD /library/metadata/1,2,...`。批量读取不会占用交互式单项 metadata 的全局或
 单客户端槽位，metadata PUT 等修改请求也不会进入批量池。
 
-当前默认 Guard 为单项全局 8、单客户端 4、批量 3。合成 batch 使用批量池，异常回退使用
+当前默认 Guard 为单项全局 16、单客户端 16、批量 4。合成 batch 使用批量池，异常回退使用
 单项全局与单客户端池。提高或关闭 Guard 必须以候选版本的真实客户端压测为依据。
 
 ## 通过 Plex 发布 Gateway 地址

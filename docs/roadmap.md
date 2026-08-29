@@ -69,7 +69,7 @@ Supporting that path would require a media proxy, packaging service, or client
 modification, each outside the redirect-only data plane. Local Plex Web media,
 manifest segments, and every genuine transcode request remain Plex-owned.
 
-## MediaInfo Phase D
+## MediaInfo fallback and projection
 
 MediaInfo is not a dependency of redirect playback. Eligible single-item
 metadata and Direct Play decision responses can be enriched from the fail-open
@@ -115,7 +115,7 @@ The performance matrix in [performance-matrix.md](performance-matrix.md) is a
 delivery gate for this work. Local media must remain transparent, Part and
 universal-start routes must remain free of analysis I/O, an L1 hit must not
 block on SQLite, and one decision may consume at most one configured cold-wait
-budget. The current Guard defaults are global 8, per-client 4, and batch 3.
+budget. The current Guard defaults are global 16, per-client 16, and batch 4.
 Equivalent single-item metadata GET requests may use the bounded native Plex
 micro-batch adapter before Guard admission; invalid batches return through the
 single-item limits. Guard changes remain evidence-driven rather than tied to a

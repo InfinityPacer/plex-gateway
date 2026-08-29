@@ -25,10 +25,11 @@ to Plex unchanged; the gateway never reads a media prefix to infer STRM state.
 
 Some official and third-party clients begin with a universal playback decision
 instead of requesting the Part directly. For an authenticated, exactly selected
-STRM Part, the gateway opts that request into Plex Direct Play while preserving
-the complete client profile and Plex's own decision response. A short-lived
-grant is created only after that complete response explicitly marks the same
-Part as Direct Play. If the client then requests universal `start`,
+STRM Part, the gateway preserves the complete client profile and asks Plex to
+produce its full Direct Play decision response. The response may then receive
+the same fail-open technical MediaInfo projection used for metadata. A
+short-lived grant is created only after Plex explicitly marks the same Part as
+Direct Play. If the client then requests universal `start`,
 `start.mpd`, or `start.m3u8`, the gateway requires that grant from the same
 playback session and exact Media/Part, authorizes the Part again, and returns
 the same CDN redirect without starting Plex Transcoder or synthesizing Plex
@@ -123,11 +124,15 @@ Important environment variables:
 | `CLOUD_EXTENSIONS` | `.strm` | Comma-separated cloud control-file extensions. |
 | `TRACE_ENABLED` | `true` | Enable sanitized Plex request-order tracing. |
 | `METADATA_GUARD_ENABLED` | `true` | Limit single-item detailed metadata requests before they enter Plex. |
-| `METADATA_GUARD_GLOBAL_CONCURRENCY` | `8` | Shared detailed metadata concurrency limit across all clients. |
-| `METADATA_GUARD_CLIENT_CONCURRENCY` | `4` | Detailed metadata concurrency limit for each Plex client identifier. |
+| `METADATA_GUARD_GLOBAL_CONCURRENCY` | `16` | Shared detailed metadata concurrency limit across all clients. |
+| `METADATA_GUARD_CLIENT_CONCURRENCY` | `16` | Detailed metadata concurrency limit for each Plex client identifier. |
 | `METADATA_GUARD_BATCH_ENABLED` | `true` | Limit comma-separated batch metadata reads before they enter Plex. |
-| `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | Shared batch metadata concurrency limit across all clients. |
+| `METADATA_GUARD_BATCH_CONCURRENCY` | `4` | Shared batch metadata concurrency limit across all clients. |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | Maximum admission wait before returning `429`. |
+| `METADATA_COALESCE_ENABLED` | `true` | Combine equivalent authenticated single-item metadata GETs into native Plex batches. |
+| `METADATA_COALESCE_WINDOW` | `20ms` | Micro-batch collection window, up to `100ms`. |
+| `METADATA_COALESCE_MAX_ITEMS` | `32` | Unique ratingKey limit per synthesized batch, from `2` to `32`. |
+| `METADATA_COALESCE_TIMEOUT` | `5s` | Total timeout for the Plex batch request and response split. |
 | `MEDIAINFO_ENABLED` | `true` | Enable the MediaInfo cache, bounded probes, and single-item metadata enrichment; initialization failures do not affect transparent proxying. |
 | `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite database path; the container image defaults to `/app_data/plex-gateway.db`. |
 | `MEDIAINFO_PLAYBACK_QUEUE_SIZE` | `16` | Independent P0 queue capacity for actual playback work. |
@@ -281,10 +286,10 @@ Batch reads do not consume the global or per-client slots reserved for
 interactive single-item metadata requests, and metadata mutations do not enter
 the batch pool.
 
-The current Guard defaults are global 8 for single-item metadata, per-client 4,
-and batch 3. After Plex MediaInfo writes provide high coverage and the resulting
-load is retested, global 16, per-client 4, and batch 3 may be evaluated. This
-release adds no Guard mode or configuration item.
+The current Guard defaults are global 16 for single-item metadata, per-client
+16, and batch 4. These values were selected from bounded NAS load tests and
+real Apple TV long-season traces; raising them remains an evidence-driven
+operator decision.
 
 ## Advertise the gateway through Plex
 
