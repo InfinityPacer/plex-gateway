@@ -207,8 +207,8 @@ func New(options Options) http.Handler {
 	mux.Handle("HEAD /library/parts/{partID}/{rest...}", partPlayback)
 	metadata := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
 		Service: options.MediaInfoService, Mapper: options.PathMapper, Resolver: options.Resolver,
-		CloudExtensions: options.CloudExtensions, ColdWait: options.MediaInfoColdWait,
-		ResponseLimit: options.MediaInfoResponseMaxBytes, Concurrency: options.MediaInfoEnrichmentConcurrency,
+		CloudExtensions: options.CloudExtensions,
+		ResponseLimit:   options.MediaInfoResponseMaxBytes, Concurrency: options.MediaInfoEnrichmentConcurrency,
 		Metrics: registry,
 	}, plex)
 	// Admission must happen before response buffering so a queued request does

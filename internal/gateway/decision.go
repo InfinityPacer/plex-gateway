@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	defaultDecisionMetadataMaxBytes = 4 << 20
-	defaultDecisionGrantTTL         = 5 * time.Minute
-	defaultDecisionGrantLimit       = 4096
+	defaultDecisionMetadataMaxBytes  = 4 << 20
+	defaultDecisionGrantTTL          = 5 * time.Minute
+	defaultDecisionGrantLimit        = 4096
+	defaultDecisionMediaInfoColdWait = 5 * time.Second
 )
 
 // decisionHandler opts an eligible STRM Part into Plex Direct Play while
@@ -129,7 +130,7 @@ func (h *decisionHandler) mediaInfoForDecision(request *http.Request, part playb
 	}
 	wait := h.coldWait
 	if wait <= 0 {
-		wait = defaultMediaInfoColdWait
+		wait = defaultDecisionMediaInfoColdWait
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), wait)
 	defer cancel()

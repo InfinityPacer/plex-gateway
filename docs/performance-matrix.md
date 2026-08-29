@@ -13,6 +13,8 @@
 - 普通 STRM Part 和 universal start 不等待 MediaInfo，也不执行 veto。
 - L1 命中直接返回，不因本次请求同步读取 SQLite。访问续期可能异步 touch SQLite，
   因此持久化 I/O 不得阻塞热路径。
+- 单项 metadata 冷 miss 只允许内存级 P2 投递并立即返回 Plex 原响应，不同步读取 SQLite、
+  请求 MediaVault 或等待 CDN probe。
 - 一个 universal decision 最多等待一次 `MEDIAINFO_COLD_WAIT`。veto 只复用响应增强已经
   取得的新鲜记录，不增加缓存读取或远程探测。
 - 同一 MediaInfo key 的并发请求必须共享 singleflight。并发数不能突破配置的 worker
@@ -45,6 +47,13 @@
 当前 Metadata Guard 默认值为单项全局 8、单客户端 4、批量 3。单项全局 16、单客户端 4、
 批量 3 只有在 Plex MediaInfo 写库达到较高覆盖率并完成重新压测后才作为候选，不属于当前
 版本的性能承诺。
+
+2026-08-30 的 NAS 阻塞 A/B 将旧候选判定为不可接受：同一冷 metadata 请求直连 Plex
+约 `0.52s`，经旧候选约 `5.15s`，Gateway 热缓存约 `0.15s`。同期实际 CDN ffprobe 平均
+约 `0.54s`、最大约 `0.84s`，且没有 probe 失败。约五秒的增量来自 metadata 请求同步等待
+后台调度窗口并持有 Guard 准入，不是 ffprobe 执行时间。该结果确立了“浏览 miss 立即透传，
+仅实际播放 decision 可使用冷等待预算”的当前门槛；修正版仍需在同一 NAS 和客户端路径
+重新采集端到端分位数。
 
 ## 端到端验收矩阵
 

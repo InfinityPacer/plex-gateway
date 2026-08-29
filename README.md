@@ -117,14 +117,14 @@ go run ./cmd/plex-gateway
 | `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite 持久数据库路径；容器镜像默认使用 `/app_data/plex-gateway.db`。 |
 | `MEDIAINFO_PLAYBACK_QUEUE_SIZE` | `16` | P0 实际播放任务的独立队列容量。 |
 | `MEDIAINFO_NEIGHBOR_QUEUE_SIZE` | `50` | P1 邻近项预热的队列容量。 |
-| `MEDIAINFO_METADATA_QUEUE_SIZE` | `50` | P2 fixed-window metadata miss 的队列容量。 |
+| `MEDIAINFO_METADATA_QUEUE_SIZE` | `50` | 前台 metadata 冷 miss 的 P2 队列容量。 |
 | `MEDIAINFO_PENDING_TTL` | `5m` | P1/P2 未开始任务的保留时间。 |
 | `MEDIAINFO_BACKGROUND_INTERVAL` | `5s` | L1/SQLite miss 后 P1/P2 远程探测的全局最小启动间隔。 |
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.5.1` | 没有活动客户端上下文时，后台探测使用的 fallback User-Agent。 |
-| `MEDIAINFO_COLD_WAIT` | `5s` | 单项 metadata 冷缓存等待上限；超时返回原 Plex 响应，探测继续。 |
+| `MEDIAINFO_COLD_WAIT` | `5s` | 实际播放 decision 的冷缓存等待上限；metadata 浏览冷 miss 不使用该等待。 |
 | `PLAYBACK_VETO_ENABLED` | `false` | 启用实验性 Apple TV Plex Dolby Vision Profile 5 veto；只复用 decision 已取得的新鲜 MediaInfo，不发起额外探测。 |
 | `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | 可以缓冲并尝试增强的单个 Plex metadata 响应上限。 |
-| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | 同时缓冲和等待 MediaInfo 的单项 metadata 响应上限。 |
+| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | 同时缓冲并尝试 L1 投影的单项 metadata 响应上限。 |
 | `MEDIAINFO_PREWARM_BEFORE` | `2` | 当前项之前的邻近媒体预热数量。 |
 | `MEDIAINFO_PREWARM_AFTER` | `3` | 当前项之后的邻近媒体预热数量。 |
 
@@ -170,11 +170,10 @@ Stream 时只补充身份匹配 Stream 的缺失字段，不创建缺少的其�
 阶段评估内容，需先完成覆盖率、兼容性、备份和回滚验证。
 
 L1 热路径直接返回，不会为了本次请求同步读取 SQLite。访问续期可能异步 touch SQLite，
-不会把持久化 I/O 放进请求关键路径。热缓存投影可以并发执行，一次连续的浏览请求突发只
-允许一个请求同步等待远程探测。释放本次同步准入后建立固定 5 秒窗口，窗口内其他冷 miss
-立即返回原始 Plex 响应，拒绝请求不会续期窗口。已准入的探测在请求等待结束后仍可在后台
-完成，并成功写入 L1 和 SQLite。窗口结束后才允许下一个浏览冷探测。播放 decision 保留
-独立的冷探测预算，因此该限制只抑制首屏和季页面的 metadata 请求风暴。
+不会把持久化 I/O 放进请求关键路径。热缓存投影可以并发执行；metadata 浏览冷 miss 立即
+返回原始 Plex 响应，只通过内存投递有界 P2，不等待 SQLite、MediaVault 或 CDN。后台任务
+成功后才写入 L1 和 SQLite。实际播放 decision 保留独立的 P0 冷探测预算，因此技术字段可
+在播放协商时补齐，而首屏和季页面不会被远程分析阻塞。
 
 当 ffprobe 无法返回媒体总大小时，Gateway 会使用与本次 MediaVault 解析和 ffprobe 相同的
 User-Agent 对同一临时直链发送一次 `Range: bytes=0-0`。该请求最多等待 `2s`，只接受包含有效
@@ -185,8 +184,8 @@ User-Agent 对同一临时直链发送一次 `Range: bytes=0-0`。该请求最�
 
 Infuse 等客户端的后台媒体库同步可能逐项请求整个库。带 `skipRefresh` 且产品名以
 `-Library` 结尾的后台同步请求只读取现有 MediaInfo 缓存，不创建冷探测。普通单项访问
-遵循同一个固定冷探测窗口，窗口内的冷 miss 立即返回原始响应，仅非阻塞投递有界 P2
-任务且不会续期；成功的云端 302 和邻近窗口继续按既定边界提交。因此浏览媒体库不会无界
+的冷 miss 也立即返回原始响应，仅非阻塞投递有界 P2；成功的云端 302 和邻近窗口继续按
+既定边界提交。因此浏览媒体库不会无界
 扩散成全库 CDN ffprobe。任何缓存 miss、超时、结构不支持或投影失败都会返回原始 Plex
 response。
 

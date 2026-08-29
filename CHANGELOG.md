@@ -14,14 +14,14 @@
 ### 新增
 
 - 增加 MediaInfo L1 LRU 与 SQLite 持久缓存、受限远程 ffprobe 和单项 Plex metadata
-  响应增强；冷缓存等待超时后保持原响应并在后台完成探测。
+  响应增强。浏览冷 miss 立即保持原响应并在后台探测，实际播放 decision 使用独立冷等待。
 - 云端重定向就绪后将当前 Part 投递 P0，并可使用独立 Plex 管理 Token 按默认前 2、后 3
   的窗口发现并投递 P1 邻近媒体。当前任务只会优先排队，不能抢占正在运行的探测。
   Token 缺失或失效只禁用邻近发现。
 - 增加按客户端隔离的快速切换协调、跨 User-Agent 失败接力，以及缓存命中、加入现有
   任务、新入队和拒绝的预热指标。
-- 使用统一的 P0/P1/P2 MediaInfo 调度器处理实际播放、邻近预热和 fixed-window metadata
-  miss。P1/P2 采用 5 分钟 pending TTL 和全局 5 秒远程启动间隔，P0 使用独立容量。
+- 使用统一的 P0/P1/P2 MediaInfo 调度器处理实际播放、邻近预热和前台 metadata miss。
+  P1/P2 采用 5 分钟 pending TTL 和全局 5 秒远程启动间隔，P0 使用独立容量。
 - 为没有 Stream 的 STRM Part 创建不含 Plex ID 或播放选择状态的描述性视频、音频和
   字幕 Stream，并补充 HDR10、Dolby Vision、bit depth、bitrate、声道和语言等字段。
 - Infuse 风格的后台媒体库同步只读取现有 MediaInfo 缓存，不再因逐项浏览触发全库冷探测。
@@ -41,9 +41,9 @@
 
 ### 修复
 
-- 限制一次连续 metadata 浏览突发最多同步等待一个冷探测。释放本次同步准入后建立固定
-  5 秒窗口，窗口内的其他冷 miss 立即透传 Plex，并可非阻塞投递唯一 P2 任务；这些请求
-  不会续期窗口。后台 worker 先检查 SQLite，只有真实 miss 才进入远程启动限速。
+- 单项 metadata 浏览冷 miss 立即透传 Plex，并只进行非阻塞、精确去重的 P2 内存投递；
+  请求路径不再同步查询 SQLite、等待 MediaVault/CDN 或持有 5 秒冷探测窗口。后台 worker
+  先检查 SQLite，只有真实 miss 才进入远程启动限速。
 - 将单项 metadata Guard 的默认值固定为全局 8、单客户端 4、批量 3。Plex MediaInfo
   写库获得较高覆盖率并完成重测后，再评估全局 16、单客户端 4、批量 3 的候选值。
 

@@ -78,11 +78,9 @@ interactive probe; missing, slow, or failed probes preserve the original Plex
 response. Part and universal-start redirects never wait for MediaInfo. All
 clients use the same projection rules. An L1 hit does not synchronously read
 SQLite for the request, although access renewal may touch SQLite asynchronously.
-One metadata browsing burst permits one synchronous cold probe. After the
-admitted synchronous wait releases its slot, a fixed five-second window begins.
-Cold misses inside that window fail open immediately and may offer bounded P2
-work without renewing it. Background work writes L1 and SQLite only after a
-successful probe.
+A metadata browsing miss returns the original Plex response immediately and may
+only offer bounded P2 work in memory. It never waits for SQLite, MediaVault, or
+the CDN. Background work writes L1 and SQLite only after a successful probe.
 A default-disabled experimental veto may reuse an already available fresh record
 for the Apple TV Plex DV Profile 5 combination, but it performs no additional
 probe and owns no Part state.
@@ -93,7 +91,8 @@ D prioritizes the Gateway fallback while preserving the broader lifecycle design
 1. use L1 and SQLite for single-instance fallback storage;
 2. accept optional `PLEX_TOKEN` from an ignored deployment `app.env` for
    nearby-item discovery; current-item prewarming remains token-independent;
-3. use bounded remote `ffprobe` with a default `5s` cold metadata wait ceiling;
+3. use bounded remote `ffprobe` with a default `5s` cold playback-decision wait
+   ceiling; metadata browsing does not consume that budget;
 4. support exact current-Part analysis and a configurable nearby-item window
    after a cloud redirect is ready. P0 actual playback, P1 nearby items, and P2
    foreground metadata misses share one exact-key scheduler. P1/P2 remote starts

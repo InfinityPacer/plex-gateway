@@ -132,14 +132,14 @@ Important environment variables:
 | `DATABASE_PATH` | `./data/plex-gateway.db` | Gateway SQLite database path; the container image defaults to `/app_data/plex-gateway.db`. |
 | `MEDIAINFO_PLAYBACK_QUEUE_SIZE` | `16` | Independent P0 queue capacity for actual playback work. |
 | `MEDIAINFO_NEIGHBOR_QUEUE_SIZE` | `50` | P1 queue capacity for nearby-item prewarming. |
-| `MEDIAINFO_METADATA_QUEUE_SIZE` | `50` | P2 queue capacity for fixed-window metadata misses. |
+| `MEDIAINFO_METADATA_QUEUE_SIZE` | `50` | P2 queue capacity for foreground metadata misses. |
 | `MEDIAINFO_PENDING_TTL` | `5m` | Lifetime of P1/P2 work that has not started. |
 | `MEDIAINFO_BACKGROUND_INTERVAL` | `5s` | Global minimum interval between P1/P2 remote probes after L1 and SQLite miss. |
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.5.1` | Fallback User-Agent for background probes without an active client context. |
-| `MEDIAINFO_COLD_WAIT` | `5s` | Cold-cache wait ceiling for one metadata item; timeout returns the original Plex response while probing continues. |
+| `MEDIAINFO_COLD_WAIT` | `5s` | Cold-cache wait ceiling for an actual playback decision; metadata browsing misses never use this wait. |
 | `PLAYBACK_VETO_ENABLED` | `false` | Enable the experimental Apple TV Plex Dolby Vision Profile 5 veto; it only reuses fresh MediaInfo already obtained by the decision path. |
 | `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | Maximum size of one Plex metadata response buffered for enrichment. |
-| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | Maximum single-item metadata responses buffered and waiting for MediaInfo concurrently. |
+| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | Maximum single-item metadata responses buffered for concurrent L1 projection. |
 | `MEDIAINFO_PREWARM_BEFORE` | `2` | Number of nearby items before the current item to prewarm. |
 | `MEDIAINFO_PREWARM_AFTER` | `3` | Number of nearby items after the current item to prewarm. |
 
@@ -197,15 +197,12 @@ evaluation after coverage, compatibility, backup, and rollback validation.
 
 The L1 hot path returns without synchronously reading SQLite for the request.
 Access renewal may touch SQLite asynchronously, so persistence I/O stays out of
-the request critical path. Hot-cache projection remains concurrent. One
-continuous browsing burst may admit only one synchronous remote probe. After
-the admitted synchronous wait releases its slot, a fixed five-second window
-begins. Other cold misses immediately preserve the Plex response, and rejected
-requests do not renew the window. An admitted probe may finish in the background
-after the request wait ends and persist the result to L1 and SQLite. Another
-browsing probe is admitted only after the window ends. Playback decisions retain
-their independent cold-probe budget, so this limit only suppresses metadata fan-out
-from home and season screens.
+the request critical path. Hot-cache projection remains concurrent. A metadata
+browsing miss immediately preserves the Plex response and only offers bounded P2
+work in memory; it never waits for SQLite, MediaVault, or the CDN. Successful
+background work later persists the result to L1 and SQLite. Actual playback
+decisions retain an independent P0 cold-probe budget so playback negotiation can
+receive technical fields without blocking home or season screens.
 
 When ffprobe cannot report the total media size, the gateway sends one
 `Range: bytes=0-0` request to the same temporary direct URL with the same
@@ -220,9 +217,8 @@ do not repeat the CDN request.
 Background library synchronization can enumerate an entire library one item at
 a time. Requests with `skipRefresh` whose product ends in `-Library` may consume
 an existing MediaInfo cache record but never admit a cold probe. Ordinary
-single-item access follows the same fixed cold-probe window. Cold misses inside
-the window return the original response immediately and only offer bounded P2
-work without renewing it; successful cloud 302 and nearby-window work retain
+single-item cold misses also return the original response immediately and only
+offer bounded P2 work; successful cloud 302 and nearby-window work retain
 their existing boundaries. Browsing a library therefore cannot expand without
 bound into full-library CDN ffprobe work. Any cache miss, timeout, unsupported
 structure, or projection failure returns the original Plex response.

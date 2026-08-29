@@ -10,7 +10,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/InfinityPacer/plex-gateway/internal/mediainfo"
@@ -21,9 +20,7 @@ import (
 )
 
 const (
-	defaultMediaInfoColdWait        = 5 * time.Second
 	defaultMediaInfoCacheLookupWait = 100 * time.Millisecond
-	defaultMetadataColdProbeQuiet   = 5 * time.Second
 	defaultMediaInfoResponseLimit   = 8 << 20
 	defaultMediaInfoEnrichmentSlots = 8
 )
@@ -31,7 +28,6 @@ const (
 type mediaInfoEnsurer interface {
 	GetMemory(mediainfo.Key) (mediainfo.Record, bool)
 	GetContext(context.Context, mediainfo.Key) (mediainfo.Record, bool)
-	Ensure(context.Context, mediainfo.Request) (mediainfo.Record, error)
 	Offer(mediainfo.Request) mediainfo.SubmitResult
 }
 
@@ -43,7 +39,6 @@ type metadataEnrichmentOptions struct {
 	Mapper          *pathmap.Mapper
 	Resolver        resolver.ControlResolver
 	CloudExtensions []string
-	ColdWait        time.Duration
 	ResponseLimit   int64
 	Concurrency     int
 	Metrics         *metrics.Metrics
@@ -55,25 +50,14 @@ type metadataEnrichmentHandler struct {
 	mapper          *pathmap.Mapper
 	resolver        resolver.ControlResolver
 	cloudExtensions map[string]struct{}
-	coldWait        time.Duration
 	responseLimit   int64
 	waiters         chan struct{}
 	metrics         *metrics.Metrics
-
-	coldProbeMu           sync.Mutex
-	coldProbeActive       bool
-	coldProbeBlockedUntil time.Time
-	coldProbeQuiet        time.Duration
-	now                   func() time.Time
 }
 
 func newMetadataEnrichmentHandler(options metadataEnrichmentOptions, next http.Handler) http.Handler {
 	if next == nil || options.Service == nil || options.Mapper == nil || options.Resolver == nil {
 		return next
-	}
-	coldWait := options.ColdWait
-	if coldWait <= 0 {
-		coldWait = defaultMediaInfoColdWait
 	}
 	responseLimit := options.ResponseLimit
 	if responseLimit <= 0 {
@@ -89,9 +73,8 @@ func newMetadataEnrichmentHandler(options metadataEnrichmentOptions, next http.H
 	}
 	return &metadataEnrichmentHandler{
 		next: next, service: options.Service, mapper: options.Mapper, resolver: options.Resolver,
-		cloudExtensions: normalizedExtensionSet(options.CloudExtensions), coldWait: coldWait,
-		responseLimit: responseLimit, waiters: make(chan struct{}, concurrency),
-		coldProbeQuiet: defaultMetadataColdProbeQuiet, now: time.Now, metrics: registry,
+		cloudExtensions: normalizedExtensionSet(options.CloudExtensions),
+		responseLimit:   responseLimit, waiters: make(chan struct{}, concurrency), metrics: registry,
 	}
 }
 
@@ -170,20 +153,9 @@ func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, reque
 				Key: key, RatingKey: ratingKey, Target: strmTarget,
 				Priority: mediainfo.PriorityMetadata, ClientUserAgent: request.UserAgent(),
 			}
-			if !handler.acquireColdProbe() {
-				handler.metrics.IncMediaInfoWaitRejected()
-				_ = handler.service.Offer(probeRequest)
-				handler.replay(capture, rawBody)
-				return
-			}
-			defer handler.releaseColdProbe()
-			waitContext, cancel := context.WithTimeout(request.Context(), handler.coldWait)
-			record, err = handler.service.Ensure(waitContext, probeRequest)
-			cancel()
-			if err != nil {
-				handler.failOpen(capture, rawBody)
-				return
-			}
+			_ = handler.service.Offer(probeRequest)
+			handler.replay(capture, rawBody)
+			return
 		}
 	}
 	currentTarget, err := handler.resolver.ReadTarget(localPath)
@@ -206,31 +178,6 @@ func (handler *metadataEnrichmentHandler) ServeHTTP(w http.ResponseWriter, reque
 		return
 	}
 	handler.metrics.IncMediaInfoEnriched()
-}
-
-// A completed probe opens a fixed quiet interval. Rejected requests never move
-// its end, so continuous metadata traffic cannot starve the next probe.
-func (handler *metadataEnrichmentHandler) acquireColdProbe() bool {
-	handler.coldProbeMu.Lock()
-	defer handler.coldProbeMu.Unlock()
-
-	now := handler.now()
-	if handler.coldProbeActive || now.Before(handler.coldProbeBlockedUntil) {
-		return false
-	}
-	handler.coldProbeActive = true
-	return true
-}
-
-func (handler *metadataEnrichmentHandler) releaseColdProbe() {
-	handler.coldProbeMu.Lock()
-	defer handler.coldProbeMu.Unlock()
-	if !handler.coldProbeActive {
-		return
-	}
-	now := handler.now()
-	handler.coldProbeActive = false
-	handler.coldProbeBlockedUntil = now.Add(handler.coldProbeQuiet)
 }
 
 // serveCachedCollection enriches already-probed items without admitting remote

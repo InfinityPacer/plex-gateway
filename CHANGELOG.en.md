@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added bounded remote ffprobe, an L1 LRU plus SQLite MediaInfo cache, and
-  single-item Plex metadata response enrichment. Cold-wait timeouts preserve the
-  original response while probing continues in the background.
+  single-item Plex metadata response enrichment. Browsing misses preserve the
+  original response immediately while only playback decisions use a cold wait.
 - Current-Part prewarming is submitted to P0 after a cloud redirect is ready. An
   isolated Plex management token can additionally discover a configurable P1
   nearby window, defaulting to two previous and three following items. The
@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added per-client rapid-switch coordination, cross-User-Agent failure handoff,
   and distinct prewarm metrics for fresh cache hits, joined work, new queue
   admissions, and rejections.
-- Unified actual playback, nearby prewarming, and fixed-window metadata misses
+- Unified actual playback, nearby prewarming, and foreground metadata misses
   under one P0/P1/P2 MediaInfo scheduler. P1/P2 use a five-minute pending TTL
   and a global five-second remote-start interval while P0 keeps reserved capacity.
 - Parts without Plex Streams now receive descriptive video, audio, and subtitle
@@ -56,11 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Limited one continuous metadata browsing burst to one synchronous cold probe.
-  After the admitted synchronous wait releases its slot, a fixed five-second
-  window begins. Other cold misses preserve the Plex response immediately and
-  may offer one deduplicated P2 task without renewing the window. Workers check
-  SQLite first, so only genuine misses enter the remote-start limiter.
+- Single-item metadata browsing misses now preserve the Plex response
+  immediately and only perform a non-blocking, exact-key P2 memory offer. The
+  request path no longer reads SQLite synchronously, waits for MediaVault/CDN,
+  or holds a five-second cold-probe window. Workers check SQLite first, so only
+  genuine misses enter the remote-start limiter.
 - Set the Metadata Guard defaults to global 8, per-client 4, and batch 3. After
   Plex MediaInfo writes provide high coverage and the resulting load is retested,
   global 16, per-client 4, and batch 3 remains a candidate for evaluation.

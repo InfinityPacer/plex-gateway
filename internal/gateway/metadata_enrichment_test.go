@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,16 +24,13 @@ import (
 )
 
 type fakeMediaInfoEnsurer struct {
-	calls        atomic.Int64
 	gets         atomic.Int64
 	memoryGets   atomic.Int64
 	mu           sync.Mutex
-	seen         []mediainfo.Request
 	offered      []mediainfo.Request
 	memoryFn     func(mediainfo.Key) (mediainfo.Record, bool)
 	getFn        func(mediainfo.Key) (mediainfo.Record, bool)
 	getContextFn func(context.Context, mediainfo.Key) (mediainfo.Record, bool)
-	fn           func(context.Context, mediainfo.Request) (mediainfo.Record, error)
 }
 
 func (ensurer *fakeMediaInfoEnsurer) GetMemory(key mediainfo.Key) (mediainfo.Record, bool) {
@@ -64,10 +60,6 @@ func TestMetadataEnrichmentCollectionFailsOpenWhenCacheStoreStalls(t *testing.T)
 			<-ctx.Done()
 			return mediainfo.Record{}, false
 		},
-		fn: func(context.Context, mediainfo.Request) (mediainfo.Record, error) {
-			t.Fatal("collection metadata must not admit a cold probe")
-			return mediainfo.Record{}, nil
-		},
 	}
 	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(raw, "application/xml"))
 	request := authenticatedRequest(http.MethodGet, "/library/metadata/41/children")
@@ -82,25 +74,11 @@ func TestMetadataEnrichmentCollectionFailsOpenWhenCacheStoreStalls(t *testing.T)
 	}
 }
 
-func (ensurer *fakeMediaInfoEnsurer) Ensure(ctx context.Context, request mediainfo.Request) (mediainfo.Record, error) {
-	ensurer.calls.Add(1)
-	ensurer.mu.Lock()
-	ensurer.seen = append(ensurer.seen, request)
-	ensurer.mu.Unlock()
-	return ensurer.fn(ctx, request)
-}
-
 func (ensurer *fakeMediaInfoEnsurer) Offer(request mediainfo.Request) mediainfo.SubmitResult {
 	ensurer.mu.Lock()
 	ensurer.offered = append(ensurer.offered, request)
 	ensurer.mu.Unlock()
 	return mediainfo.SubmitResult{Disposition: mediainfo.SubmitNewlyQueued}
-}
-
-func (ensurer *fakeMediaInfoEnsurer) requests() []mediainfo.Request {
-	ensurer.mu.Lock()
-	defer ensurer.mu.Unlock()
-	return append([]mediainfo.Request(nil), ensurer.seen...)
 }
 
 func (ensurer *fakeMediaInfoEnsurer) offers() []mediainfo.Request {
@@ -113,8 +91,8 @@ func TestMetadataEnrichmentAddsMissingXMLFields(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
 	raw := []byte(`<MediaContainer size="1"><Video ratingKey="42" type="episode"><Media><Part id="9" key="/library/parts/9/1/file.strm" file="/media/cloud/episode.strm"><Stream id="101" streamType="1" index="0"/></Part></Media></Video></MediaContainer>`)
 	registry := metrics.New()
-	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
-		return mediainfo.Record{Key: request.Key, Media: completeProjectionMedia()}, nil
+	ensurer := &fakeMediaInfoEnsurer{memoryFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
+		return mediainfo.Record{Key: key, Media: completeProjectionMedia()}, true
 	}}
 	handler := fixture.handler(ensurer, registry, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
@@ -142,9 +120,8 @@ func TestMetadataEnrichmentAddsMissingXMLFields(t *testing.T) {
 	if response.Header().Get("Cache-Control") != "private, no-cache" || response.Header().Get("Content-Length") != strconv.Itoa(response.Body.Len()) {
 		t.Fatalf("mutated headers = %#v", response.Header())
 	}
-	requests := ensurer.requests()
-	if len(requests) != 1 || requests[0].Key.PartID != "9" || len(requests[0].Key.STRMFingerprint) != 64 || requests[0].Target != fixture.target || requests[0].ClientUserAgent != "Infuse-Test/1.0" {
-		t.Fatalf("MediaInfo request = %#v", requests)
+	if ensurer.memoryGets.Load() != 1 || len(ensurer.offers()) != 0 {
+		t.Fatalf("memory gets=%d offers=%d", ensurer.memoryGets.Load(), len(ensurer.offers()))
 	}
 	snapshot := registry.Snapshot()
 	if snapshot.MediaInfoEnrichedTotal != 1 || snapshot.MediaInfoWaitActive != 0 || snapshot.MediaInfoFailOpenTotal != 0 {
@@ -156,8 +133,8 @@ func TestMetadataEnrichmentPreservesGzipJSON(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
 	rawJSON := []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","type":"episode","Media":[{"Part":[{"id":"9","key":"/library/parts/9/1/file.strm","file":"/media/cloud/episode.strm","Stream":[{"id":"101","streamType":1,"index":0}]}]}]}]}}`)
 	wire := gzipBytes(t, rawJSON)
-	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
-		return mediainfo.Record{Key: request.Key, Media: completeProjectionMedia()}, nil
+	ensurer := &fakeMediaInfoEnsurer{memoryFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
+		return mediainfo.Record{Key: key, Media: completeProjectionMedia()}, true
 	}}
 	handler := fixture.handler(ensurer, metrics.New(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -185,10 +162,7 @@ func TestMetadataEnrichmentPreservesGzipJSON(t *testing.T) {
 func TestMetadataEnrichmentKeepsBackgroundLibrarySyncCacheOnly(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
 	raw := fixture.xmlBody()
-	ensurer := &fakeMediaInfoEnsurer{fn: func(context.Context, mediainfo.Request) (mediainfo.Record, error) {
-		t.Fatal("background library sync must not admit a cold probe")
-		return mediainfo.Record{}, nil
-	}}
+	ensurer := &fakeMediaInfoEnsurer{}
 	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(raw, "application/xml"))
 	request := authenticatedRequest(http.MethodGet, "/library/metadata/42?skipRefresh=1")
 	request.Header.Set("X-Plex-Product", "Infuse-Library")
@@ -199,8 +173,8 @@ func TestMetadataEnrichmentKeepsBackgroundLibrarySyncCacheOnly(t *testing.T) {
 	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), raw) {
 		t.Fatalf("response = %d %q", response.Code, response.Body.Bytes())
 	}
-	if ensurer.gets.Load() != 1 || ensurer.calls.Load() != 0 {
-		t.Fatalf("Get calls = %d, Ensure calls = %d", ensurer.gets.Load(), ensurer.calls.Load())
+	if ensurer.gets.Load() != 1 || len(ensurer.offers()) != 0 {
+		t.Fatalf("Get calls = %d", ensurer.gets.Load())
 	}
 }
 
@@ -219,8 +193,8 @@ func TestMetadataEnrichmentUsesCachedRecordForBackgroundLibrarySync(t *testing.T
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `container="mkv"`) {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
-	if ensurer.gets.Load() != 1 || ensurer.calls.Load() != 0 {
-		t.Fatalf("Get calls = %d, Ensure calls = %d", ensurer.gets.Load(), ensurer.calls.Load())
+	if ensurer.gets.Load() != 1 {
+		t.Fatalf("Get calls = %d", ensurer.gets.Load())
 	}
 }
 
@@ -234,10 +208,6 @@ func TestMetadataEnrichmentUsesOnlyCachedRecordsForCollection(t *testing.T) {
 			}
 			return mediainfo.Record{Key: key, Media: completeProjectionMedia()}, true
 		},
-		fn: func(context.Context, mediainfo.Request) (mediainfo.Record, error) {
-			t.Fatal("collection metadata must not admit a cold probe")
-			return mediainfo.Record{}, nil
-		},
 	}
 	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(raw, "application/xml"))
 	response := httptest.NewRecorder()
@@ -249,8 +219,8 @@ func TestMetadataEnrichmentUsesOnlyCachedRecordsForCollection(t *testing.T) {
 	if !bytes.Contains(response.Body.Bytes(), []byte(`ratingKey="43"><Media container="mp4"`)) || bytes.Contains(response.Body.Bytes(), []byte(`ratingKey="43"><Media container="mkv"`)) {
 		t.Fatalf("local collection item changed: %s", response.Body.Bytes())
 	}
-	if ensurer.gets.Load() != 1 || ensurer.calls.Load() != 0 {
-		t.Fatalf("Get calls = %d, Ensure calls = %d", ensurer.gets.Load(), ensurer.calls.Load())
+	if ensurer.gets.Load() != 1 {
+		t.Fatalf("Get calls = %d", ensurer.gets.Load())
 	}
 }
 
@@ -259,9 +229,6 @@ func TestMetadataEnrichmentLeavesCollectionUnchangedOnCacheMiss(t *testing.T) {
 	raw := []byte(`<MediaContainer size="1"><Video ratingKey="42"><Media><Part id="9" file="/media/cloud/episode.strm"/></Media></Video></MediaContainer>`)
 	ensurer := &fakeMediaInfoEnsurer{getFn: func(mediainfo.Key) (mediainfo.Record, bool) {
 		return mediainfo.Record{}, false
-	}, fn: func(context.Context, mediainfo.Request) (mediainfo.Record, error) {
-		t.Fatal("collection cache miss must not admit a cold probe")
-		return mediainfo.Record{}, nil
 	}}
 	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(raw, "application/xml"))
 	response := httptest.NewRecorder()
@@ -270,8 +237,8 @@ func TestMetadataEnrichmentLeavesCollectionUnchangedOnCacheMiss(t *testing.T) {
 	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), raw) {
 		t.Fatalf("response = %d %q", response.Code, response.Body.Bytes())
 	}
-	if ensurer.gets.Load() != 1 || ensurer.calls.Load() != 0 {
-		t.Fatalf("Get calls = %d, Ensure calls = %d", ensurer.gets.Load(), ensurer.calls.Load())
+	if ensurer.gets.Load() != 1 {
+		t.Fatalf("Get calls = %d", ensurer.gets.Load())
 	}
 }
 
@@ -298,38 +265,39 @@ func TestMediaInfoCacheOnlyRequestRequiresLibraryProductAndSkipRefresh(t *testin
 	}
 }
 
-func TestMetadataEnrichmentTimeoutReturnsOriginalResponse(t *testing.T) {
+func TestMetadataEnrichmentColdMissReturnsOriginalAndOffersP2(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
 	raw := fixture.xmlBody()
-	ensurer := &fakeMediaInfoEnsurer{fn: func(ctx context.Context, _ mediainfo.Request) (mediainfo.Record, error) {
-		<-ctx.Done()
-		return mediainfo.Record{}, ctx.Err()
-	}}
+	ensurer := &fakeMediaInfoEnsurer{}
 	handler := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
 		Service: ensurer, Mapper: fixture.mapper, Resolver: fixture.resolver,
-		CloudExtensions: []string{".strm"}, ColdWait: 10 * time.Millisecond,
-		ResponseLimit: 1 << 20, Concurrency: 1, Metrics: metrics.New(),
+		CloudExtensions: []string{".strm"},
+		ResponseLimit:   1 << 20, Concurrency: 1, Metrics: metrics.New(),
 	}, metadataBodyHandler(raw, "application/xml"))
 
 	response := httptest.NewRecorder()
 	started := time.Now()
 	handler.ServeHTTP(response, authenticatedMetadataRequest(http.MethodGet))
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("cold timeout took %s", elapsed)
+		t.Fatalf("cold miss took %s", elapsed)
 	}
 	if !bytes.Equal(response.Body.Bytes(), raw) || response.Header().Get("ETag") != `"plex-etag"` {
 		t.Fatalf("fail-open response changed: headers=%#v body=%s", response.Header(), response.Body.Bytes())
+	}
+	offered := ensurer.offers()
+	if len(offered) != 1 || offered[0].Priority != mediainfo.PriorityMetadata || offered[0].Key.PartID != "9" {
+		t.Fatalf("P2 offers = %#v", offered)
 	}
 }
 
 func TestMetadataEnrichmentRejectsFingerprintChange(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
 	raw := fixture.xmlBody()
-	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
+	ensurer := &fakeMediaInfoEnsurer{memoryFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
 		if err := os.WriteFile(fixture.strmPath, []byte("http://mediavault:7811/redirect/changed/file.mkv\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		return mediainfo.Record{Key: request.Key, Media: completeProjectionMedia()}, nil
+		return mediainfo.Record{Key: key, Media: completeProjectionMedia()}, true
 	}}
 	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(raw, "application/xml"))
 	response := httptest.NewRecorder()
@@ -344,17 +312,22 @@ func TestMetadataEnrichmentPoolSaturationSkipsWaiting(t *testing.T) {
 	raw := fixture.xmlBody()
 	started := make(chan struct{})
 	release := make(chan struct{})
-	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
-		close(started)
-		<-release
-		return mediainfo.Record{Key: request.Key, Media: completeProjectionMedia()}, nil
+	ensurer := &fakeMediaInfoEnsurer{memoryFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
+		return mediainfo.Record{Key: key, Media: completeProjectionMedia()}, true
 	}}
 	registry := metrics.New()
+	var upstreamCalls atomic.Int64
 	handler := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
 		Service: ensurer, Mapper: fixture.mapper, Resolver: fixture.resolver,
-		CloudExtensions: []string{".strm"}, ColdWait: time.Second,
-		ResponseLimit: 1 << 20, Concurrency: 1, Metrics: registry,
-	}, metadataBodyHandler(raw, "application/xml"))
+		CloudExtensions: []string{".strm"},
+		ResponseLimit:   1 << 20, Concurrency: 1, Metrics: registry,
+	}, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if upstreamCalls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		metadataBodyHandler(raw, "application/xml").ServeHTTP(w, request)
+	}))
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -369,8 +342,8 @@ func TestMetadataEnrichmentPoolSaturationSkipsWaiting(t *testing.T) {
 	}
 	second := httptest.NewRecorder()
 	handler.ServeHTTP(second, authenticatedMetadataRequest(http.MethodGet))
-	if !bytes.Equal(second.Body.Bytes(), raw) || ensurer.calls.Load() != 1 {
-		t.Fatalf("saturated response=%s calls=%d", second.Body.Bytes(), ensurer.calls.Load())
+	if !bytes.Equal(second.Body.Bytes(), raw) {
+		t.Fatalf("saturated response=%s", second.Body.Bytes())
 	}
 	close(release)
 	select {
@@ -386,190 +359,9 @@ func TestMetadataEnrichmentPoolSaturationSkipsWaiting(t *testing.T) {
 	}
 }
 
-func TestMetadataEnrichmentColdProbeSaturationFailsOpen(t *testing.T) {
+func TestMetadataEnrichmentUsesL1RecordAfterColdOffer(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
 	raw := fixture.xmlBody()
-	started := make(chan struct{})
-	release := make(chan struct{})
-	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
-		close(started)
-		<-release
-		return mediainfo.Record{Key: request.Key, Media: completeProjectionMedia()}, nil
-	}}
-	registry := metrics.New()
-	handler := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
-		Service: ensurer, Mapper: fixture.mapper, Resolver: fixture.resolver,
-		CloudExtensions: []string{".strm"}, ColdWait: time.Second,
-		ResponseLimit: 1 << 20, Concurrency: 2, Metrics: registry,
-	}, metadataBodyHandler(raw, "application/xml"))
-
-	firstDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, authenticatedMetadataRequest(http.MethodGet))
-		firstDone <- response
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("first cold probe did not start")
-	}
-
-	second := httptest.NewRecorder()
-	handler.ServeHTTP(second, authenticatedMetadataRequest(http.MethodGet))
-	if !bytes.Equal(second.Body.Bytes(), raw) || ensurer.calls.Load() != 1 {
-		t.Fatalf("second response=%s Ensure calls=%d", second.Body.Bytes(), ensurer.calls.Load())
-	}
-	if offered := ensurer.offers(); len(offered) != 1 || offered[0].Priority != mediainfo.PriorityMetadata {
-		t.Fatalf("background offers = %#v", offered)
-	}
-	close(release)
-	select {
-	case first := <-firstDone:
-		if bytes.Equal(first.Body.Bytes(), raw) {
-			t.Fatal("first response was not enriched")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("first cold probe did not finish")
-	}
-	if snapshot := registry.Snapshot(); snapshot.MediaInfoWaitRejectedTotal != 1 || snapshot.MediaInfoWaitActive != 0 {
-		t.Fatalf("metrics = %#v", snapshot)
-	}
-}
-
-func TestMetadataEnrichmentColdProbeQuietWindowSuppressesSequentialMiss(t *testing.T) {
-	fixture := newMetadataEnrichmentFixture(t)
-	raw := fixture.xmlBody()
-	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
-		return mediainfo.Record{Key: request.Key, Media: completeProjectionMedia()}, nil
-	}}
-	handler := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
-		Service: ensurer, Mapper: fixture.mapper, Resolver: fixture.resolver,
-		CloudExtensions: []string{".strm"}, ColdWait: time.Second,
-		ResponseLimit: 1 << 20, Concurrency: 2, Metrics: metrics.New(),
-	}, metadataBodyHandler(raw, "application/xml"))
-
-	first := httptest.NewRecorder()
-	handler.ServeHTTP(first, authenticatedMetadataRequest(http.MethodGet))
-	if bytes.Equal(first.Body.Bytes(), raw) {
-		t.Fatal("first cold miss was not enriched")
-	}
-
-	second := httptest.NewRecorder()
-	handler.ServeHTTP(second, authenticatedMetadataRequest(http.MethodGet))
-	if !bytes.Equal(second.Body.Bytes(), raw) || ensurer.calls.Load() != 1 {
-		t.Fatalf("second response=%s Ensure calls=%d", second.Body.Bytes(), ensurer.calls.Load())
-	}
-	if offered := ensurer.offers(); len(offered) != 1 || offered[0].Priority != mediainfo.PriorityMetadata {
-		t.Fatalf("quiet-window offers = %#v", offered)
-	}
-}
-
-func TestMetadataEnrichmentColdProbeQuietWindowDoesNotSlideUnderContinuousTraffic(t *testing.T) {
-	start := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
-	now := start
-	handler := &metadataEnrichmentHandler{
-		coldProbeQuiet: 5 * time.Second,
-		now:            func() time.Time { return now },
-	}
-	if !handler.acquireColdProbe() {
-		t.Fatal("first cold probe was rejected")
-	}
-	handler.releaseColdProbe()
-	if handler.acquireColdProbe() {
-		t.Fatal("probe was admitted immediately after release")
-	}
-	for second := 1; second < 5; second++ {
-		now = start.Add(time.Duration(second) * time.Second)
-		if handler.acquireColdProbe() {
-			t.Fatalf("probe was admitted during the quiet window at %ds", second)
-		}
-	}
-	now = start.Add(5 * time.Second)
-	if !handler.acquireColdProbe() {
-		t.Fatal("probe was not admitted after the fixed quiet interval")
-	}
-	handler.releaseColdProbe()
-}
-
-func TestMetadataEnrichmentColdProbeQuietWindowIsSharedAcrossClientsAndRecovers(t *testing.T) {
-	start := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
-	now := start
-	handler := &metadataEnrichmentHandler{
-		coldProbeQuiet: 5 * time.Second,
-		now:            func() time.Time { return now },
-	}
-
-	clients := []string{"apple-tv", "infuse", "plex-ios", "plex-web", "senplayer", "tablet", "desktop", "tv"}
-	type admissionResult struct {
-		client   string
-		admitted bool
-	}
-	results := make(chan admissionResult, len(clients))
-	var group sync.WaitGroup
-	group.Add(len(clients))
-	for _, client := range clients {
-		go func(client string) {
-			defer group.Done()
-			results <- admissionResult{client: client, admitted: handler.acquireColdProbe()}
-		}(client)
-	}
-	group.Wait()
-	close(results)
-
-	var admitted int
-	var admittedClient string
-	for result := range results {
-		if result.admitted {
-			admitted++
-			admittedClient = result.client
-		}
-	}
-	if admitted != 1 || admittedClient == "" {
-		t.Fatalf("admitted probes across clients = %d (client %q), want 1", admitted, admittedClient)
-	}
-	handler.releaseColdProbe()
-
-	now = start.Add(4 * time.Second)
-	if handler.acquireColdProbe() {
-		t.Fatal("probe was admitted before the shared quiet window expired")
-	}
-	now = start.Add(5 * time.Second)
-	if !handler.acquireColdProbe() {
-		t.Fatal("probe was not admitted when the shared quiet window expired")
-	}
-	handler.releaseColdProbe()
-}
-
-func TestMetadataEnrichmentColdProbeQuietWindowStartsAfterActiveProbeCompletes(t *testing.T) {
-	start := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
-	now := start
-	handler := &metadataEnrichmentHandler{
-		coldProbeQuiet: 5 * time.Second,
-		now:            func() time.Time { return now },
-	}
-	if !handler.acquireColdProbe() {
-		t.Fatal("probe was rejected before an active probe")
-	}
-
-	now = start.Add(30 * time.Second)
-	handler.releaseColdProbe()
-	now = start.Add(34 * time.Second)
-	if handler.acquireColdProbe() {
-		t.Fatal("probe was admitted before the completion-based quiet window expired")
-	}
-	now = start.Add(35 * time.Second)
-	if !handler.acquireColdProbe() {
-		t.Fatal("probe was not admitted after the completion-based quiet window expired")
-	}
-	handler.releaseColdProbe()
-}
-
-func TestMetadataEnrichmentCachedProjectionBypassesColdProbeSlot(t *testing.T) {
-	fixture := newMetadataEnrichmentFixture(t)
-	raw := fixture.xmlBody()
-	started := make(chan struct{})
-	release := make(chan struct{})
 	var lookups atomic.Int64
 	ensurer := &fakeMediaInfoEnsurer{
 		memoryFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
@@ -578,27 +370,17 @@ func TestMetadataEnrichmentCachedProjectionBypassesColdProbeSlot(t *testing.T) {
 			}
 			return mediainfo.Record{Key: key, Media: completeProjectionMedia()}, true
 		},
-		fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
-			close(started)
-			<-release
-			return mediainfo.Record{Key: request.Key, Media: completeProjectionMedia()}, nil
-		},
 	}
 	handler := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
 		Service: ensurer, Mapper: fixture.mapper, Resolver: fixture.resolver,
-		CloudExtensions: []string{".strm"}, ColdWait: time.Second,
-		ResponseLimit: 1 << 20, Concurrency: 2, Metrics: metrics.New(),
+		CloudExtensions: []string{".strm"},
+		ResponseLimit:   1 << 20, Concurrency: 2, Metrics: metrics.New(),
 	}, metadataBodyHandler(raw, "application/xml"))
 
-	firstDone := make(chan struct{})
-	go func() {
-		defer close(firstDone)
-		handler.ServeHTTP(httptest.NewRecorder(), authenticatedMetadataRequest(http.MethodGet))
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("first cold probe did not start")
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, authenticatedMetadataRequest(http.MethodGet))
+	if !bytes.Equal(first.Body.Bytes(), raw) {
+		t.Fatalf("cold response = %s", first.Body.Bytes())
 	}
 
 	second := httptest.NewRecorder()
@@ -606,51 +388,25 @@ func TestMetadataEnrichmentCachedProjectionBypassesColdProbeSlot(t *testing.T) {
 	if !strings.Contains(second.Body.String(), `container="mkv"`) {
 		t.Fatalf("cached response was not enriched: %s", second.Body.String())
 	}
-	if ensurer.calls.Load() != 1 {
-		t.Fatalf("Ensure calls = %d", ensurer.calls.Load())
-	}
-	if offered := ensurer.offers(); len(offered) != 0 {
-		t.Fatalf("background offers after cache hit = %d", len(offered))
-	}
-	close(release)
-	select {
-	case <-firstDone:
-	case <-time.After(time.Second):
-		t.Fatal("first cold probe did not finish")
+	if offered := ensurer.offers(); len(offered) != 1 || offered[0].Priority != mediainfo.PriorityMetadata {
+		t.Fatalf("offers = %#v", offered)
 	}
 }
 
-func TestMetadataEnrichmentBurstDoesNotQueueBehindColdProbe(t *testing.T) {
+func TestMetadataEnrichmentColdBurstReturnsWithoutSynchronousProbe(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
 	raw := fixture.xmlBody()
-	started := make(chan struct{})
-	release := make(chan struct{})
-	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
-		close(started)
-		<-release
-		return mediainfo.Record{Key: request.Key, Media: completeProjectionMedia()}, nil
-	}}
+	ensurer := &fakeMediaInfoEnsurer{}
 	registry := metrics.New()
 	enrichment := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
 		Service: ensurer, Mapper: fixture.mapper, Resolver: fixture.resolver,
-		CloudExtensions: []string{".strm"}, ColdWait: time.Second,
-		ResponseLimit: 1 << 20, Concurrency: 8, Metrics: registry,
+		CloudExtensions: []string{".strm"},
+		ResponseLimit:   1 << 20, Concurrency: 64, Metrics: registry,
 	}, metadataBodyHandler(raw, "application/xml"))
 	handler := newMetadataGuard(MetadataGuardOptions{
 		Enabled: true, GlobalConcurrency: 16, PerClientConcurrency: 4,
 		QueueTimeout: 500 * time.Millisecond,
 	}, enrichment, registry, nil)
-
-	firstDone := make(chan struct{})
-	go func() {
-		defer close(firstDone)
-		handler.ServeHTTP(httptest.NewRecorder(), authenticatedMetadataRequest(http.MethodGet))
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("first cold probe did not start")
-	}
 
 	const burst = 64
 	responses := make(chan *httptest.ResponseRecorder, burst)
@@ -680,24 +436,14 @@ func TestMetadataEnrichmentBurstDoesNotQueueBehindColdProbe(t *testing.T) {
 			t.Fatalf("burst response = %d %q", response.Code, response.Body.Bytes())
 		}
 	}
-	if ensurer.calls.Load() != 1 {
-		t.Fatalf("Ensure calls = %d", ensurer.calls.Load())
-	}
 	if offered := ensurer.offers(); len(offered) != burst {
 		t.Fatalf("background offers = %d, want %d", len(offered), burst)
 	}
 	if got := ensurer.gets.Load(); got != 0 {
-		t.Fatalf("quiet-window burst performed %d durable-capable lookups", got)
+		t.Fatalf("cold burst performed %d durable-capable lookups", got)
 	}
-	if snapshot := registry.Snapshot(); snapshot.MetadataGuardTimeoutsTotal != 0 || snapshot.MediaInfoWaitRejectedTotal != burst {
+	if snapshot := registry.Snapshot(); snapshot.MetadataGuardTimeoutsTotal != 0 || snapshot.MediaInfoWaitRejectedTotal != 0 {
 		t.Fatalf("metrics = %#v", snapshot)
-	}
-
-	close(release)
-	select {
-	case <-firstDone:
-	case <-time.After(time.Second):
-		t.Fatal("first cold probe did not finish")
 	}
 }
 
@@ -705,9 +451,7 @@ func TestMetadataEnrichmentBypassesIneligibleAndUnbufferableResponses(t *testing
 	fixture := newMetadataEnrichmentFixture(t)
 	raw := fixture.xmlBody()
 	oversized := bytes.Repeat([]byte("x"), 1025)
-	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, _ mediainfo.Request) (mediainfo.Record, error) {
-		return mediainfo.Record{}, errors.New("unexpected Ensure")
-	}}
+	ensurer := &fakeMediaInfoEnsurer{}
 	tests := []struct {
 		name       string
 		request    *http.Request
@@ -737,8 +481,8 @@ func TestMetadataEnrichmentBypassesIneligibleAndUnbufferableResponses(t *testing
 		t.Run(test.name, func(t *testing.T) {
 			handler := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
 				Service: ensurer, Mapper: fixture.mapper, Resolver: fixture.resolver,
-				CloudExtensions: []string{".strm"}, ColdWait: time.Second,
-				ResponseLimit: 1024, Concurrency: 1, Metrics: metrics.New(),
+				CloudExtensions: []string{".strm"},
+				ResponseLimit:   1024, Concurrency: 1, Metrics: metrics.New(),
 			}, test.next)
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, test.request)
@@ -747,8 +491,8 @@ func TestMetadataEnrichmentBypassesIneligibleAndUnbufferableResponses(t *testing
 			}
 		})
 	}
-	if ensurer.calls.Load() != 0 {
-		t.Fatalf("ineligible responses called Ensure %d times", ensurer.calls.Load())
+	if offered := ensurer.offers(); len(offered) != 0 {
+		t.Fatalf("ineligible responses offered %d probes", len(offered))
 	}
 }
 
@@ -786,14 +530,14 @@ func TestMetadataEnrichmentAdmitsExistingStreamHDRAndSTRMControlSize(t *testing.
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, request mediainfo.Request) (mediainfo.Record, error) {
-				return mediainfo.Record{Key: request.Key, Media: media}, nil
+			ensurer := &fakeMediaInfoEnsurer{memoryFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
+				return mediainfo.Record{Key: key, Media: media}, true
 			}}
 			handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(test.body, test.contentType))
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, authenticatedMetadataRequest(http.MethodGet))
-			if ensurer.calls.Load() != 1 {
-				t.Fatalf("Ensure calls = %d", ensurer.calls.Load())
+			if ensurer.memoryGets.Load() != 1 || len(ensurer.offers()) != 0 {
+				t.Fatalf("memory gets=%d offers=%d", ensurer.memoryGets.Load(), len(ensurer.offers()))
 			}
 			for _, expected := range test.want {
 				if !bytes.Contains(response.Body.Bytes(), expected) {
@@ -806,9 +550,7 @@ func TestMetadataEnrichmentAdmitsExistingStreamHDRAndSTRMControlSize(t *testing.
 
 func TestMetadataEnrichmentSkipsLocalAndCompleteCloudParts(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
-	ensurer := &fakeMediaInfoEnsurer{fn: func(_ context.Context, _ mediainfo.Request) (mediainfo.Record, error) {
-		return mediainfo.Record{}, errors.New("unexpected Ensure")
-	}}
+	ensurer := &fakeMediaInfoEnsurer{}
 	tests := []struct {
 		name string
 		body []byte
@@ -832,8 +574,8 @@ func TestMetadataEnrichmentSkipsLocalAndCompleteCloudParts(t *testing.T) {
 			}
 		})
 	}
-	if ensurer.calls.Load() != 0 {
-		t.Fatalf("skipped Parts called Ensure %d times", ensurer.calls.Load())
+	if ensurer.memoryGets.Load() != 0 || len(ensurer.offers()) != 0 {
+		t.Fatalf("skipped Parts memory gets=%d offers=%d", ensurer.memoryGets.Load(), len(ensurer.offers()))
 	}
 }
 
@@ -866,8 +608,8 @@ func newMetadataEnrichmentFixture(t *testing.T) metadataEnrichmentFixture {
 func (fixture metadataEnrichmentFixture) handler(ensurer mediaInfoEnsurer, registry *metrics.Metrics, next http.Handler) http.Handler {
 	return newMetadataEnrichmentHandler(metadataEnrichmentOptions{
 		Service: ensurer, Mapper: fixture.mapper, Resolver: fixture.resolver,
-		CloudExtensions: []string{".strm"}, ColdWait: time.Second,
-		ResponseLimit: 1 << 20, Concurrency: 2, Metrics: registry,
+		CloudExtensions: []string{".strm"},
+		ResponseLimit:   1 << 20, Concurrency: 2, Metrics: registry,
 	}, next)
 }
 

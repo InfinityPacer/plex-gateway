@@ -33,12 +33,10 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   is bounded and preserves the original Plex response on timeout, ambiguity,
   unsupported encoding, or any other failure. Background library crawlers
   identified by `skipRefresh` and a `-Library` product consume cache only. Hot
-  records remain concurrently projectable; one continuous browsing burst may
-  wait on only one cold probe. After the admitted synchronous wait releases its
-  slot, a fixed five-second window begins. Other eligible cold misses preserve
-  the Plex response and may offer bounded P2 work without renewing the window.
-  An admitted probe may finish in the background after the request wait ends
-  and persist to L1 and SQLite.
+  records remain concurrently projectable. An eligible browsing miss preserves
+  the Plex response and may only offer bounded P2 work in memory; the request
+  does not wait for SQLite, MediaVault, or CDN work. A successful background
+  probe persists to L1 and SQLite for later responses.
 - `GET` and `HEAD` requests below `/library/parts/{partID}/...` are eligible for
   interception only when the cached `Part.file` has a configured cloud
   extension and maps to a readable local STRM file.
@@ -172,15 +170,13 @@ Plex-owned.
 
 All clients use the same MediaInfo projection rules. Part and universal-start
 redirects never wait for MediaInfo. An L1 hit does not synchronously read SQLite
-for the request; access renewal may touch SQLite asynchronously. An L1 miss may
-use the persistent record or one bounded playback probe, and timeout or failure
-preserves the existing Direct Play path. Metadata browsing has a separate single
-synchronous cold-probe slot. After the admitted synchronous wait releases its
-slot, a fixed five-second window begins. Misses inside that window do not renew
-it: eligible foreground misses may be offered to the bounded background
-scheduler, while the original Plex response is returned immediately. An
-admitted probe can finish in the background and write L1 and SQLite after the
-request waiter leaves.
+for the request; access renewal may touch SQLite asynchronously. A playback
+decision L1 miss may use the persistent record or one bounded P0 probe, and
+timeout or failure preserves the existing Direct Play path. Metadata browsing
+never waits for that work: an eligible foreground miss may only be offered to
+the bounded P2 scheduler while the original Plex response is returned
+immediately. Successful worker results populate L1 and SQLite for later
+responses.
 
 ## MediaInfo scheduling contract
 
@@ -192,8 +188,8 @@ priority classes:
    background work.
 2. P1 represents the configured two previous and three following neighbors of an
    actual playback item. Its queue admits at most 50 entries.
-3. P2 represents an eligible foreground metadata miss that could not use the
-   synchronous cold-probe slot. Its queue admits at most 50 entries.
+3. P2 represents an eligible foreground metadata miss. Its queue admits at most
+   50 entries, while the HTTP request returns the original Plex response.
 
 P1 and P2 pending entries expire after five minutes and share one global
 five-second remote start interval after both L1 and SQLite miss. Fresh SQLite

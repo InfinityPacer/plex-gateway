@@ -526,12 +526,12 @@ ffprobe 成功但未返回 format size 时，Gateway 可以在同一 worker 中�
 在 fresh 期间不重复访问 CDN，fresh 到期后的 retained 记录仍可触发后台复验。
 
 首次冷缓存长期返回空 MediaInfo 不可作为正常体验，metadata 请求一直无响应同样不可
-接受。处理顺序为：Gateway 启动时按需从 SQLite 回填 L1；精确冷 miss 时创建最高优先级
-任务，并允许当前单项 metadata response 在可配置的硬截止时间内等待。当前 PoC 候选
-上限为 `5s`；窗口内完成就补充当前 response，超时或失败必须立即返回原始 Plex
-response，任务继续在后台完成。当前项云端重定向已就绪后，管理面只发现并限速预热
-可配置邻近窗口，不扩散为季、整剧或目录扫描。提高首次完整率应优先使用有界窗口，而不是
-无限增加请求等待或启动无界批量任务。
+接受。处理顺序为：Gateway 启动时按需从 SQLite 回填 L1；单项 metadata 精确冷 miss
+立即返回原始 Plex response，只在内存中投递有界 P2，由 worker 异步查询 SQLite 并在
+必要时探测 MediaVault/CDN。实际播放 decision 的 P0 冷探测可以使用独立、可配置的硬
+截止时间，当前候选上限为 `5s`。当前项云端重定向已就绪后，管理面只发现并限速预热
+可配置邻近窗口，不扩散为季、整剧或目录扫描。提高首次完整率应优先使用有界后台窗口，
+而不是增加浏览请求等待或启动无界批量任务。
 
 Gateway 不缓存原始文件头尾。MediaVault 的上传预缓存利用上传时仍在本地的数据，适合
 减少其后续扫描对 115 的请求，但只覆盖经 MediaVault 上传的新文件；Gateway 若从 CDN
@@ -711,7 +711,7 @@ provider、目标 backing、decision revision、人工确认或策略依据，�
 | MediaVault 缺少需要的 API | 标记 capability unavailable/manual，选择可控 provider 或人工检查点 |
 | STRM 半写入 | 生产者必须临时文件写完后原子 rename；Gateway 读取失败则 fallback Plex |
 | Plex 未扫描到 Part | 延迟重试定向刷新，不猜测 PartID，不写数据库 |
-| MediaInfo 冷探测超时 | 在硬截止时间返回原始 Plex metadata，后台继续任务，不影响播放和观看状态 |
+| MediaInfo 播放冷探测超时 | 在 decision 硬截止时间返回 Plex 原始结果，后台任务可继续，不影响观看状态；metadata 浏览不等待冷探测 |
 | MediaInfo 探测失败 | 保留已知良好记录并进入负缓存；没有旧记录时保持 Plex 原始字段 |
 | Plex 管理 Token 失效 | 停止邻近媒体发现；当前项预热和客户端请求继续工作 |
 | Plex DB helper 拒绝写入 | 保留权威 MediaInfo，播放按 Gateway 能力降级，不删除本地文件 |
@@ -772,9 +772,9 @@ provider、目标 backing、decision revision、人工确认或策略依据，�
 - 实现精确当前 Part 和重定向就绪后的双向邻近窗口，以及优先级、限速提交、singleflight、
   推测任务抢占、负缓存和已知良好保护；
 - 将单季、整剧、STRM 目录任务、批任务 checkpoint 和恢复留到后续批量预热能力；
-- 验证 `5s` 冷等待候选上限、首次 metadata 完整率和 metadata p50/p95/p99；
-- 验证 decision、Part、universal start 和 302 不执行分析 I/O，单项 metadata 的有界等待
-  单独计入和验收；
+- 验证 decision 的 `5s` 冷等待候选上限、首次 metadata 完整率和 metadata p50/p95/p99；
+- 验证 Part、universal start 和 302 不执行分析 I/O，单项 metadata 冷 miss 立即透传且
+  只进行非阻塞 P2 投递；
 - 比较 Plex 官方 API、其他受支持 PMS 接口和独立 Plex Helper，不提前固定写入方案；
 - Helper 候选只在 Plex 停止或经过验证的维护窗口执行；
 - 测试库验证一致性备份与 restore、schema allowlist、CAS、写入和 API 回读；
