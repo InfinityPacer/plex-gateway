@@ -37,6 +37,7 @@ const (
 // the original requests through the same upstream admission guard.
 type MetadataCoalesceOptions struct {
 	Enabled    bool
+	Trace      bool
 	Window     time.Duration
 	MaxItems   int
 	Timeout    time.Duration
@@ -52,6 +53,7 @@ type metadataCoalescer struct {
 	maxGroups  int
 	maxWaiters int
 	onMetadata func(*http.Request, []byte, string)
+	trace      bool
 	metrics    *metrics.Metrics
 	logger     *slog.Logger
 
@@ -63,6 +65,7 @@ type metadataCoalescer struct {
 type metadataCoalesceGroup struct {
 	key            [sha256.Size]byte
 	representative *http.Request
+	createdAt      time.Time
 	items          map[string][]*metadataCoalesceCall
 	order          []string
 	timer          *time.Timer
@@ -91,6 +94,17 @@ type metadataCoalesceResult struct {
 }
 
 type metadataCoalesceContextKey struct{}
+type metadataCoalesceTimingContextKey struct{}
+
+// metadataCoalesceTiming separates admission delay from Plex work without
+// exposing the batch identity. The synthetic batch stays on one request stack,
+// so the guard and coalescer update this recorder sequentially.
+type metadataCoalesceTiming struct {
+	guardWait time.Duration
+	plex      time.Duration
+	split     time.Duration
+	guardSeen bool
+}
 
 func newMetadataCoalescer(options MetadataCoalesceOptions, next http.Handler, registry *metrics.Metrics, logger *slog.Logger) http.Handler {
 	if next == nil || !options.Enabled {
@@ -125,7 +139,7 @@ func newMetadataCoalescer(options MetadataCoalesceOptions, next http.Handler, re
 		next: next, window: window, maxItems: maxItems, timeout: timeout,
 		bodyLimit: defaultMetadataCoalesceResponseLimit, onMetadata: options.OnMetadata,
 		maxGroups: defaultMetadataCoalesceMaxGroups, maxWaiters: defaultMetadataCoalesceMaxWaiters,
-		metrics: registry, logger: logger, groups: make(map[[sha256.Size]byte]*metadataCoalesceGroup),
+		trace: options.Trace, metrics: registry, logger: logger, groups: make(map[[sha256.Size]byte]*metadataCoalesceGroup),
 		failed: make(map[[sha256.Size]byte]time.Time),
 	}
 }
@@ -176,6 +190,7 @@ func (coalescer *metadataCoalescer) enqueue(key [sha256.Size]byte, ratingKey str
 		group = &metadataCoalesceGroup{
 			key:            key,
 			representative: call.request,
+			createdAt:      time.Now(),
 			items:          make(map[string][]*metadataCoalesceCall),
 		}
 		coalescer.groups[key] = group
@@ -218,6 +233,7 @@ func (coalescer *metadataCoalescer) flush(key [sha256.Size]byte, group *metadata
 }
 
 func (coalescer *metadataCoalescer) execute(group *metadataCoalesceGroup) {
+	started := time.Now()
 	order, items, representative, liveCalls := liveMetadataCoalesceItems(group)
 	if liveCalls == 0 {
 		return
@@ -232,6 +248,8 @@ func (coalescer *metadataCoalescer) execute(group *metadataCoalesceGroup) {
 	baseContext := context.WithoutCancel(representative.Context())
 	ctx, cancel := context.WithTimeout(baseContext, coalescer.timeout)
 	ctx = context.WithValue(ctx, metadataCoalesceContextKey{}, true)
+	timing := &metadataCoalesceTiming{}
+	ctx = context.WithValue(ctx, metadataCoalesceTimingContextKey{}, timing)
 	group.installCancel(cancel)
 	defer group.clearCancel()
 	defer cancel()
@@ -241,7 +259,7 @@ func (coalescer *metadataCoalescer) execute(group *metadataCoalesceGroup) {
 
 	coalescer.metrics.IncMetadataCoalesceBatch(len(order))
 	coalescer.metrics.IncMetadataCoalesceActive()
-	responses, headers, status, err := coalescer.requestBatch(ctx, representative, order)
+	responses, headers, status, err := coalescer.requestBatch(ctx, representative, order, timing)
 	coalescer.metrics.DecMetadataCoalesceActive()
 	if err != nil {
 		if !group.anyActive() {
@@ -254,6 +272,7 @@ func (coalescer *metadataCoalescer) execute(group *metadataCoalesceGroup) {
 		return
 	}
 
+	dispatchStarted := time.Now()
 	wireBodies := make(map[string][]byte, len(order))
 	responseHeaders := make(map[string]http.Header, len(order))
 	for _, ratingKey := range order {
@@ -279,6 +298,18 @@ func (coalescer *metadataCoalescer) execute(group *metadataCoalesceGroup) {
 				headers: responseHeaders[ratingKey], status: status, body: wireBodies[ratingKey],
 			})
 		}
+	}
+	if coalescer.trace {
+		coalescer.logger.Info("metadata_coalesce_batch",
+			"items", len(order),
+			"waiters", liveCalls,
+			"coalesce_wait_ms", started.Sub(group.createdAt).Milliseconds(),
+			"guard_wait_ms", timing.guardWait.Milliseconds(),
+			"plex_ms", timing.plex.Milliseconds(),
+			"split_ms", timing.split.Milliseconds(),
+			"dispatch_ms", time.Since(dispatchStarted).Milliseconds(),
+			"total_ms", time.Since(group.createdAt).Milliseconds(),
+		)
 	}
 }
 
@@ -309,6 +340,7 @@ func (coalescer *metadataCoalescer) requestBatch(
 	ctx context.Context,
 	request *http.Request,
 	ratingKeys []string,
+	timing *metadataCoalesceTiming,
 ) (responses map[string][]byte, headers http.Header, status int, err error) {
 	defer func() {
 		recovered := recover()
@@ -331,7 +363,11 @@ func (coalescer *metadataCoalescer) requestBatch(
 	batchRequest.RequestURI = batchRequest.URL.RequestURI()
 
 	capture := newMetadataCoalesceCapture(coalescer.bodyLimit)
+	handlerStarted := time.Now()
 	coalescer.next.ServeHTTP(capture, batchRequest)
+	if timing != nil && !timing.guardSeen {
+		timing.plex = time.Since(handlerStarted)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, nil, 0, err
 	}
@@ -341,11 +377,18 @@ func (coalescer *metadataCoalescer) requestBatch(
 	if capture.statusCode() != http.StatusOK || capture.header.Get("Trailer") != "" || capture.header.Get("Content-Range") != "" {
 		return nil, nil, 0, fmt.Errorf("metadata coalesce upstream status %d", capture.statusCode())
 	}
+	splitStarted := time.Now()
 	decoded, encoding, err := decodeMetadataBody(capture.body.Bytes(), capture.header.Get("Content-Encoding"), coalescer.bodyLimit)
 	if err != nil {
+		if timing != nil {
+			timing.split = time.Since(splitStarted)
+		}
 		return nil, nil, 0, fmt.Errorf("decode metadata coalesce response: %w", err)
 	}
 	responses, err = plexmeta.SplitMetadataBatch(decoded, capture.header.Get("Content-Type"), ratingKeys)
+	if timing != nil {
+		timing.split = time.Since(splitStarted)
+	}
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("split metadata coalesce response: %w", err)
 	}

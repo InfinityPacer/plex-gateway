@@ -118,6 +118,7 @@ func run() error {
 		},
 		MetadataCoalesce: gateway.MetadataCoalesceOptions{
 			Enabled:  cfg.MetadataCoalesce.Enabled,
+			Trace:    cfg.TraceEnabled,
 			Window:   cfg.MetadataCoalesce.Window,
 			MaxItems: cfg.MetadataCoalesce.MaxItems,
 			Timeout:  cfg.MetadataCoalesce.Timeout,

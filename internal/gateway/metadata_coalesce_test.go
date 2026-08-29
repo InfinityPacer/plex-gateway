@@ -38,6 +38,23 @@ type metadataCoalesceTestUpstream struct {
 	serve    func(http.ResponseWriter, *http.Request)
 }
 
+type metadataCoalesceSynchronizedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (buffer *metadataCoalesceSynchronizedBuffer) Write(value []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.Write(value)
+}
+
+func (buffer *metadataCoalesceSynchronizedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.String()
+}
+
 func (upstream *metadataCoalesceTestUpstream) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	upstream.mu.Lock()
 	upstream.requests = append(upstream.requests, metadataCoalesceObservedRequest{
@@ -275,6 +292,96 @@ func TestMetadataCoalescerBatchesEquivalentGetsAndFansOutDuplicate(t *testing.T)
 	snapshot := registry.Snapshot()
 	if snapshot.MetadataCoalesceOfferedTotal != 3 || snapshot.MetadataCoalesceBatchesTotal != 1 || snapshot.MetadataCoalesceItemsTotal != 2 || snapshot.MetadataCoalesceFallbacksTotal != 0 {
 		t.Fatalf("coalescer metrics = %#v", snapshot)
+	}
+}
+
+func TestMetadataCoalescerTraceReportsStageTimingWithoutIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		trace     bool
+		wantEvent bool
+	}{
+		{name: "enabled", trace: true, wantEvent: true},
+		{name: "disabled", trace: false, wantEvent: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := &metadataCoalesceTestUpstream{}
+			upstream.serve = func(writer http.ResponseWriter, request *http.Request) {
+				time.Sleep(2 * time.Millisecond)
+				keys := metadataCoalesceTestKeys(request)
+				writeMetadataCoalesceTestResponse(
+					writer, request, "application/json", "", http.StatusOK,
+					metadataCoalesceJSONBody(keys), nil,
+				)
+			}
+			var output metadataCoalesceSynchronizedBuffer
+			logger := slog.New(slog.NewJSONHandler(&output, nil))
+			registry := metrics.New()
+			guard := newMetadataGuard(MetadataGuardOptions{
+				BatchEnabled: true, BatchConcurrency: 1, QueueTimeout: time.Second,
+			}, upstream, registry, logger)
+			handler := newMetadataCoalescer(MetadataCoalesceOptions{
+				Enabled: true, Trace: test.trace, Window: 5 * time.Millisecond,
+				MaxItems: 8, Timeout: time.Second,
+			}, guard, registry, logger)
+
+			first := newMetadataCoalesceTestRequest(http.MethodGet, "910001")
+			first.Header.Set("X-Plex-Token", "secret-token-do-not-log")
+			first.Header.Set("Cookie", "secret-cookie-do-not-log")
+			second := newMetadataCoalesceTestRequest(http.MethodGet, "910002")
+			second.Header = first.Header.Clone()
+			responses := runMetadataCoalesceCalls(t, handler, first, second)
+			for _, response := range responses {
+				if response.Code != http.StatusOK {
+					t.Fatalf("response status = %d", response.Code)
+				}
+			}
+
+			logOutput := output.String()
+			if !test.wantEvent {
+				if strings.Contains(logOutput, "metadata_coalesce_batch") {
+					t.Fatalf("trace-disabled log = %q", logOutput)
+				}
+				return
+			}
+			deadline := time.Now().Add(time.Second)
+			for !strings.Contains(logOutput, "metadata_coalesce_batch") && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+				logOutput = output.String()
+			}
+			for _, sensitive := range []string{
+				"910001", "910002", "secret-token-do-not-log", "secret-cookie-do-not-log", "/library/metadata/",
+			} {
+				if strings.Contains(logOutput, sensitive) {
+					t.Fatalf("trace contains sensitive value %q: %s", sensitive, logOutput)
+				}
+			}
+			var event map[string]any
+			for _, line := range strings.Split(strings.TrimSpace(logOutput), "\n") {
+				var candidate map[string]any
+				if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+					t.Fatal(err)
+				}
+				if candidate["msg"] == "metadata_coalesce_batch" {
+					event = candidate
+					break
+				}
+			}
+			if event == nil {
+				t.Fatalf("missing metadata_coalesce_batch event: %s", logOutput)
+			}
+			for _, field := range []string{
+				"coalesce_wait_ms", "guard_wait_ms", "plex_ms", "split_ms", "dispatch_ms", "total_ms",
+			} {
+				value, ok := event[field].(float64)
+				if !ok || value < 0 {
+					t.Fatalf("%s = %#v", field, event[field])
+				}
+			}
+			if event["items"] != float64(2) || event["waiters"] != float64(2) {
+				t.Fatalf("event cardinality = %#v", event)
+			}
+		})
 	}
 }
 
