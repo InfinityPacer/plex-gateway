@@ -132,6 +132,7 @@ func run() error {
 		MediaInfoPrewarmer:             prewarmService,
 		MediaInfoPrewarmStatus:         prewarmStatus,
 		PlaybackVeto:                   cfg.PlaybackVeto,
+		PlexWebDirectPlay:              cfg.PlexWebDirectPlay,
 	})
 	handler := newMaintenanceHandler(gatewayHandler, mediaInfoService, cfg.DatabasePath, logger)
 	server := &http.Server{
@@ -163,6 +164,7 @@ func run() error {
 			"mediainfo_reason", mediaInfoReason,
 			"mediainfo_prewarm_available", prewarmService != nil,
 			"mediainfo_prewarm_reason", prewarmReason,
+			"plex_web_direct_play", cfg.PlexWebDirectPlay,
 			"mediainfo_prewarm_before", cfg.MediaInfo.PrewarmBefore,
 			"mediainfo_prewarm_after", cfg.MediaInfo.PrewarmAfter,
 			"mediainfo_background_interval_ms", cfg.MediaInfo.BackgroundInterval.Milliseconds(),

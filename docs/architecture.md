@@ -75,6 +75,9 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   traffic.
 - Timeline, scrobble, sessions, playlists, subtitles, images, transcode
   segments, and every unrecognized endpoint remain ordinary Plex traffic.
+- When Plex Web compatibility is enabled, only successful `GET /web/` and
+  `GET /web/index.html` HTML responses are eligible for the bounded shell
+  helper injection. Every API response and Plex Web static asset bypasses it.
 
 ## Code ownership
 
@@ -262,13 +265,33 @@ The redirect plane requires a client that can consume the final raw media URL.
 Native players are not subject to browser cross-origin fetch enforcement and
 may accept redirects from either Part or eligible universal start routes.
 
-Plex Web requests `start.mpd` as a DASH manifest. A redirect-only gateway
-cannot make the final media origin emit browser CORS headers, and an ordinary
-MP4 or MKV response is not a DASH manifest. The gateway therefore does not
-claim cloud STRM support for Plex Web. Proxying media bytes, repackaging media,
-or modifying the Plex Web client would violate or expand the playback-plane
-boundary; none is enabled by this project. Local media remains transparently
-proxied and retains Plex's normal Web compatibility.
+Plex Web sets `crossorigin=anonymous` on its HTML media element. When a cloud
+Part redirects from the Gateway origin to a CDN without CORS headers, the
+browser rejects an otherwise natively playable file before Plex Web falls back
+to `start.mpd`. `PLEX_WEB_DIRECT_PLAY_ENABLED=true` modifies only the small Plex
+Web shell and loads a versioned same-origin helper. The helper removes
+`crossorigin` only when an audio or video source points at the Gateway origin's
+`/library/parts/.../file` or `.strm` path. Those are the Part key shapes Plex
+uses for STRM control files; ordinary local Parts retain their media extension
+and Plex Web behavior. Cloud Parts may follow the existing 302 as ordinary
+no-CORS media requests.
+
+The helper is loaded before Plex's application bundles, has no token or media
+state, and performs no network request of its own. The shell response is
+requested from Plex with identity encoding, buffered up to 2 MiB, and modified
+only for a successful HTML response containing `</head>`. Unsupported response
+shapes are returned unchanged. Changed responses discard upstream validators
+and byte-range metadata and use `no-cache`; the versioned helper itself is
+immutable-cacheable. Disabling the feature removes both the shell modification
+and helper endpoint.
+
+This compatibility path does not expand the media data plane. The browser still
+downloads bytes directly from the final CDN. It only supports containers and
+codecs the browser can Direct Play. If Plex Web needs DASH, remuxing, or video
+transcoding, an ordinary MP4 or MKV response is not a manifest and this helper
+cannot make that path playable. The gateway does not proxy media, package
+segments, or synthesize manifests. Local media retains Plex's normal Web
+compatibility.
 
 ## Playback veto contract
 

@@ -51,6 +51,7 @@ type Options struct {
 	MediaInfoPrewarmer             cloudRedirectPrewarmer
 	MediaInfoPrewarmStatus         func() prewarm.Status
 	PlaybackVeto                   bool
+	PlexWebDirectPlay              bool
 }
 
 type cloudRedirectPrewarmer interface {
@@ -99,11 +100,15 @@ func New(options Options) http.Handler {
 		})
 	}
 
+	plexWeb := newPlexWebCompatibility(options.PlexWebDirectPlay, logger)
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
 			request.SetURL(options.Upstream)
 			request.Out.Host = options.Upstream.Host
 			request.SetXForwarded()
+			if options.PlexWebDirectPlay {
+				plexWeb.prepareProxyRequest(request)
+			}
 		},
 		Transport:     transport,
 		FlushInterval: -1,
@@ -113,6 +118,9 @@ func New(options Options) http.Handler {
 			}
 			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		},
+	}
+	if options.PlexWebDirectPlay {
+		proxy.ModifyResponse = plexWeb.modifyResponse
 	}
 	plex := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		registry.IncPlexRequests()
@@ -199,6 +207,10 @@ func New(options Options) http.Handler {
 		})
 	})
 	mux.Handle("GET /metrics", registry.Handler())
+	if options.PlexWebDirectPlay {
+		mux.HandleFunc("GET "+plexWebScriptPath, plexWeb.serveScript)
+		mux.HandleFunc("HEAD "+plexWebScriptPath, plexWeb.serveScript)
+	}
 	mux.Handle("GET /video/:/transcode/universal/decision", decision)
 	mux.Handle("HEAD /video/:/transcode/universal/decision", decision)
 	for _, route := range []string{
