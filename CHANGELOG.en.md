@@ -1,7 +1,5 @@
 # Changelog
 
-[简体中文](CHANGELOG.md)
-
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -13,84 +11,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added general Plex metadata micro-batching. Single-item GET requests with
-  identical authentication, query, and client context can share a native Plex
-  batch of up to 32 items and are split back into XML, JSON, or gzip responses
-  by rating key.
-- Sanitized traces now report batch cardinality and stage timing for collection,
-  Guard admission, Plex, splitting, and dispatch without rating keys, request
-  identity, or authentication data.
-- Added bounded remote ffprobe, an L1 LRU plus SQLite MediaInfo cache, and
-  single-item Plex metadata response enrichment. Browsing misses preserve the
-  original response immediately while only playback decisions use a cold wait.
-- Current-Part prewarming is submitted to P0 after a cloud redirect is ready. An
-  isolated Plex management token can additionally discover a configurable P1
-  nearby window, defaulting to two previous and three following items. The
-  current job is only prioritized in the queue and
-  cannot preempt a probe already running. Missing or invalid management
-  credentials disable only nearby discovery.
-- Added per-client rapid-switch coordination, cross-User-Agent failure handoff,
-  and distinct prewarm metrics for fresh cache hits, joined work, new queue
-  admissions, and rejections.
-- Unified actual playback, nearby prewarming, and foreground metadata misses
-  under one P0/P1/P2 MediaInfo scheduler. P1/P2 use a five-minute pending TTL
-  and a global five-second remote-start interval while P0 keeps reserved capacity.
-- Parts without Plex Streams now receive descriptive video, audio, and subtitle
-  Streams without Plex IDs or playback-selection state, including HDR10, Dolby
-  Vision, bit depth, bitrate, channel, and language fields.
-- Infuse-style background library synchronization consumes existing MediaInfo
-  cache records without turning per-item browsing into full-library cold probes.
-- MediaInfo ffprobe records now use a new provider revision so records produced
-  by the previous interpretation are not reused.
-- When ffprobe omits the total media size, a bounded one-byte Range request with
-  the same User-Agent recovers Part size from a valid `Content-Range`. Failures
-  preserve the otherwise valid MediaInfo and fail open.
-- Updated the background-probe fallback User-Agent to the currently verified
-  Infuse Library version.
-- Added a disabled-by-default experimental Apple TV Plex Dolby Vision Profile 5
-  playback veto. It only reuses fresh MediaInfo already obtained by the
-  decision path, stores no state, does not intercept Parts, and starts no
-  additional probe.
-- Added a public performance matrix. Local media and 302 routes perform no
-  MediaInfo analysis I/O, and one decision waits for at most one cold probe.
+- Plex for Apple TV can now identify HDR and Dolby Vision information for STRM
+  media. The gateway fills missing MediaInfo while preserving Plex-owned media
+  fields and playback decisions.
+- STRM video, audio, and subtitle details are detected and cached automatically.
+  Playback prioritizes the current item, while an optional Plex management token
+  enables nearby-episode prewarming.
+- Added a disabled-by-default experimental Apple TV Dolby Vision Profile 5
+  playback veto.
+- Added a live MediaInfo cache-reset command that backs up the Gateway database
+  before clearing the cache without stopping the container.
 
 ### Changed
 
-- The metadata analysis filter now removes only `asyncAugmentMetadata` and
-  preserves `checkFiles`, retaining Plex `Part.accessible` and `Part.exists`
-  semantics.
-- NAS load tests and real Apple TV long-season A/B set the Metadata Guard
-  defaults to global 16, per-client 16, and batch 4. The micro-batch window is
-  20ms and the batch size is capped at 32.
-- This release persists fallback MediaInfo only in the gateway's SQLite store.
-  Production Plex DB writes remain a next-stage evaluation after coverage,
-  compatibility, backup, and rollback requirements are measured; the final API
-  or database-helper route is not selected here.
+- Long-season browsing is faster. The gateway combines duplicate media-detail
+  requests, protects Plex Server, and returns Plex results before filling a cold
+  MediaInfo cache in the background.
+- MediaInfo, request protection, and sanitized tracing are enabled by default.
+  The official image includes ffprobe, stores data under `/app_data`, and loads
+  runtime configuration from `app.env`.
+- Infuse, Plex iOS, and Plex for Apple TV Direct Play are verified. This release
+  does not write to the Plex database, and local media remains transparent.
 
 ### Fixed
 
-- Failed batches issue at most one request per unique rating key through the
-  existing single-item Guard, fan out that result to duplicate callers, and
-  temporarily suspend batching for that request group. Canceled callers do not
-  fall back, and canceling all callers terminates the upstream batch.
-- Single-item metadata browsing misses now preserve the Plex response
-  immediately and only perform a non-blocking, exact-key P2 memory offer. The
-  request path no longer reads SQLite synchronously, waits for MediaVault/CDN,
-  or holds a five-second cold-probe window. Workers check SQLite first, so only
-  genuine misses enter the remote-start limiter.
+- Fixed repeated waits and unnecessary Plex requests when remote probing is
+  canceled or combined metadata requests fail.
 
 ## [0.1.1] - 2026-08-28
 
 ### Added
 
-- Configurable concurrency protection for individual and batch Plex metadata
-  requests to limit native-client metadata fan-out against Plex Media Server.
-- Metadata Guard metrics for admitted, queued, active, and timed-out requests.
+- Added Plex metadata request protection and metrics so opening many items at
+  once does not overwhelm Plex Media Server.
 
 ### Fixed
 
-- Apple TV Plex client Direct Play decisions and playback negotiation for STRM
-  media while preserving Plex authorization of client credentials and Parts.
+- Fixed Apple TV Plex playback sessions failing to start for some STRM items.
+  The gateway enters 302 playback only after Plex confirms the current user,
+  media selection, and Direct Play decision. Other requests remain transparent.
 
 ## [0.1.0] - 2026-08-27
 

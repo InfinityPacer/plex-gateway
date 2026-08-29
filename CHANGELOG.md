@@ -1,7 +1,5 @@
 # 更新日志
 
-[English](CHANGELOG.en.md)
-
 本文件记录项目的所有重要变更。
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
@@ -13,60 +11,37 @@
 
 ### 新增
 
-- 增加通用 Plex metadata 微批。认证、查询和客户端上下文完全一致的单项 GET 默认可合并为
-  最多 32 项的 Plex 原生 batch，并按 ratingKey 拆回 XML、JSON 或 gzip 单项响应。
-- 脱敏 trace 增加批次条目数，以及聚合等待、Guard 等待、Plex、拆分和分发阶段耗时，
-  不记录 ratingKey、请求身份或认证信息。
-- 增加 MediaInfo L1 LRU 与 SQLite 持久缓存、受限远程 ffprobe 和单项 Plex metadata
-  响应增强。浏览冷 miss 立即保持原响应并在后台探测，实际播放 decision 使用独立冷等待。
-- 云端重定向就绪后将当前 Part 投递 P0，并可使用独立 Plex 管理 Token 按默认前 2、后 3
-  的窗口发现并投递 P1 邻近媒体。当前任务只会优先排队，不能抢占正在运行的探测。
-  Token 缺失或失效只禁用邻近发现。
-- 增加按客户端隔离的快速切换协调、跨 User-Agent 失败接力，以及缓存命中、加入现有
-  任务、新入队和拒绝的预热指标。
-- 使用统一的 P0/P1/P2 MediaInfo 调度器处理实际播放、邻近预热和前台 metadata miss。
-  P1/P2 采用 5 分钟 pending TTL 和全局 5 秒远程启动间隔，P0 使用独立容量。
-- 为没有 Stream 的 STRM Part 创建不含 Plex ID 或播放选择状态的描述性视频、音频和
-  字幕 Stream，并补充 HDR10、Dolby Vision、bit depth、bitrate、声道和语言等字段。
-- Infuse 风格的后台媒体库同步只读取现有 MediaInfo 缓存，不再因逐项浏览触发全库冷探测。
-- MediaInfo ffprobe 记录升级到新的 Provider revision，旧解释版本的缓存不会被复用。
-- 当 ffprobe 缺少媒体总大小时，使用同一 User-Agent 发起有界的单字节 Range 请求，
-  并从有效 `Content-Range` 补充 Part size，失败保持已有 MediaInfo 并正常回退。
-- 后台探测 fallback User-Agent 更新为当前已验证的 Infuse Library 版本。
-- 增加默认关闭的实验性 Apple TV Plex Dolby Vision Profile 5 播放 veto。它只复用
-  decision 已取得的新鲜 MediaInfo，不保存状态、不拦截 Part，也不发起额外探测。
-- 增加公开性能矩阵。本地媒体与 302 路径不执行 MediaInfo 分析 I/O，同一 decision
-  最多等待一次冷探测。
+- 支持 Plex for Apple TV 正确识别 STRM 的 HDR 和 Dolby Vision 信息。Gateway 会补齐
+  Plex 缺失的 MediaInfo，同时保留 Plex 自己已有的媒体信息和播放决策。
+- 自动探测并缓存 STRM 的视频、音频和字幕信息。开始播放时优先处理当前影片，配置 Plex
+  管理 Token 后还会预热相邻剧集，减少连续观看时的等待。
+- 增加默认关闭的实验性 Apple TV Dolby Vision Profile 5 播放拒绝开关。
+- 增加 MediaInfo 缓存热清理命令，清理前自动备份 Gateway 数据库，无需停止容器。
 
 ### 变更
 
-- metadata 分析过滤器只移除 `asyncAugmentMetadata`，继续透传 `checkFiles`，保留 Plex
-  `Part.accessible` 与 `Part.exists` 语义。
-- 根据 NAS 负载测试和 Apple TV 长剧集 A/B，将 Metadata Guard 默认值调整为单项全局 16、
-  单客户端 16、批量 4；微批窗口调整为 20ms，并将单批上限固定为 32。
-- 本版本只将兜底 MediaInfo 持久化到 Gateway SQLite。Plex DB 生产写入保留到下一阶段，
-  待覆盖率、兼容性、备份和回滚方案完成评估后再决定采用 API 或数据库辅助方案。
+- 优化长剧集页面加载。Gateway 会合并重复的媒体详情请求并保护 Plex Server，首次访问
+  没有缓存时先返回 Plex 原始结果，再在后台补齐 MediaInfo。
+- MediaInfo、请求保护和脱敏追踪默认开启。官方镜像内置 ffprobe，使用 `/app_data`
+  保存数据，并通过 `app.env` 管理运行配置。
+- 已验证 Infuse、Plex iOS 和 Plex for Apple TV 的 Direct Play。本版本不写 Plex 数据库，
+  本地媒体继续透明转发。
 
 ### 修复
 
-- batch 异常时每个唯一 ratingKey 只通过既有单项 Guard 回退一次，重复调用者共享结果，
-  并短暂熔断同组微批；取消的请求不会回退，全部调用者取消后终止上游 batch。
-- 单项 metadata 浏览冷 miss 立即透传 Plex，并只进行非阻塞、精确去重的 P2 内存投递；
-  请求路径不再同步查询 SQLite、等待 MediaVault/CDN 或持有 5 秒冷探测窗口。后台 worker
-  先检查 SQLite，只有真实 miss 才进入远程启动限速。
+- 修复远程探测、请求取消或请求合并失败时可能造成的重复等待和额外 Plex 请求。
 
 ## [0.1.1] - 2026-08-28
 
 ### 新增
 
-- 为单项和批量 Plex metadata 请求提供可配置的并发保护，限制原生客户端
-  metadata 扇出对 Plex Server 的压力。
-- 提供 Metadata Guard 的准入、排队、活动和超时指标。
+- 增加 Plex 媒体详情请求并发保护和监控指标，避免原生客户端一次打开大量媒体时压垮
+  Plex Server。
 
 ### 修复
 
-- 支持 Apple TV Plex 客户端对 STRM 媒体的 Direct Play 决策和播放协商，
-  同时保留 Plex 对客户端凭据和媒体 Part 的授权。
+- 修复 Apple TV Plex 客户端无法为部分 STRM 创建播放会话的问题。Gateway 只在 Plex
+  已确认当前用户、媒体和 Direct Play 决策后才进入 302 播放，其他请求继续透明转发。
 
 ## [0.1.0] - 2026-08-27
 

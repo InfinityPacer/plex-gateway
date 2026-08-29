@@ -123,6 +123,7 @@ Important environment variables:
 | `PART_PROBE_TIMEOUT` | `15s` | Timeout for the bodyless Plex Part authorization probe. |
 | `CLOUD_EXTENSIONS` | `.strm` | Comma-separated cloud control-file extensions. |
 | `TRACE_ENABLED` | `true` | Enable sanitized Plex request-order tracing. |
+| `METADATA_ANALYSIS_FILTER_ENABLED` | `true` | Remove `asyncAugmentMetadata` from detailed metadata reads to avoid Plex background analysis while preserving `checkFiles`. |
 | `METADATA_GUARD_ENABLED` | `true` | Limit single-item detailed metadata requests before they enter Plex. |
 | `METADATA_GUARD_GLOBAL_CONCURRENCY` | `16` | Shared detailed metadata concurrency limit across all clients. |
 | `METADATA_GUARD_CLIENT_CONCURRENCY` | `16` | Detailed metadata concurrency limit for each Plex client identifier. |
