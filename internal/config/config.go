@@ -40,7 +40,7 @@ const (
 	defaultMediaInfoAgent     = "Infuse-Library/8.5.1"
 	defaultMediaInfoColdWait  = 5 * time.Second
 	defaultMediaInfoBodyLimit = 8 << 20
-	defaultMediaInfoWaiters   = 4
+	defaultMediaInfoWaiters   = defaultMetadataGlobal
 	defaultPrewarmBefore      = 2
 	defaultPrewarmAfter       = 3
 	defaultPrewarmInterval    = 5 * time.Second
@@ -172,11 +172,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	traceEnabled, err := envBool("TRACE_ENABLED", false)
+	traceEnabled, err := envBool("TRACE_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}
-	metadataGuardEnabled, err := envBool("METADATA_GUARD_ENABLED", false)
+	metadataGuardEnabled, err := envBool("METADATA_GUARD_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}
@@ -191,7 +191,7 @@ func Load() (Config, error) {
 	if metadataPerClient > metadataGlobal {
 		return Config{}, errors.New("METADATA_GUARD_CLIENT_CONCURRENCY must not exceed METADATA_GUARD_GLOBAL_CONCURRENCY")
 	}
-	metadataBatchEnabled, err := envBool("METADATA_GUARD_BATCH_ENABLED", false)
+	metadataBatchEnabled, err := envBool("METADATA_GUARD_BATCH_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}

@@ -14,6 +14,7 @@ type fakeRecordStore struct {
 	mu      sync.Mutex
 	records map[string]Record
 	touches atomic.Int64
+	gets    atomic.Int64
 }
 
 func (store *fakeRecordStore) Put(_ context.Context, record Record) error {
@@ -27,10 +28,30 @@ func (store *fakeRecordStore) Put(_ context.Context, record Record) error {
 }
 
 func (store *fakeRecordStore) Get(_ context.Context, key Key) (Record, bool, error) {
+	store.gets.Add(1)
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	record, ok := store.records[key.cacheKey()]
 	return cloneRecord(record), ok, nil
+}
+
+func TestServiceGetMemoryNeverLoadsDurableStorage(t *testing.T) {
+	now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+	record := completeRecord(now)
+	store := &fakeRecordStore{records: map[string]Record{record.Key.cacheKey(): record}}
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache(nil, now), Store: store,
+		Provider: &fakeProvider{prober: &blockingProber{}}, PlexServerID: record.Key.PlexServerID,
+		Now: func() time.Time { return now },
+	})
+	if _, found := service.GetMemory(record.Key); found || store.gets.Load() != 0 {
+		t.Fatalf("cold GetMemory found=%v store_gets=%d", found, store.gets.Load())
+	}
+	service.cache.Put(record, now)
+	got, found := service.GetMemory(record.Key)
+	if !found || got.Key != record.Key || store.gets.Load() != 0 {
+		t.Fatalf("warm GetMemory found=%v key=%#v store_gets=%d", found, got.Key, store.gets.Load())
+	}
 }
 
 func (store *fakeRecordStore) Touch(_ context.Context, key Key, accessedAt, retainUntil time.Time) error {
@@ -47,6 +68,14 @@ func (store *fakeRecordStore) Touch(_ context.Context, key Key, accessedAt, reta
 		store.records[key.cacheKey()] = record
 	}
 	return nil
+}
+
+func (store *fakeRecordStore) BackupAndDeleteAll(_ context.Context, backupDir string, _ time.Time) (ResetResult, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	deleted := int64(len(store.records))
+	store.records = make(map[string]Record)
+	return ResetResult{DeletedRecords: deleted, BackupPath: backupDir + "/backup.db"}, nil
 }
 
 type fakeProvider struct {
@@ -160,6 +189,26 @@ func TestServiceOwnsPlexServerIdentity(t *testing.T) {
 	}
 	if provider.calls.Load() != 1 {
 		t.Fatalf("provider calls = %d", provider.calls.Load())
+	}
+}
+
+func TestServiceResetCacheClearsL1AndDurableRecords(t *testing.T) {
+	now := time.Now().UTC()
+	record := completeRecord(now)
+	store := &fakeRecordStore{records: map[string]Record{record.Key.cacheKey(): record}}
+	service := newServiceForTest(t, ServiceOptions{
+		Cache: NewCache([]Record{record}, now), Store: store,
+		Provider: &fakeProvider{prober: &blockingProber{}}, PlexServerID: record.Key.PlexServerID,
+	})
+	result, err := service.ResetCache(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedRecords != 1 || service.Status().CacheEntries != 0 {
+		t.Fatalf("reset result=%#v status=%#v", result, service.Status())
+	}
+	if _, found := service.Get(record.Key); found {
+		t.Fatal("reset record remained readable")
 	}
 }
 

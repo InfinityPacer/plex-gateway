@@ -25,20 +25,50 @@ import (
 )
 
 type fakeMediaInfoEnsurer struct {
-	calls atomic.Int64
-	gets  atomic.Int64
-	mu    sync.Mutex
-	seen  []mediainfo.Request
-	getFn func(mediainfo.Key) (mediainfo.Record, bool)
-	fn    func(context.Context, mediainfo.Request) (mediainfo.Record, error)
+	calls        atomic.Int64
+	gets         atomic.Int64
+	mu           sync.Mutex
+	seen         []mediainfo.Request
+	getFn        func(mediainfo.Key) (mediainfo.Record, bool)
+	getContextFn func(context.Context, mediainfo.Key) (mediainfo.Record, bool)
+	fn           func(context.Context, mediainfo.Request) (mediainfo.Record, error)
 }
 
-func (ensurer *fakeMediaInfoEnsurer) Get(key mediainfo.Key) (mediainfo.Record, bool) {
+func (ensurer *fakeMediaInfoEnsurer) GetContext(ctx context.Context, key mediainfo.Key) (mediainfo.Record, bool) {
 	ensurer.gets.Add(1)
+	if ensurer.getContextFn != nil {
+		return ensurer.getContextFn(ctx, key)
+	}
 	if ensurer.getFn == nil {
 		return mediainfo.Record{}, false
 	}
 	return ensurer.getFn(key)
+}
+
+func TestMetadataEnrichmentCollectionFailsOpenWhenCacheStoreStalls(t *testing.T) {
+	fixture := newMetadataEnrichmentFixture(t)
+	raw := []byte(`<MediaContainer size="1"><Video ratingKey="42"><Media><Part id="9" file="/media/cloud/episode.strm"/></Media></Video></MediaContainer>`)
+	ensurer := &fakeMediaInfoEnsurer{
+		getContextFn: func(ctx context.Context, _ mediainfo.Key) (mediainfo.Record, bool) {
+			<-ctx.Done()
+			return mediainfo.Record{}, false
+		},
+		fn: func(context.Context, mediainfo.Request) (mediainfo.Record, error) {
+			t.Fatal("collection metadata must not admit a cold probe")
+			return mediainfo.Record{}, nil
+		},
+	}
+	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(raw, "application/xml"))
+	request := authenticatedRequest(http.MethodGet, "/library/metadata/41/children")
+	started := time.Now()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cache-only collection blocked for %s", elapsed)
+	}
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), raw) {
+		t.Fatalf("response = %d %q", response.Code, response.Body.Bytes())
+	}
 }
 
 func (ensurer *fakeMediaInfoEnsurer) Ensure(ctx context.Context, request mediainfo.Request) (mediainfo.Record, error) {
@@ -164,6 +194,57 @@ func TestMetadataEnrichmentUsesCachedRecordForBackgroundLibrarySync(t *testing.T
 
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `container="mkv"`) {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	if ensurer.gets.Load() != 1 || ensurer.calls.Load() != 0 {
+		t.Fatalf("Get calls = %d, Ensure calls = %d", ensurer.gets.Load(), ensurer.calls.Load())
+	}
+}
+
+func TestMetadataEnrichmentUsesOnlyCachedRecordsForCollection(t *testing.T) {
+	fixture := newMetadataEnrichmentFixture(t)
+	raw := []byte(`<MediaContainer size="2"><Video ratingKey="42"><Media><Part id="9" file="/media/cloud/episode.strm"/></Media></Video><Video ratingKey="43"><Media container="mp4"><Part id="10" file="/media/local/movie.mp4"/></Media></Video></MediaContainer>`)
+	ensurer := &fakeMediaInfoEnsurer{
+		getFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
+			if key.PartID != "9" {
+				t.Fatalf("unexpected cached Part = %#v", key)
+			}
+			return mediainfo.Record{Key: key, Media: completeProjectionMedia()}, true
+		},
+		fn: func(context.Context, mediainfo.Request) (mediainfo.Record, error) {
+			t.Fatal("collection metadata must not admit a cold probe")
+			return mediainfo.Record{}, nil
+		},
+	}
+	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(raw, "application/xml"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, authenticatedRequest(http.MethodGet, "/library/metadata/7/children"))
+
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`ratingKey="42"><Media container="mkv"`)) {
+		t.Fatalf("response = %d %q", response.Code, response.Body.Bytes())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`ratingKey="43"><Media container="mp4"`)) || bytes.Contains(response.Body.Bytes(), []byte(`ratingKey="43"><Media container="mkv"`)) {
+		t.Fatalf("local collection item changed: %s", response.Body.Bytes())
+	}
+	if ensurer.gets.Load() != 1 || ensurer.calls.Load() != 0 {
+		t.Fatalf("Get calls = %d, Ensure calls = %d", ensurer.gets.Load(), ensurer.calls.Load())
+	}
+}
+
+func TestMetadataEnrichmentLeavesCollectionUnchangedOnCacheMiss(t *testing.T) {
+	fixture := newMetadataEnrichmentFixture(t)
+	raw := []byte(`<MediaContainer size="1"><Video ratingKey="42"><Media><Part id="9" file="/media/cloud/episode.strm"/></Media></Video></MediaContainer>`)
+	ensurer := &fakeMediaInfoEnsurer{getFn: func(mediainfo.Key) (mediainfo.Record, bool) {
+		return mediainfo.Record{}, false
+	}, fn: func(context.Context, mediainfo.Request) (mediainfo.Record, error) {
+		t.Fatal("collection cache miss must not admit a cold probe")
+		return mediainfo.Record{}, nil
+	}}
+	handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(raw, "application/xml"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, authenticatedRequest(http.MethodGet, "/library/metadata/7/children"))
+
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), raw) {
+		t.Fatalf("response = %d %q", response.Code, response.Body.Bytes())
 	}
 	if ensurer.gets.Load() != 1 || ensurer.calls.Load() != 0 {
 		t.Fatalf("Get calls = %d, Ensure calls = %d", ensurer.gets.Load(), ensurer.calls.Load())
@@ -298,6 +379,9 @@ func TestMetadataEnrichmentBypassesIneligibleAndUnbufferableResponses(t *testing
 		{name: "HEAD", request: authenticatedMetadataRequest(http.MethodHead), next: metadataBodyHandler(raw, "application/xml"), wantStatus: http.StatusOK},
 		{name: "batch", request: authenticatedRequest(http.MethodGet, "/library/metadata/42,43"), next: metadataBodyHandler(raw, "application/xml"), wantStatus: http.StatusOK, wantBody: raw},
 		{name: "children", request: authenticatedRequest(http.MethodGet, "/library/metadata/42/children"), next: metadataBodyHandler(raw, "application/xml"), wantStatus: http.StatusOK, wantBody: raw},
+		{name: "HEAD children", request: authenticatedRequest(http.MethodHead, "/library/metadata/42/children"), next: metadataBodyHandler(raw, "application/xml"), wantStatus: http.StatusOK},
+		{name: "range children", request: rangeChildrenRequest(), next: metadataBodyHandler(raw, "application/xml"), wantStatus: http.StatusOK, wantBody: raw},
+		{name: "missing token children", request: httptest.NewRequest(http.MethodGet, "/library/metadata/42/children", nil), next: metadataBodyHandler(raw, "application/xml"), wantStatus: http.StatusOK, wantBody: raw},
 		{name: "Part playback", request: authenticatedRequest(http.MethodGet, "/library/parts/9/1/file.strm"), next: metadataBodyHandler(raw, "application/xml"), wantStatus: http.StatusOK, wantBody: raw},
 		{name: "decision", request: authenticatedRequest(http.MethodGet, "/video/:/transcode/universal/decision"), next: metadataBodyHandler(raw, "application/xml"), wantStatus: http.StatusOK, wantBody: raw},
 		{name: "universal start", request: authenticatedRequest(http.MethodGet, "/video/:/transcode/universal/start.mpd"), next: metadataBodyHandler(raw, "application/xml"), wantStatus: http.StatusOK, wantBody: raw},
@@ -479,6 +563,12 @@ func conflictingTokenRequest() *http.Request {
 
 func rangeMetadataRequest() *http.Request {
 	request := authenticatedMetadataRequest(http.MethodGet)
+	request.Header.Set("Range", "bytes=0-100")
+	return request
+}
+
+func rangeChildrenRequest() *http.Request {
+	request := authenticatedRequest(http.MethodGet, "/library/metadata/42/children")
 	request.Header.Set("Range", "bytes=0-100")
 	return request
 }

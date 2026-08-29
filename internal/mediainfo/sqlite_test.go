@@ -2,6 +2,7 @@ package mediainfo
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -210,5 +211,68 @@ func TestSQLiteStoreTouchExtendsRetentionMonotonically(t *testing.T) {
 	got, ok, err := store.Get(t.Context(), record.Key)
 	if err != nil || !ok || !got.LastAccessedAt.Equal(accessedAt) || !got.RetainUntil.Equal(retainUntil) {
 		t.Fatalf("Get() = %#v, %t, %v", got, ok, err)
+	}
+}
+
+func TestSQLiteStoreBackupAndDeleteAllPreservesSharedDatabase(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "plex-gateway.db")
+	store, gatewayDB := openTestSQLiteStore(t, databasePath)
+	now := time.Unix(1_800_000_000, 123_456_789).UTC()
+	record := completeRecord(now)
+	if err := store.Put(t.Context(), record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gatewayDB.SQLDB().ExecContext(t.Context(), `
+		CREATE TABLE other_module_records (id TEXT PRIMARY KEY);
+		INSERT INTO other_module_records (id) VALUES ('preserve');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.BackupAndDeleteAll(t.Context(), filepath.Join(filepath.Dir(databasePath), "backups"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedRecords != 1 {
+		t.Fatalf("deleted records = %d", result.DeletedRecords)
+	}
+	backupInfo, err := os.Stat(result.BackupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backupInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("backup mode = %o", backupInfo.Mode().Perm())
+	}
+	assertSQLiteCounts(t, gatewayDB, 0, 1, 1)
+	if err := gatewayDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	backupDB, err := database.OpenSQLite(t.Context(), result.BackupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backupDB.Close()
+	assertSQLiteCounts(t, backupDB, 1, 1, 1)
+}
+
+func assertSQLiteCounts(t *testing.T, gatewayDB *database.SQLite, mediaInfo, otherModule, migrations int) {
+	t.Helper()
+	queries := []struct {
+		name string
+		sql  string
+		want int
+	}{
+		{name: "MediaInfo", sql: "SELECT COUNT(*) FROM media_info_records", want: mediaInfo},
+		{name: "other module", sql: "SELECT COUNT(*) FROM other_module_records", want: otherModule},
+		{name: "migration", sql: "SELECT COUNT(*) FROM gateway_schema_migrations WHERE module = 'mediainfo'", want: migrations},
+	}
+	for _, query := range queries {
+		var count int
+		if err := gatewayDB.SQLDB().QueryRowContext(t.Context(), query.sql).Scan(&count); err != nil {
+			t.Fatalf("read %s count: %v", query.name, err)
+		}
+		if count != query.want {
+			t.Fatalf("%s count = %d, want %d", query.name, count, query.want)
+		}
 	}
 }

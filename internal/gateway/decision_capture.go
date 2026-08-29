@@ -3,8 +3,10 @@ package gateway
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -132,6 +134,29 @@ func (w *decisionResponseCapture) body() []byte {
 		return nil
 	}
 	return decoded
+}
+
+// replaceDecodedBody swaps one complete bounded decision response before it is
+// exposed to the client. Wire encoding is preserved while stale entity
+// validators are removed because the response representation has changed.
+func (w *decisionResponseCapture) replaceDecodedBody(body []byte) error {
+	if !w.successful() || w.committed || w.passthrough {
+		return errors.New("decision response is not replaceable")
+	}
+	wireBody, err := encodeMetadataBody(body, w.Header().Get("Content-Encoding"))
+	if err != nil {
+		return err
+	}
+	if int64(len(wireBody)) > w.limit {
+		return errors.New("enriched decision response exceeds the limit")
+	}
+	w.captured.Reset()
+	_, _ = w.captured.Write(wireBody)
+	for _, name := range []string{"ETag", "Last-Modified", "Content-MD5", "Digest"} {
+		w.Header().Del(name)
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(wireBody)))
+	return nil
 }
 
 var _ interface{ Unwrap() http.ResponseWriter } = (*decisionResponseCapture)(nil)

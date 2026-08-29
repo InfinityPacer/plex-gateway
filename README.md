@@ -27,6 +27,10 @@ Part 标记为 Direct Play 后，Gateway 才会创建短期授权。如果客户
 对应的授权，再次为 Part 请求授权，并返回同一个 CDN 重定向，而不会启动 Plex
 Transcoder 或合成 Plex 元数据。
 
+Gateway 对所有客户端使用同一套 MediaInfo 投影规则，不根据产品名、设备名或
+User-Agent 特判格式兼容性。Part 302 不等待 MediaInfo；Plex decision 在冷缓存时最多
+等待 `MEDIAINFO_COLD_WAIT`，探测超时或失败会原样返回 Plex 响应。
+
 能够在这些路径上接受原始媒体重定向的原生客户端可以使用此链路。Plex Web 不支持
 云端播放：其浏览器播放器会将 `start.mpd` 作为 DASH manifest 获取，而重定向目标
 是原始媒体文件，且可能不允许跨源浏览器请求。为 Gateway 的重定向添加 CORS header
@@ -39,7 +43,7 @@ Transcoder 或合成 Plex 元数据。
 | Plex 本地媒体 | 透明代理支持 | Gateway 不会重写本地 Part。 |
 | Infuse Direct Play | 已验证 Direct Play | 使用 Plex Part 重定向路径。 |
 | Plex iOS ExperimentalPlayer | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路。 |
-| Plex for Apple TV | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路，本地媒体保持透明代理。 |
+| Plex for Apple TV | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路，并与其他客户端使用相同 MediaInfo 投影规则。实际 HDR/Dolby Vision 输出仍取决于片源与客户端解码能力。 |
 | Plex Web 云端播放 | 不支持 | 浏览器需要 DASH manifest，并受最终源站 CORS 限制。 |
 
 本项目是独立的社区项目，与 Plex、MediaVault、Infuse 或其各自所有者没有关联，
@@ -99,11 +103,11 @@ go run ./cmd/plex-gateway
 | `OBSERVE_MAX_BYTES` | `8388608` | 观察解析时复制的最大元数据 body 大小。 |
 | `PART_PROBE_TIMEOUT` | `15s` | 无 body 的 Plex Part 授权 probe 超时时间。 |
 | `CLOUD_EXTENSIONS` | `.strm` | 以逗号分隔的云端控制文件扩展名。 |
-| `TRACE_ENABLED` | `false` | 启用经过脱敏的 Plex 请求顺序追踪。 |
-| `METADATA_GUARD_ENABLED` | `false` | 限制单项详细 metadata 请求进入 Plex 的并发量。 |
+| `TRACE_ENABLED` | `true` | 启用经过脱敏的 Plex 请求顺序追踪。 |
+| `METADATA_GUARD_ENABLED` | `true` | 限制单项详细 metadata 请求进入 Plex 的并发量。 |
 | `METADATA_GUARD_GLOBAL_CONCURRENCY` | `8` | 所有客户端共享的详细 metadata 并发上限。 |
 | `METADATA_GUARD_CLIENT_CONCURRENCY` | `4` | 每个 Plex 客户端标识的详细 metadata 并发上限。 |
-| `METADATA_GUARD_BATCH_ENABLED` | `false` | 限制逗号分隔的批量 metadata 读取进入 Plex 的并发量。 |
+| `METADATA_GUARD_BATCH_ENABLED` | `true` | 限制逗号分隔的批量 metadata 读取进入 Plex 的并发量。 |
 | `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | 所有客户端共享的批量 metadata 并发上限。 |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | 等待准入的最长时间，超时返回 `429`。 |
 | `MEDIAINFO_ENABLED` | `true` | 启用 MediaInfo 缓存、受限探测和单项 metadata 增强；初始化失败不影响透明代理。 |
@@ -111,7 +115,7 @@ go run ./cmd/plex-gateway
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.5.1` | 没有活动客户端上下文时，后台探测使用的 fallback User-Agent。 |
 | `MEDIAINFO_COLD_WAIT` | `5s` | 单项 metadata 冷缓存等待上限；超时返回原 Plex 响应，探测继续。 |
 | `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | 可以缓冲并尝试增强的单个 Plex metadata 响应上限。 |
-| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `4` | 同时缓冲和等待 MediaInfo 的单项 metadata 响应上限。 |
+| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | 同时缓冲和等待 MediaInfo 的单项 metadata 响应上限。 |
 | `MEDIAINFO_PREWARM_BEFORE` | `2` | 当前项之前的邻近媒体预热数量。 |
 | `MEDIAINFO_PREWARM_AFTER` | `3` | 当前项之后的邻近媒体预热数量。 |
 | `MEDIAINFO_PREWARM_INTERVAL` | `5s` | 邻近项提交到后台探测队列的间隔；当前项不等待。 |
@@ -138,7 +142,7 @@ MediaVault 用于 `/api/v1` 集成的 API key。
 对于已认证的单项 STRM metadata 请求，Gateway 可以从 L1 或 SQLite 记录补充缺失的
 Media、Part 和 Stream 技术字段。若 Plex 的 Part 完全没有 Stream，Gateway 会使用
 ffprobe 的流类型和源索引创建描述性的视频、音频和字幕 Stream，并投影 HDR10、Dolby
-Vision、bit depth、codec、bitrate、声道布局和语言码等字段。合成 Stream 不包含 Plex
+Vision、bit depth、codec、codecID、bitrate、声道布局和语言码等字段。合成 Stream 不包含 Plex
 Stream ID，也不生成 `selected`、`default` 或 `decision` 等播放选择字段。Plex 已经存在
 Stream 时只补充身份匹配 Stream 的缺失字段，不创建缺少的其他流，也不覆盖 Plex 值。
 
@@ -268,6 +272,32 @@ Gateway 重新执行检查。
   活动和排队计数，所有指标都不包含请求标签或凭据。
 - 其他所有 endpoint 都遵循 [docs/architecture.md](docs/architecture.md) 中说明
   的 Plex 代理或 Direct Play 拦截规则。
+
+### 清空 MediaInfo 冷热缓存
+
+在 Compose 项目目录执行：
+
+```sh
+./scripts/reset-mediainfo-cache.sh
+```
+
+脚本通过容器内 loopback 维护接口热清理缓存，Gateway 和 Plex 代理不会停止。清理前
+会把完整 SQLite 数据库备份到 `app_data/backups/`，然后同步清空 L1、当前 MediaInfo
+队列和可重建的 `media_info_records`。数据库、迁移记录和其他模块表不会被删除。
+
+Compose 服务名不是 `plex-gateway` 时，可以通过环境变量指定：
+
+```sh
+PLEX_GATEWAY_COMPOSE_SERVICE=gateway ./scripts/reset-mediainfo-cache.sh
+```
+
+镜像内同时提供 `/usr/local/bin/plex-gateway-reset-mediainfo-cache`，因此也可以直接执行：
+
+```sh
+docker exec plex-gateway plex-gateway-reset-mediainfo-cache
+```
+
+维护接口只接受容器本机 loopback 请求，不通过公开 Gateway endpoint 或反向代理开放。
 
 ## 探测 Plex 媒体项
 

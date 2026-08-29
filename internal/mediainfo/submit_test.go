@@ -72,6 +72,16 @@ func TestServiceSubmitDetailedReportsRejection(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsOversizedClientUserAgent(t *testing.T) {
+	service := newTestService(t, &blockingProber{}, 1)
+	request := testRequest("oversized-user-agent", PriorityInteractive)
+	request.ClientUserAgent = strings.Repeat("x", maxClientUserAgentBytes+1)
+	result := service.SubmitDetailed(request)
+	if result.Disposition != SubmitRejected || result.Err == nil {
+		t.Fatalf("oversized User-Agent result = %#v", result)
+	}
+}
+
 func TestServiceSubmitRequeuesJoinedUserAgentAfterFailure(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	started := make(chan string, 2)

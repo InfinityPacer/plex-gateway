@@ -154,6 +154,12 @@ Universal start routes are redirected only after the same STRM selection and
 authorization checks; manifest segments and genuine transcode traffic remain
 Plex-owned.
 
+All clients use the same MediaInfo projection rules. The gateway does not infer
+format compatibility from a product name, device name, or User-Agent. Part and
+universal-start redirects never wait for MediaInfo. A decision may perform one
+bounded cache lookup or interactive probe; timeout or failure preserves Plex's
+original response.
+
 ## Client compatibility boundary
 
 The redirect plane requires a client that can consume the final raw media URL.

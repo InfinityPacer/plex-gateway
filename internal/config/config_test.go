@@ -38,16 +38,16 @@ func TestLoadDefaults(t *testing.T) {
 	if got.PlexToken != "" {
 		t.Fatal("PlexToken unexpectedly configured")
 	}
-	if got.TraceEnabled {
-		t.Fatal("TraceEnabled = true")
+	if !got.TraceEnabled {
+		t.Fatal("TraceEnabled = false")
 	}
-	if got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 8 || got.MetadataGuard.PerClientConcurrency != 4 || got.MetadataGuard.BatchEnabled || got.MetadataGuard.BatchConcurrency != 3 || got.MetadataGuard.QueueTimeout != 10*time.Second {
+	if !got.MetadataGuard.Enabled || got.MetadataGuard.GlobalConcurrency != 8 || got.MetadataGuard.PerClientConcurrency != 4 || !got.MetadataGuard.BatchEnabled || got.MetadataGuard.BatchConcurrency != 3 || got.MetadataGuard.QueueTimeout != 10*time.Second {
 		t.Fatalf("unexpected metadata guard defaults: %#v", got.MetadataGuard)
 	}
 	if got.DatabasePath != "./data/plex-gateway.db" {
 		t.Fatalf("DatabasePath = %q", got.DatabasePath)
 	}
-	if !got.MediaInfo.Enabled || got.MediaInfo.ProbeTimeout != 20*time.Second || got.MediaInfo.Concurrency != 1 || got.MediaInfo.UserAgent != "Infuse-Library/8.5.1" || got.MediaInfo.ColdWait != 5*time.Second || got.MediaInfo.ResponseMaxBytes != 8<<20 || got.MediaInfo.EnrichmentWaiters != 4 || got.MediaInfo.PrewarmBefore != 2 || got.MediaInfo.PrewarmAfter != 3 || got.MediaInfo.PrewarmInterval != 5*time.Second {
+	if !got.MediaInfo.Enabled || got.MediaInfo.ProbeTimeout != 20*time.Second || got.MediaInfo.Concurrency != 1 || got.MediaInfo.UserAgent != "Infuse-Library/8.5.1" || got.MediaInfo.ColdWait != 5*time.Second || got.MediaInfo.ResponseMaxBytes != 8<<20 || got.MediaInfo.EnrichmentWaiters != 8 || got.MediaInfo.PrewarmBefore != 2 || got.MediaInfo.PrewarmAfter != 3 || got.MediaInfo.PrewarmInterval != 5*time.Second {
 		t.Fatalf("unexpected MediaInfo defaults: %#v", got.MediaInfo)
 	}
 	if got.MediaVaultURL != nil || len(got.PathMappings) != 0 {

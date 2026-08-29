@@ -29,16 +29,24 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "version" {
-		fmt.Println(version.String())
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
-		if err := healthcheck(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version":
+			fmt.Println(version.String())
+			return
+		case "healthcheck":
+			if err := healthcheck(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "cache-reset":
+			if err := requestMediaInfoCacheReset(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		}
-		return
 	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -88,7 +96,7 @@ func run() error {
 	prewarmStatus := func() prewarm.Status {
 		return prewarmService.Status()
 	}
-	handler := gateway.New(gateway.Options{
+	gatewayHandler := gateway.New(gateway.Options{
 		Upstream:         cfg.PlexURL,
 		Logger:           logger,
 		Tracer:           trace.New(cfg.TraceEnabled, logger),
@@ -116,6 +124,7 @@ func run() error {
 		MediaInfoPrewarmer:             prewarmService,
 		MediaInfoPrewarmStatus:         prewarmStatus,
 	})
+	handler := newMaintenanceHandler(gatewayHandler, mediaInfoService, cfg.DatabasePath, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,

@@ -356,7 +356,7 @@ func newOutputScriptProber(t *testing.T, output string, client *http.Client) *FF
 		t.Fatal(err)
 	}
 	prober, err := NewFFProber(FFProbeOptions{
-		Binary: path, Timeout: 5 * time.Second, ProbeSize: defaultProbeSize,
+		Binary: path, Timeout: defaultProbeTimeout, ProbeSize: defaultProbeSize,
 		AnalyzeDuration: defaultAnalyzeDuration, OutputLimit: defaultProbeOutputLimit,
 	})
 	if err != nil {

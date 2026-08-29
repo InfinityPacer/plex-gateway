@@ -41,13 +41,14 @@ Runtime evidence from Plex Web and the official mobile client established a
 separate compatibility leaf: their original universal decision requested
 neither Direct Play nor Direct Stream and Plex rejected an STRM Part before the
 client reached `/library/parts`. With the same complete client profile, changing
-only those two flags produced Plex's normal Direct Play decision and Part key.
+those playback flags plus `hasMDE` produced Plex's normal Direct Play decision
+and Part key.
 
 The compatibility adapter therefore:
 
 - performs an authenticated, bounded metadata read using the active client;
 - selects `Metadata -> Media[mediaIndex] -> Part[partIndex]` without flattening;
-- rewrites only `directPlay` and `directStream` for a mapped STRM Part;
+- rewrites `directPlay`, `directStream`, and `hasMDE` for a mapped STRM Part;
 - keeps Plex responsible for the decision response and playback session;
 - fails open for local media, ambiguous indices, authorization failures, and
   every unrecognized request.
@@ -71,12 +72,15 @@ manifest segments, and every genuine transcode request remain Plex-owned.
 ## MediaInfo Phase D
 
 MediaInfo is not a dependency of redirect playback. Eligible single-item
-metadata responses can now be enriched from the fail-open L1 and SQLite cache;
-missing, slow, or failed probes preserve the original Plex response and do not
-change the 302 path.
+metadata and Direct Play decision responses can be enriched from the fail-open
+L1 and SQLite cache. A cold decision may wait up to `MEDIAINFO_COLD_WAIT` for an
+interactive probe; missing, slow, or failed probes preserve the original Plex
+response. Part and universal-start redirects never wait for MediaInfo. All
+clients use the same projection rules without product, device, or User-Agent
+format-compatibility branches.
 
-MediaInfo remains isolated from redirect playback. Phase D prioritizes the
-Gateway fallback while preserving the broader lifecycle design:
+MediaInfo probing and persistence remain isolated from redirect playback. Phase
+D prioritizes the Gateway fallback while preserving the broader lifecycle design:
 
 1. use L1 and SQLite for single-instance fallback storage;
 2. accept optional `PLEX_TOKEN` from an ignored deployment `app.env` for

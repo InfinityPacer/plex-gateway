@@ -41,6 +41,136 @@ func TestSelectEnrichmentTargetStrictlySelectsJSONItem(t *testing.T) {
 	}
 }
 
+func TestEnrichMetadataTargetsProjectsOnlyMappedCollectionItems(t *testing.T) {
+	media := projectionStreamMedia()
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+		wantCloud   []byte
+		wantLocal   []byte
+	}{
+		{
+			name:        "XML",
+			contentType: "application/xml",
+			body:        []byte(`<MediaContainer size="2"><Video ratingKey="42"><Media><Part id="7" file="/cloud/a.strm" size="301"/></Media></Video><Video ratingKey="43"><Media container="mp4"><Part id="8" file="/local/b.mp4" size="2000000"/></Media></Video></MediaContainer>`),
+			wantCloud:   []byte(`ratingKey="42"><Media container="mkv"`),
+			wantLocal:   []byte(`ratingKey="43"><Media container="mp4"`),
+		},
+		{
+			name:        "JSON",
+			contentType: "application/json",
+			body:        []byte(`{"MediaContainer":{"size":2,"Metadata":[{"ratingKey":42,"Media":[{"Part":[{"id":7,"file":"/cloud/a.strm","size":301}]}]},{"ratingKey":43,"Media":[{"container":"mp4","Part":[{"id":8,"file":"/local/b.mp4","size":2000000}]}]}]}}`),
+			wantCloud:   []byte(`"ratingKey":42`),
+			wantLocal:   []byte(`"ratingKey":43`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			targets, err := SelectEnrichmentTargets(test.body, test.contentType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(targets) != 2 || targets[0].RatingKey != "42" || targets[1].RatingKey != "43" {
+				t.Fatalf("targets = %#v", targets)
+			}
+			enriched, changed, err := EnrichMetadataTargets(test.body, test.contentType, map[string]mediainfo.Media{"42": media})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed != 1 || !bytes.Contains(enriched, test.wantCloud) || !bytes.Contains(enriched, test.wantLocal) {
+				t.Fatalf("changed=%d body=%s", changed, enriched)
+			}
+			if !bytes.Contains(enriched, []byte("HDR10")) || bytes.Count(enriched, []byte("HDR10")) != 2 {
+				t.Fatalf("HDR projection did not stay on the cached item: %s", enriched)
+			}
+		})
+	}
+}
+
+func TestEnrichMetadataTargetsSkipsAmbiguousCollectionItems(t *testing.T) {
+	media := projectionStreamMedia()
+	for _, test := range []struct {
+		name        string
+		contentType string
+		body        []byte
+	}{
+		{
+			name:        "XML",
+			contentType: "application/xml",
+			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="7" file="/cloud/a.strm"/></Media></Video><Video ratingKey="43"><Media><Part id="8" file="/cloud/b.strm"/></Media><Media><Part id="9" file="/cloud/c.strm"/></Media></Video><Video ratingKey="44"><Media><Part id="10" file="/cloud/d.strm"/><Part id="11" file="/cloud/e.strm"/></Media></Video><Video ratingKey="45"><Media/></Video></MediaContainer>`),
+		},
+		{
+			name:        "JSON",
+			contentType: "application/json",
+			body: []byte(`{"MediaContainer":{"Metadata":[` +
+				`{"ratingKey":"42","Media":[{"Part":[{"id":7,"file":"/cloud/a.strm"}]}]},` +
+				`{"ratingKey":"43","Media":[{"Part":[{"id":8,"file":"/cloud/b.strm"}]},{"Part":[{"id":9,"file":"/cloud/c.strm"}]}]},` +
+				`{"ratingKey":"44","Media":[{"Part":[{"id":10,"file":"/cloud/d.strm"},{"id":11,"file":"/cloud/e.strm"}]}]},` +
+				`{"ratingKey":"45","Media":[{}]}]}}`),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			original := append([]byte(nil), test.body...)
+			targets, err := SelectEnrichmentTargets(test.body, test.contentType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(targets) != 1 || targets[0].RatingKey != "42" || targets[0].Part.ID != "7" {
+				t.Fatalf("targets = %#v", targets)
+			}
+			enriched, changed, err := EnrichMetadataTargets(test.body, test.contentType, map[string]mediainfo.Media{"42": media})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed != 1 || bytes.Count(enriched, []byte("HDR10")) != 2 {
+				t.Fatalf("changed=%d body=%s", changed, enriched)
+			}
+			if bytes.Contains(enriched, []byte(`ratingKey="43"`)) && bytes.Contains(enriched, []byte(`ratingKey="43"><Media container="mkv"`)) {
+				t.Fatal("ambiguous XML item was enriched")
+			}
+			if bytes.Contains(enriched, []byte(`"ratingKey":"43","Media":[{"container":"mkv"`)) {
+				t.Fatal("ambiguous JSON item was enriched")
+			}
+			if !bytes.Equal(test.body, original) {
+				t.Fatal("EnrichMetadataTargets modified its input body")
+			}
+		})
+	}
+}
+
+func TestEnrichMetadataTargetsRejectsDuplicateCollectionRatingKeys(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		contentType string
+		body        []byte
+	}{
+		{
+			name:        "XML",
+			contentType: "application/xml",
+			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="7" file="/cloud/a.strm"/></Media></Video><Video ratingKey="42"><Media><Part id="8" file="/cloud/b.strm"/></Media></Video></MediaContainer>`),
+		},
+		{
+			name:        "JSON",
+			contentType: "application/json",
+			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"Part":[{"id":7,"file":"/cloud/a.strm"}]}]},{"ratingKey":"42","Media":[{"Part":[{"id":8,"file":"/cloud/b.strm"}]}]}]}}`),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			original := append([]byte(nil), test.body...)
+			if _, err := SelectEnrichmentTargets(test.body, test.contentType); err == nil {
+				t.Fatal("duplicate ratingKey collection unexpectedly succeeded")
+			}
+			if result, changed, err := EnrichMetadataTargets(test.body, test.contentType, map[string]mediainfo.Media{"42": projectionStreamMedia()}); err == nil || result != nil || changed != 0 {
+				t.Fatalf("result=%q changed=%d err=%v", result, changed, err)
+			}
+			if !bytes.Equal(test.body, original) {
+				t.Fatal("EnrichMetadataTargets modified its input body after an error")
+			}
+		})
+	}
+}
+
 func TestEnrichMetadataXMLFillsOnlyMissingSafeFields(t *testing.T) {
 	body := []byte(`<MediaContainer rootExtra="preserve"><Video ratingKey="42" itemExtra="preserve"><Guid id="com.example/movie"/><Media mediaExtra="preserve" container="plex-container" videoCodec="plex-codec"><Part id="7" key="/library/parts/7/1/file" file="/cloud/movie.strm" partExtra="preserve" duration="999"><Stream id="plex-stream-id" streamType="1" index="0" codec="plex-stream-codec" selected="1" default="1" decision="directplay" streamExtra="preserve"/><Stream streamType="2" index="1" streamExtra="audio"/></Part><UnknownNode unknownAttr="keep"><UnknownChild/></UnknownNode></Media></Video></MediaContainer>`)
 	original := append([]byte(nil), body...)
@@ -235,6 +365,7 @@ func TestEnrichMetadataCreatesStreamsWhenPartHasNone(t *testing.T) {
 func TestEnrichMetadataUsesDolbyVisionPlexFields(t *testing.T) {
 	media := projectionStreamMedia()
 	media.Streams[0].HDRFormat = "dolby_vision"
+	media.Streams[0].CodecTag = "dvh1"
 	media.Streams[0].DolbyVision = &mediainfo.DolbyVision{
 		VersionMajor: 1, VersionMinor: 0, Profile: 7, Level: 6,
 		RPUPresent: 1, ELPresent: 1, BLPresent: 1, BLCompatID: 6,
@@ -263,6 +394,9 @@ func TestEnrichMetadataUsesDolbyVisionPlexFields(t *testing.T) {
 			if test.contentType == "application/xml" {
 				attrs := xmlProjectionAttributeSets(t, result)["Stream#1"]
 				assertDolbyVisionAttributes(t, attrs)
+				if attrs["codecID"] != "dvh1" {
+					t.Fatalf("Dolby Vision codecID = %q", attrs["codecID"])
+				}
 				return
 			}
 			var document map[string]any
@@ -271,7 +405,7 @@ func TestEnrichMetadataUsesDolbyVisionPlexFields(t *testing.T) {
 			}
 			part := document["MediaContainer"].(map[string]any)["Metadata"].([]any)[0].(map[string]any)["Media"].([]any)[0].(map[string]any)["Part"].([]any)[0].(map[string]any)
 			attrs := part["Stream"].([]any)[0].(map[string]any)
-			if attrs["displayTitle"] != "4K DoVi/HDR10" || attrs["extendedDisplayTitle"] != "4K DoVi/HDR10 (HEVC Main 10)" ||
+			if attrs["codecID"] != "dvh1" || attrs["displayTitle"] != "4K DoVi/HDR10" || attrs["extendedDisplayTitle"] != "4K DoVi/HDR10 (HEVC Main 10)" ||
 				attrs["DOVIBLCompatID"] != float64(6) || attrs["DOVIBLPresent"] != true ||
 				attrs["DOVIELPresent"] != true || attrs["DOVILevel"] != float64(6) ||
 				attrs["DOVIPresent"] != true || attrs["DOVIProfile"] != float64(7) ||
@@ -279,6 +413,20 @@ func TestEnrichMetadataUsesDolbyVisionPlexFields(t *testing.T) {
 				t.Fatalf("Dolby Vision JSON attributes = %#v", attrs)
 			}
 		})
+	}
+}
+
+func TestPlexCodecIDRejectsFFProbePlaceholderTags(t *testing.T) {
+	for value, want := range map[string]string{
+		"dvh1":         "dvh1",
+		" hvc1 ":       "hvc1",
+		"[0][0][0][0]": "",
+		"0x0000":       "",
+		"bad\nvalue":   "",
+	} {
+		if got := plexCodecID(value); got != want {
+			t.Fatalf("plexCodecID(%q) = %q, want %q", value, got, want)
+		}
 	}
 }
 

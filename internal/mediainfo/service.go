@@ -12,17 +12,18 @@ import (
 )
 
 const (
-	defaultRecordTTL       = 30 * 24 * time.Hour
-	defaultRecordRetention = 180 * 24 * time.Hour
-	defaultNegativeTTL     = 15 * time.Minute
-	defaultWorkerQueueSize = 256
-	defaultWorkerCount     = 1
-	defaultNegativeLimit   = 4096
-	defaultRetryLimit      = 256
-	defaultTouchQueueSize  = 1024
-	defaultGCInterval      = 24 * time.Hour
-	defaultStoreTimeout    = 5 * time.Second
-	defaultTouchInterval   = time.Hour
+	defaultRecordTTL        = 30 * 24 * time.Hour
+	defaultRecordRetention  = 180 * 24 * time.Hour
+	defaultNegativeTTL      = 15 * time.Minute
+	defaultWorkerQueueSize  = 256
+	defaultWorkerCount      = 1
+	defaultNegativeLimit    = 4096
+	defaultRetryLimit       = 256
+	defaultTouchQueueSize   = 1024
+	defaultGCInterval       = 24 * time.Hour
+	defaultStoreTimeout     = 5 * time.Second
+	defaultTouchInterval    = time.Hour
+	maxClientUserAgentBytes = 4 << 10
 )
 
 var (
@@ -30,6 +31,7 @@ var (
 	ErrQueueFull             = errors.New("MediaInfo queue is full")
 	ErrRetryRegistrationFull = errors.New("MediaInfo retry registration is full")
 	ErrNegativeCache         = errors.New("MediaInfo probe is in backoff")
+	ErrCacheResetInProgress  = errors.New("MediaInfo cache reset is in progress")
 )
 
 // Priority separates interactive misses from administrator prewarming. A
@@ -81,6 +83,9 @@ func (request Request) validate() error {
 	if strings.ContainsAny(request.ClientUserAgent, "\r\n") {
 		return errors.New("client User-Agent is invalid")
 	}
+	if len(request.ClientUserAgent) > maxClientUserAgentBytes {
+		return errors.New("client User-Agent is too large")
+	}
 	return nil
 }
 
@@ -89,6 +94,16 @@ type RecordStore interface {
 	Put(context.Context, Record) error
 	Get(context.Context, Key) (Record, bool, error)
 	Touch(context.Context, Key, time.Time, time.Time) error
+}
+
+// ResetResult reports the durable effect of one hot cache reset.
+type ResetResult struct {
+	DeletedRecords int64
+	BackupPath     string
+}
+
+type recordResetStore interface {
+	BackupAndDeleteAll(context.Context, string, time.Time) (ResetResult, error)
 }
 
 // RecordJanitor removes records after their retention window. It is separate
@@ -143,6 +158,7 @@ type ServiceOptions struct {
 type Service struct {
 	cache               *Cache
 	store               RecordStore
+	resetStore          recordResetStore
 	janitor             RecordJanitor
 	provider            Provider
 	providerDescriptor  ProviderDescriptor
@@ -179,6 +195,9 @@ type Service struct {
 	retryLimit         int
 	closed             bool
 	active             atomic.Int64
+	generation         atomic.Uint64
+	resetting          atomic.Bool
+	resetMu            sync.RWMutex
 }
 
 type recordTouch struct {
@@ -203,9 +222,10 @@ type retryRegistration struct {
 }
 
 type job struct {
-	request Request
-	flight  *flight
-	claimed bool
+	request    Request
+	flight     *flight
+	generation uint64
+	claimed    bool
 }
 
 // NewService starts the configured worker count after validating every
@@ -249,6 +269,9 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if backgroundUserAgent == "" || strings.ContainsAny(backgroundUserAgent, "\r\n") {
 		return nil, errors.New("MediaInfo background User-Agent is invalid")
 	}
+	if len(backgroundUserAgent) > maxClientUserAgentBytes {
+		return nil, errors.New("MediaInfo background User-Agent is too large")
+	}
 	gcInterval := options.GCInterval
 	if gcInterval <= 0 {
 		gcInterval = defaultGCInterval
@@ -288,6 +311,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 		interactiveLimit: interactiveSize, backgroundLimit: backgroundSize,
 		flights: make(map[string]*flight), negative: make(map[string]time.Time),
 	}
+	service.resetStore, _ = options.Store.(recordResetStore)
 	service.condition = sync.NewCond(&service.mu)
 	for index := 0; index < concurrency; index++ {
 		service.workers.Add(1)
@@ -313,19 +337,57 @@ func (service *Service) Get(key Key) (Record, bool) {
 	if service == nil {
 		return Record{}, false
 	}
+	return service.GetContext(service.ctx, key)
+}
+
+// GetContext performs a cache-only lookup bounded by the caller's response
+// deadline and never schedules remote analysis.
+func (service *Service) GetContext(ctx context.Context, key Key) (Record, bool) {
+	if service == nil {
+		return Record{}, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(key.PlexServerID) == "" {
 		key.PlexServerID = service.plexServerID
 	}
 	if key.PlexServerID != service.plexServerID {
 		return Record{}, false
 	}
-	record, ok, _ := service.lookup(service.ctx, key)
+	record, ok, _ := service.lookup(ctx, key)
 	if ok {
 		service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoCacheHits() })
 	} else {
 		service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoCacheMisses() })
 	}
 	return record, ok
+}
+
+// GetMemory returns one exact retained L1 record without durable storage I/O or
+// remote work. Playback-policy callers use it to keep decision and Part paths
+// independent from SQLite latency.
+func (service *Service) GetMemory(key Key) (Record, bool) {
+	if service == nil || service.resetting.Load() {
+		return Record{}, false
+	}
+	if strings.TrimSpace(key.PlexServerID) == "" {
+		key.PlexServerID = service.plexServerID
+	}
+	if key.PlexServerID != service.plexServerID {
+		return Record{}, false
+	}
+	service.resetMu.RLock()
+	defer service.resetMu.RUnlock()
+	if service.resetting.Load() {
+		return Record{}, false
+	}
+	now := service.now().UTC()
+	record, found := service.cache.GetKnown(key, now)
+	if !found || !service.compatible(record) {
+		return Record{}, false
+	}
+	return service.touchCached(record, now), true
 }
 
 // Ensure returns a cached result or waits for a shared job until ctx ends. The
@@ -429,6 +491,14 @@ func (service *Service) normalizeRequest(request Request) (Request, error) {
 }
 
 func (service *Service) lookup(ctx context.Context, key Key) (Record, bool, bool) {
+	if service.resetting.Load() {
+		return Record{}, false, false
+	}
+	service.resetMu.RLock()
+	defer service.resetMu.RUnlock()
+	if service.resetting.Load() {
+		return Record{}, false, false
+	}
 	now := service.now().UTC()
 	if record, ok := service.cache.GetKnown(key, now); ok && service.compatible(record) {
 		record = service.touchCached(record, now)
@@ -489,6 +559,9 @@ func (service *Service) beginDetailed(request Request, registerRetry bool) (*fli
 	if service == nil {
 		return nil, SubmitRejected, ErrServiceUnavailable
 	}
+	if service.resetting.Load() {
+		return nil, SubmitRejected, ErrCacheResetInProgress
+	}
 	var err error
 	request, err = service.normalizeRequest(request)
 	if err != nil {
@@ -523,7 +596,7 @@ func (service *Service) beginDetailed(request Request, registerRetry bool) (*fli
 		return existing, SubmitJoinedExistingFlight, nil
 	}
 	flight := &flight{done: make(chan struct{}), userAgent: request.ClientUserAgent}
-	queued := &job{request: request, flight: flight}
+	queued := &job{request: request, flight: flight, generation: service.generation.Load()}
 	flight.job = queued
 	if !service.enqueueLocked(queued) {
 		service.mu.Unlock()
@@ -748,6 +821,12 @@ func (service *Service) run(queued *job) {
 		service.finish(queued, Record{}, ErrProbeIncomplete)
 		return
 	}
+	service.resetMu.RLock()
+	if queued.generation != service.generation.Load() || service.resetting.Load() {
+		service.resetMu.RUnlock()
+		service.finish(queued, Record{}, ErrCacheResetInProgress)
+		return
+	}
 	storeCtx, cancelStore := context.WithTimeout(service.ctx, defaultStoreTimeout)
 	if err := service.store.Put(storeCtx, record); err != nil {
 		service.metric(func(metrics ServiceMetrics) { metrics.IncMediaInfoStoreFailure() })
@@ -755,6 +834,7 @@ func (service *Service) run(queued *job) {
 	}
 	cancelStore()
 	service.cache.Put(record, now)
+	service.resetMu.RUnlock()
 	service.finish(queued, record, nil)
 }
 
@@ -819,7 +899,7 @@ func (service *Service) scheduleRetryLocked(failed *flight, failedUserAgent stri
 	next := &flight{done: make(chan struct{}), userAgent: selected.request.ClientUserAgent}
 	next.retryWaiters = remaining
 	service.retryRegistrations += len(remaining)
-	next.job = &job{request: selected.request, flight: next}
+	next.job = &job{request: selected.request, flight: next, generation: failed.job.generation}
 	service.enqueueRetryLocked(next.job)
 	service.flights[next.job.request.Key.cacheKey()] = next
 	service.condition.Signal()
@@ -906,6 +986,58 @@ func (service *Service) Status() Status {
 	}
 	service.mu.Unlock()
 	return status
+}
+
+// ResetCache hot-clears rebuildable MediaInfo state while the proxy remains
+// available. Requests arriving after the reset may populate new records.
+func (service *Service) ResetCache(ctx context.Context, backupDir string) (ResetResult, error) {
+	if service == nil || service.resetStore == nil {
+		return ResetResult{}, ErrServiceUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !service.resetting.CompareAndSwap(false, true) {
+		return ResetResult{}, ErrCacheResetInProgress
+	}
+	defer service.resetting.Store(false)
+	service.generation.Add(1)
+
+	service.mu.Lock()
+	if service.closed {
+		service.mu.Unlock()
+		return ResetResult{}, ErrServiceUnavailable
+	}
+	for key, flight := range service.flights {
+		delete(service.flights, key)
+		flight.err = ErrCacheResetInProgress
+		service.releaseRetryRegistrationsLocked(flight)
+		close(flight.done)
+	}
+	service.interactive = nil
+	service.background = nil
+	service.retryInteractive = nil
+	service.retryBackground = nil
+	service.negative = make(map[string]time.Time)
+	for {
+		select {
+		case touch := <-service.touches:
+			touch.reservation.release()
+		default:
+			service.mu.Unlock()
+			goto queuesCleared
+		}
+	}
+
+queuesCleared:
+	service.resetMu.Lock()
+	defer service.resetMu.Unlock()
+	result, err := service.resetStore.BackupAndDeleteAll(ctx, backupDir, service.now().UTC())
+	if err != nil {
+		return ResetResult{}, err
+	}
+	service.cache.Purge()
+	return result, nil
 }
 
 // Close cancels active processes and waits for workers without closing the

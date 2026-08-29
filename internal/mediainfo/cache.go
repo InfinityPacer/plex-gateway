@@ -191,6 +191,14 @@ func (cache *Cache) Len() int {
 	return cache.records.Len()
 }
 
+// Purge removes every in-memory record. Durable records are managed by the
+// store so maintenance can reset both cache tiers under one service boundary.
+func (cache *Cache) Purge() {
+	if cache != nil {
+		cache.records.Purge()
+	}
+}
+
 func cloneRecord(record Record) Record {
 	cloned := record
 	cloned.Media.Streams = append([]Stream(nil), record.Media.Streams...)

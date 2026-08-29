@@ -141,10 +141,13 @@ func New(options Options) http.Handler {
 		prewarmer: options.MediaInfoPrewarmer,
 	}
 	decision := &decisionHandler{
-		plex:    plex,
-		service: cloudPlayback,
-		logger:  logger,
-		grants:  playback.NewGrantStore(defaultDecisionGrantTTL, defaultDecisionGrantLimit),
+		plex:      plex,
+		service:   cloudPlayback,
+		mediaInfo: options.MediaInfoService,
+		coldWait:  options.MediaInfoColdWait,
+		logger:    logger,
+		metrics:   registry,
+		grants:    playback.NewGrantStore(defaultDecisionGrantTTL, defaultDecisionGrantLimit),
 		probe: &decisionMetadataProbe{
 			upstream: options.Upstream,
 			client: &http.Client{
@@ -200,13 +203,15 @@ func New(options Options) http.Handler {
 	}
 	mux.Handle("GET /library/parts/{partID}/{rest...}", partPlayback)
 	mux.Handle("HEAD /library/parts/{partID}/{rest...}", partPlayback)
-	metadata := newMetadataGuard(options.MetadataGuard, plex, registry, logger)
-	metadata = newMetadataEnrichmentHandler(metadataEnrichmentOptions{
+	metadata := newMetadataEnrichmentHandler(metadataEnrichmentOptions{
 		Service: options.MediaInfoService, Mapper: options.PathMapper, Resolver: options.Resolver,
 		CloudExtensions: options.CloudExtensions, ColdWait: options.MediaInfoColdWait,
 		ResponseLimit: options.MediaInfoResponseMaxBytes, Concurrency: options.MediaInfoEnrichmentConcurrency,
 		Metrics: registry,
-	}, metadata)
+	}, plex)
+	// Admission must happen before response buffering so a queued request does
+	// not consume an enrichment slot or bypass projection under client bursts.
+	metadata = newMetadataGuard(options.MetadataGuard, metadata, registry, logger)
 	mux.Handle("/", metadata)
 
 	withActiveRequests := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

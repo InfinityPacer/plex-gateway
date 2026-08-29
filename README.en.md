@@ -34,6 +34,12 @@ playback session and exact Media/Part, authorizes the Part again, and returns
 the same CDN redirect without starting Plex Transcoder or synthesizing Plex
 metadata.
 
+The gateway applies the same MediaInfo projection rules to every client. It
+does not branch on product name, device name, or User-Agent for format
+compatibility. Part redirects never wait for MediaInfo. A Plex decision may
+wait up to `MEDIAINFO_COLD_WAIT` on a cold cache; probe timeout or failure
+returns Plex's original response unchanged.
+
 Native clients that accept a raw media redirect on those routes can use this
 path. Plex Web cloud playback is not supported: its browser player fetches
 `start.mpd` as a DASH manifest, while the redirect target is the original media
@@ -48,7 +54,7 @@ media in Plex Web remains ordinary proxied Plex traffic.
 | Local Plex media | Supported by transparent proxy | The gateway does not rewrite local Parts. |
 | Infuse Direct Play | Direct Play verified | Uses the Plex Part redirect path. |
 | Plex iOS ExperimentalPlayer | Direct Play verified | STRM uses the universal decision/start redirect path. |
-| Plex for Apple TV | Direct Play verified | STRM uses the universal decision/start redirect path; local media remains transparent proxy traffic. |
+| Plex for Apple TV | Direct Play verified | STRM uses the universal decision/start redirect path and the same MediaInfo projection rules as other clients. Actual HDR and Dolby Vision output still depends on the source and client decoder capabilities. |
 | Plex Web cloud playback | Unsupported | The browser expects a DASH manifest and enforces final-origin CORS. |
 
 This is an independent community project. It is not affiliated with, endorsed
@@ -111,11 +117,11 @@ Important environment variables:
 | `OBSERVE_MAX_BYTES` | `8388608` | Maximum metadata body copied for observation. |
 | `PART_PROBE_TIMEOUT` | `15s` | Timeout for the bodyless Plex Part authorization probe. |
 | `CLOUD_EXTENSIONS` | `.strm` | Comma-separated cloud control-file extensions. |
-| `TRACE_ENABLED` | `false` | Enable sanitized Plex request-order tracing. |
-| `METADATA_GUARD_ENABLED` | `false` | Limit single-item detailed metadata requests before they enter Plex. |
+| `TRACE_ENABLED` | `true` | Enable sanitized Plex request-order tracing. |
+| `METADATA_GUARD_ENABLED` | `true` | Limit single-item detailed metadata requests before they enter Plex. |
 | `METADATA_GUARD_GLOBAL_CONCURRENCY` | `8` | Shared detailed metadata concurrency limit across all clients. |
 | `METADATA_GUARD_CLIENT_CONCURRENCY` | `4` | Detailed metadata concurrency limit for each Plex client identifier. |
-| `METADATA_GUARD_BATCH_ENABLED` | `false` | Limit comma-separated batch metadata reads before they enter Plex. |
+| `METADATA_GUARD_BATCH_ENABLED` | `true` | Limit comma-separated batch metadata reads before they enter Plex. |
 | `METADATA_GUARD_BATCH_CONCURRENCY` | `3` | Shared batch metadata concurrency limit across all clients. |
 | `METADATA_GUARD_QUEUE_TIMEOUT` | `10s` | Maximum admission wait before returning `429`. |
 | `MEDIAINFO_ENABLED` | `true` | Enable the MediaInfo cache, bounded probes, and single-item metadata enrichment; initialization failures do not affect transparent proxying. |
@@ -123,7 +129,7 @@ Important environment variables:
 | `MEDIAINFO_USER_AGENT` | `Infuse-Library/8.5.1` | Fallback User-Agent for background probes without an active client context. |
 | `MEDIAINFO_COLD_WAIT` | `5s` | Cold-cache wait ceiling for one metadata item; timeout returns the original Plex response while probing continues. |
 | `MEDIAINFO_RESPONSE_MAX_BYTES` | `8388608` | Maximum size of one Plex metadata response buffered for enrichment. |
-| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `4` | Maximum single-item metadata responses buffered and waiting for MediaInfo concurrently. |
+| `MEDIAINFO_ENRICHMENT_CONCURRENCY` | `8` | Maximum single-item metadata responses buffered and waiting for MediaInfo concurrently. |
 | `MEDIAINFO_PREWARM_BEFORE` | `2` | Number of nearby items before the current item to prewarm. |
 | `MEDIAINFO_PREWARM_AFTER` | `3` | Number of nearby items after the current item to prewarm. |
 | `MEDIAINFO_PREWARM_INTERVAL` | `5s` | Delay between nearby-item submissions; the current item does not wait. |
@@ -154,7 +160,7 @@ For an authenticated single-item STRM metadata request, the gateway can fill
 missing Media, Part, and Stream technical fields from its L1 or SQLite record.
 When a Plex Part has no Stream elements, ffprobe stream types and source indexes
 are used to create descriptive video, audio, and subtitle Streams with fields
-such as HDR10, Dolby Vision, bit depth, codec, bitrate, channel layout, and
+such as HDR10, Dolby Vision, bit depth, codec, codecID, bitrate, channel layout, and
 language code. Generated Streams never contain Plex Stream IDs or playback
 selection fields such as `selected`, `default`, or `decision`. When Plex already
 has Streams, only missing fields on identity-matched Streams are filled. Missing
@@ -321,6 +327,36 @@ That topology is outside the exclusive-gateway deployment contract.
   counts. No metric contains request labels or credentials.
 - Every other endpoint follows the Plex proxy or Direct Play interception
   rules described in [docs/architecture.md](docs/architecture.md).
+
+### Resetting the MediaInfo hot and cold caches
+
+Run this command from the Compose project directory:
+
+```sh
+./scripts/reset-mediainfo-cache.sh
+```
+
+The script hot-clears the cache through a container-loopback maintenance
+endpoint, so the Gateway and Plex proxy remain online. It first backs up the
+complete SQLite database under `app_data/backups/`, then clears L1, the current
+MediaInfo queues, and the rebuildable `media_info_records`. The database,
+migration history, and tables owned by other modules are preserved.
+
+Set the Compose service name when it is not `plex-gateway`:
+
+```sh
+PLEX_GATEWAY_COMPOSE_SERVICE=gateway ./scripts/reset-mediainfo-cache.sh
+```
+
+The image also contains `/usr/local/bin/plex-gateway-reset-mediainfo-cache`, so
+it can be invoked directly:
+
+```sh
+docker exec plex-gateway plex-gateway-reset-mediainfo-cache
+```
+
+The maintenance endpoint accepts only container-local loopback requests. It is
+not exposed through the public Gateway endpoint or reverse proxy.
 
 ## Probe a Plex item
 

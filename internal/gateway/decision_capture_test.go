@@ -3,11 +3,51 @@ package gateway
 import (
 	"bytes"
 	"compress/gzip"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 )
+
+func TestDecisionCaptureReplacesGzipBodyAndEntityHeaders(t *testing.T) {
+	destination := httptest.NewRecorder()
+	capture := newDecisionResponseCapture(destination, 1<<20)
+	capture.Header().Set("Content-Encoding", "gzip")
+	capture.Header().Set("Content-Length", "1")
+	capture.Header().Set("ETag", `"stale"`)
+	capture.WriteHeader(http.StatusOK)
+
+	var original bytes.Buffer
+	writer := gzip.NewWriter(&original)
+	_, _ = writer.Write([]byte("original"))
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = capture.Write(original.Bytes())
+
+	if err := capture.replaceDecodedBody([]byte("enriched")); err != nil {
+		t.Fatal(err)
+	}
+	if err := capture.commit(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(destination.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != "enriched" || destination.Header().Get("ETag") != "" || destination.Header().Get("Content-Length") != strconv.Itoa(destination.Body.Len()) {
+		t.Fatalf("headers=%#v body=%q", destination.Header(), decoded)
+	}
+}
 
 func TestNormalizePlaybackAttemptUsesStableSessionIdentity(t *testing.T) {
 	decision := grantTestRequest("")

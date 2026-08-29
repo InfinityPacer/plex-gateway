@@ -19,7 +19,8 @@ import (
 // A Part with no Stream elements is eligible for descriptive Stream creation
 // because ffprobe supplies the stable stream type and source index.
 type Target struct {
-	Part Part
+	RatingKey string
+	Part      Part
 	// NeedsEnrichment is true when a whitelisted field is absent from the
 	// selected Media, Part, or matchable existing Stream elements.
 	NeedsEnrichment bool
@@ -71,8 +72,63 @@ func EnrichMetadata(body []byte, contentType, ratingKey string, media mediainfo.
 	return result, true, nil
 }
 
+// SelectEnrichmentTargets returns independently projectable items from a Plex
+// collection response. Items with multiple Media versions or Parts are left
+// untouched because a cache record cannot be mapped to them without guessing.
+func SelectEnrichmentTargets(body []byte, contentType string) ([]Target, error) {
+	document, err := parseProjectionDocument(body, contentType)
+	if err != nil {
+		return nil, err
+	}
+	selections, err := document.selectTargets()
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]Target, 0, len(selections))
+	for _, selection := range selections {
+		targets = append(targets, selection.target())
+	}
+	return targets, nil
+}
+
+// EnrichMetadataTargets projects cached MediaInfo into matching items of one
+// collection response. Missing records leave their items unchanged.
+func EnrichMetadataTargets(body []byte, contentType string, records map[string]mediainfo.Media) ([]byte, int, error) {
+	document, err := parseProjectionDocument(body, contentType)
+	if err != nil {
+		return nil, 0, err
+	}
+	selections, err := document.selectTargets()
+	if err != nil {
+		return nil, 0, err
+	}
+	changedItems := 0
+	for _, selection := range selections {
+		media, ok := records[selection.target().RatingKey]
+		if !ok {
+			continue
+		}
+		changed, err := selection.enrich(media)
+		if err != nil {
+			return nil, 0, err
+		}
+		if changed {
+			changedItems++
+		}
+	}
+	if changedItems == 0 {
+		return append([]byte(nil), body...), 0, nil
+	}
+	result, err := document.encode()
+	if err != nil {
+		return nil, 0, err
+	}
+	return result, changedItems, nil
+}
+
 type projectionDocument interface {
 	selectTarget(string) (projectionSelection, error)
+	selectTargets() ([]projectionSelection, error)
 	encode() ([]byte, error)
 }
 
@@ -86,22 +142,7 @@ func parseProjection(body []byte, contentType, ratingKey string) (projectionDocu
 	if err != nil {
 		return nil, nil, err
 	}
-	trimmed := trimProjectionBody(body)
-	if len(trimmed) == 0 {
-		return nil, nil, errors.New("Plex metadata response is empty")
-	}
-	if strings.Contains(strings.ToLower(contentType), "json") || trimmed[0] == '{' || trimmed[0] == '[' {
-		document, err := parseJSONProjectionDocument(body)
-		if err != nil {
-			return nil, nil, err
-		}
-		selection, err := document.selectTarget(ratingKey)
-		if err != nil {
-			return nil, nil, err
-		}
-		return document, selection, nil
-	}
-	document, err := parseXMLProjectionDocument(body)
+	document, err := parseProjectionDocument(body, contentType)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -110,6 +151,25 @@ func parseProjection(body []byte, contentType, ratingKey string) (projectionDocu
 		return nil, nil, err
 	}
 	return document, selection, nil
+}
+
+func parseProjectionDocument(body []byte, contentType string) (projectionDocument, error) {
+	trimmed := trimProjectionBody(body)
+	if len(trimmed) == 0 {
+		return nil, errors.New("Plex metadata response is empty")
+	}
+	if strings.Contains(strings.ToLower(contentType), "json") || trimmed[0] == '{' || trimmed[0] == '[' {
+		document, err := parseJSONProjectionDocument(body)
+		if err != nil {
+			return nil, err
+		}
+		return document, nil
+	}
+	document, err := parseXMLProjectionDocument(body)
+	if err != nil {
+		return nil, err
+	}
+	return document, nil
 }
 
 func normalizeProjectionRatingKey(value string) (string, error) {
@@ -236,6 +296,9 @@ func streamProjectionAttributes(stream mediainfo.Stream) []projectionAttribute {
 	if stream.Codec != "" {
 		attributes = append(attributes, textProjectionAttribute("codec", plexCodec(stream.Codec)))
 	}
+	if codecID := plexCodecID(stream.CodecTag); codecID != "" {
+		attributes = append(attributes, textProjectionAttribute("codecID", codecID))
+	}
 	if stream.Profile != "" {
 		attributes = append(attributes, textProjectionAttribute("profile", stream.Profile))
 	}
@@ -313,6 +376,19 @@ func streamProjectionAttributes(stream mediainfo.Stream) []projectionAttribute {
 	}
 	attributes = append(attributes, dispositionProjectionAttributes(stream.Disposition)...)
 	return attributes
+}
+
+func plexCodecID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, "[0]") || strings.EqualFold(value, "0x0000") {
+		return ""
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return ""
+		}
+	}
+	return value
 }
 
 // plexCodec keeps the normalized codec vocabulary expected by Plex clients.
@@ -714,13 +790,45 @@ func (document *xmlProjectionDocument) selectTarget(ratingKey string) (projectio
 	if len(videos) != 1 {
 		return nil, errors.New("Plex XML metadata must contain one Video item")
 	}
-	item := videos[0]
+	selection, err := xmlProjectionSelectionFromItem(videos[0])
+	if err != nil {
+		return nil, err
+	}
+	if selection.value.RatingKey != ratingKey {
+		return nil, errors.New("Plex XML metadata ratingKey does not match the requested item")
+	}
+	return selection, nil
+}
+
+func (document *xmlProjectionDocument) selectTargets() ([]projectionSelection, error) {
+	roots := xmlProjectionElements(document.nodes)
+	if len(roots) != 1 || roots[0].start.Name.Local != "MediaContainer" {
+		return nil, errors.New("Plex XML metadata has no unique MediaContainer root")
+	}
+	videos := directXMLElements(roots[0], "Video")
+	selections := make([]projectionSelection, 0, len(videos))
+	seen := make(map[string]struct{}, len(videos))
+	for _, item := range videos {
+		selection, err := xmlProjectionSelectionFromItem(item)
+		if err != nil {
+			continue
+		}
+		if _, duplicate := seen[selection.value.RatingKey]; duplicate {
+			return nil, errors.New("Plex XML metadata has duplicate ratingKey items")
+		}
+		seen[selection.value.RatingKey] = struct{}{}
+		selections = append(selections, selection)
+	}
+	return selections, nil
+}
+
+func xmlProjectionSelectionFromItem(item *xmlProjectionElement) (*xmlProjectionSelection, error) {
 	itemRatingKey, present, err := xmlAttribute(item.start.Attr, "ratingKey")
 	if err != nil {
 		return nil, err
 	}
-	if !present || itemRatingKey == "" || itemRatingKey != ratingKey {
-		return nil, errors.New("Plex XML metadata ratingKey does not match the requested item")
+	if !present || itemRatingKey == "" {
+		return nil, errors.New("Plex XML metadata item has no ratingKey")
 	}
 	mediaItems := directXMLElements(item, "Media")
 	if len(mediaItems) != 1 {
@@ -739,7 +847,7 @@ func (document *xmlProjectionDocument) selectTarget(ratingKey string) (projectio
 		return nil, err
 	}
 	return &xmlProjectionSelection{
-		value: Target{Part: part, NeedsEnrichment: needs},
+		value: Target{RatingKey: itemRatingKey, Part: part, NeedsEnrichment: needs},
 		media: mediaItems[0],
 		part:  parts[0],
 	}, nil
@@ -1246,32 +1354,73 @@ func encodeJSONProjectionList(list jsonProjectionList) (json.RawMessage, error) 
 }
 
 func (document *jsonProjectionDocument) selectTarget(ratingKey string) (projectionSelection, error) {
-	containerRaw, ok := document.root["MediaContainer"]
-	if !ok {
-		return nil, errors.New("Plex JSON metadata has no MediaContainer")
-	}
-	container, err := decodeJSONProjectionObject(bytes.TrimSpace(containerRaw))
-	if err != nil {
-		return nil, fmt.Errorf("parse Plex JSON MediaContainer: %w", err)
-	}
-	metadataRaw, ok := container["Metadata"]
-	if !ok {
-		return nil, errors.New("Plex JSON metadata has no Metadata item")
-	}
-	metadata, err := decodeJSONProjectionList(metadataRaw, "Metadata")
+	container, metadata, err := document.directMetadata()
 	if err != nil {
 		return nil, err
 	}
 	if len(metadata.items) != 1 {
 		return nil, errors.New("Plex JSON metadata must contain one Metadata item")
 	}
-	item := metadata.items[0]
-	itemRatingKey, err := requiredJSONScalarString(*item, "ratingKey")
+	selection, err := jsonProjectionSelectionFromItem(document, container, metadata, metadata.items[0])
 	if err != nil {
 		return nil, err
 	}
-	if itemRatingKey != ratingKey {
+	if selection.value.RatingKey != ratingKey {
 		return nil, errors.New("Plex JSON metadata ratingKey does not match the requested item")
+	}
+	return selection, nil
+}
+
+func (document *jsonProjectionDocument) selectTargets() ([]projectionSelection, error) {
+	container, metadata, err := document.directMetadata()
+	if err != nil {
+		return nil, err
+	}
+	selections := make([]projectionSelection, 0, len(metadata.items))
+	seen := make(map[string]struct{}, len(metadata.items))
+	for _, item := range metadata.items {
+		selection, err := jsonProjectionSelectionFromItem(document, container, metadata, item)
+		if err != nil {
+			continue
+		}
+		if _, duplicate := seen[selection.value.RatingKey]; duplicate {
+			return nil, errors.New("Plex JSON metadata has duplicate ratingKey items")
+		}
+		seen[selection.value.RatingKey] = struct{}{}
+		selections = append(selections, selection)
+	}
+	return selections, nil
+}
+
+func (document *jsonProjectionDocument) directMetadata() (jsonObject, jsonProjectionList, error) {
+	containerRaw, ok := document.root["MediaContainer"]
+	if !ok {
+		return nil, jsonProjectionList{}, errors.New("Plex JSON metadata has no MediaContainer")
+	}
+	container, err := decodeJSONProjectionObject(bytes.TrimSpace(containerRaw))
+	if err != nil {
+		return nil, jsonProjectionList{}, fmt.Errorf("parse Plex JSON MediaContainer: %w", err)
+	}
+	metadataRaw, ok := container["Metadata"]
+	if !ok {
+		return nil, jsonProjectionList{}, errors.New("Plex JSON metadata has no Metadata item")
+	}
+	metadata, err := decodeJSONProjectionList(metadataRaw, "Metadata")
+	if err != nil {
+		return nil, jsonProjectionList{}, err
+	}
+	return container, metadata, nil
+}
+
+func jsonProjectionSelectionFromItem(
+	document *jsonProjectionDocument,
+	container jsonObject,
+	metadata jsonProjectionList,
+	item *jsonObject,
+) (*jsonProjectionSelection, error) {
+	itemRatingKey, err := requiredJSONScalarString(*item, "ratingKey")
+	if err != nil {
+		return nil, err
 	}
 	mediaRaw, ok := (*item)["Media"]
 	if !ok {
@@ -1306,26 +1455,28 @@ func (document *jsonProjectionDocument) selectTarget(ratingKey string) (projecti
 		return nil, err
 	}
 	return &jsonProjectionSelection{
-		value:     Target{Part: part, NeedsEnrichment: needs},
-		document:  document,
-		container: container,
-		metadata:  metadata,
-		media:     mediaItems,
-		parts:     parts,
-		mediaItem: mediaItem,
-		part:      partItem,
+		value:        Target{RatingKey: itemRatingKey, Part: part, NeedsEnrichment: needs},
+		document:     document,
+		container:    container,
+		metadata:     metadata,
+		metadataItem: item,
+		media:        mediaItems,
+		parts:        parts,
+		mediaItem:    mediaItem,
+		part:         partItem,
 	}, nil
 }
 
 type jsonProjectionSelection struct {
-	value     Target
-	document  *jsonProjectionDocument
-	container jsonObject
-	metadata  jsonProjectionList
-	media     jsonProjectionList
-	parts     jsonProjectionList
-	mediaItem *jsonObject
-	part      *jsonObject
+	value        Target
+	document     *jsonProjectionDocument
+	container    jsonObject
+	metadata     jsonProjectionList
+	metadataItem *jsonObject
+	media        jsonProjectionList
+	parts        jsonProjectionList
+	mediaItem    *jsonObject
+	part         *jsonObject
 }
 
 func (selection *jsonProjectionSelection) target() Target {
@@ -1482,8 +1633,7 @@ func (selection *jsonProjectionSelection) commit() error {
 	if err != nil {
 		return err
 	}
-	// The metadata list has exactly one item by selection contract.
-	(*selection.metadata.items[0])["Media"] = media
+	(*selection.metadataItem)["Media"] = media
 	metadata, err := encodeJSONProjectionList(selection.metadata)
 	if err != nil {
 		return err

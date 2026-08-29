@@ -281,6 +281,52 @@ func TestAuthorizedPlexSTRMRedirectEnablesCloudPartRedirect(t *testing.T) {
 	}
 }
 
+func TestCloudPartRedirectDoesNotApplyClientSpecificPolicy(t *testing.T) {
+	localRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localRoot, "Movie.strm"), []byte("http://public.invalid/redirect/pickcode\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mediaVault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://cdn.invalid/Movie.mkv?signature=private")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer mediaVault.Close()
+	plex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://public.invalid/redirect/pickcode")
+		w.WriteHeader(http.StatusMovedPermanently)
+	}))
+	defer plex.Close()
+
+	handler, _, cache := newCloudHandler(t, plex.URL, mediaVault.URL, []pathmap.Mapping{{
+		PlexPrefix: "/media/cloud", LocalPrefix: localRoot,
+	}})
+	cache.Put(partcache.PartInfo{PartID: "123", PlexFilePath: "/media/cloud/Movie.strm"})
+	clients := []struct {
+		product   string
+		platform  string
+		userAgent string
+	}{
+		{product: "Infuse-Library", platform: "iOS", userAgent: "Infuse-Library/8.5.1"},
+		{product: "Plex for iOS", platform: "iOS", userAgent: "PlexMobile/8.0"},
+		{product: "Plex for Apple TV", platform: "tvOS", userAgent: "PlexTV/8.45"},
+	}
+	for _, client := range clients {
+		request := httptest.NewRequest(http.MethodGet, "/library/parts/123/7/file", nil)
+		request.Header.Set("X-Plex-Token", "valid-token")
+		request.Header.Set("X-Plex-Product", client.product)
+		request.Header.Set("X-Plex-Platform", client.platform)
+		request.Header.Set("User-Agent", client.userAgent)
+		response := httptest.NewRecorder()
+
+		handler.ServeHTTP(response, request)
+
+		if response.Code != http.StatusFound || response.Header().Get("Location") != "https://cdn.invalid/Movie.mkv?signature=private" {
+			t.Fatalf("client %q status=%d Location=%q", client.product, response.Code, response.Header().Get("Location"))
+		}
+	}
+}
+
 func TestCloudPartHeadUsesMediaVaultGet(t *testing.T) {
 	localRoot := t.TempDir()
 	const controlTarget = "http://public.invalid/redirect/pickcode/Movie.mkv"

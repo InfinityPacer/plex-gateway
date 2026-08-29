@@ -1,6 +1,9 @@
 package gateway
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -8,9 +11,171 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/InfinityPacer/plex-gateway/internal/mediainfo"
+	"github.com/InfinityPacer/plex-gateway/internal/metrics"
+	"github.com/InfinityPacer/plex-gateway/internal/partcache"
 	"github.com/InfinityPacer/plex-gateway/internal/pathmap"
+	"github.com/InfinityPacer/plex-gateway/internal/playback"
+	"github.com/InfinityPacer/plex-gateway/internal/resolver"
 )
+
+type decisionMediaInfoStub struct {
+	record        mediainfo.Record
+	memoryHit     bool
+	waitForCancel bool
+	ensureCalls   int
+	request       mediainfo.Request
+}
+
+func (stub *decisionMediaInfoStub) GetMemory(mediainfo.Key) (mediainfo.Record, bool) {
+	return stub.record, stub.memoryHit
+}
+
+func (stub *decisionMediaInfoStub) Ensure(ctx context.Context, request mediainfo.Request) (mediainfo.Record, error) {
+	stub.ensureCalls++
+	stub.request = request
+	if stub.waitForCancel {
+		<-ctx.Done()
+		return mediainfo.Record{}, ctx.Err()
+	}
+	return stub.record, nil
+}
+
+func TestCloudDecisionProjectsMediaInfoWithoutClientSpecificPolicy(t *testing.T) {
+	clients := []struct {
+		name      string
+		product   string
+		platform  string
+		userAgent string
+	}{
+		{name: "Infuse", product: "Infuse-Direct", platform: "iOS", userAgent: "Infuse-Direct/8.5.3"},
+		{name: "Plex iOS", product: "Plex for iOS", platform: "iOS", userAgent: "PlexMobile/8.0"},
+		{name: "Plex Apple TV", product: "Plex for Apple TV", platform: "tvOS", userAgent: "PlexTV/8.0"},
+	}
+	var projectedBody string
+	for _, client := range clients {
+		t.Run(client.name, func(t *testing.T) {
+			media := completeProjectionMedia()
+			media.Size = 987654321
+			mediaInfo := &decisionMediaInfoStub{record: mediainfo.Record{Media: media}}
+			handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond)
+			request := decisionProjectionRequest()
+			request.Header.Set("User-Agent", client.userAgent)
+			request.Header.Set("X-Plex-Product", client.product)
+			request.Header.Set("X-Plex-Platform", client.platform)
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `decision="directplay"`) ||
+				!strings.Contains(response.Body.String(), `size="987654321"`) ||
+				!strings.Contains(response.Body.String(), `container="mkv"`) ||
+				!strings.Contains(response.Body.String(), `<Stream`) {
+				t.Fatalf("status=%d headers=%#v body=%s", response.Code, response.Header(), response.Body.String())
+			}
+			if projectedBody == "" {
+				projectedBody = response.Body.String()
+			} else if response.Body.String() != projectedBody {
+				t.Fatalf("client-specific decision projection:\nwant %s\n got %s", projectedBody, response.Body.String())
+			}
+			if mediaInfo.ensureCalls != 1 || mediaInfo.request.Key.PartID != "9" || mediaInfo.request.RatingKey != "42" || mediaInfo.request.ClientUserAgent != client.userAgent {
+				t.Fatalf("MediaInfo request = %#v calls=%d", mediaInfo.request, mediaInfo.ensureCalls)
+			}
+			if response.Header().Get("ETag") != "" || response.Header().Get("Content-Length") == "" {
+				t.Fatalf("enriched decision headers = %#v", response.Header())
+			}
+		})
+	}
+}
+
+func TestCloudDecisionMediaInfoTimeoutFailsOpen(t *testing.T) {
+	mediaInfo := &decisionMediaInfoStub{waitForCancel: true}
+	handler := newDecisionProjectionHandler(t, mediaInfo, 10*time.Millisecond)
+	response := httptest.NewRecorder()
+	started := time.Now()
+
+	handler.ServeHTTP(response, decisionProjectionRequest())
+
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("decision fail-open took %s", elapsed)
+	}
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `size="301"`) || strings.Contains(response.Body.String(), `container="mkv"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if mediaInfo.ensureCalls != 1 {
+		t.Fatalf("Ensure calls = %d", mediaInfo.ensureCalls)
+	}
+}
+
+func newDecisionProjectionHandler(t *testing.T, mediaInfo decisionMediaInfoService, coldWait time.Duration) http.Handler {
+	t.Helper()
+	localRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localRoot, "episode.strm"), []byte("http://mediavault.invalid/redirect/pick/episode.mkv\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mapper, err := pathmap.New([]pathmap.Mapping{{PlexPrefix: "/media/cloud", LocalPrefix: localRoot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlResolver, err := resolver.NewMediaVaultSTRMResolver("http://mediavault.invalid", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/library/metadata/42" {
+			http.NotFound(w, request)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"MediaContainer":{"Metadata":[{"Media":[{"Part":[{"id":9,"key":"/library/parts/9/1/file","file":"/media/cloud/episode.strm"}]}]}]}}`))
+	}))
+	t.Cleanup(metadataServer.Close)
+	upstream, err := url.Parse(metadataServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloudPlayback := playback.New(playback.Options{
+		Cache: partcache.New(time.Hour), Mapper: mapper, Resolver: controlResolver,
+		AuthorizePart:   func(*http.Request, string, string) (bool, error) { return true, nil },
+		CloudExtensions: []string{".strm"},
+	})
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return &decisionHandler{
+		plex: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			if request.URL.Path != "/video/:/transcode/universal/decision" || request.URL.Query().Get("directPlay") != "1" {
+				http.NotFound(w, request)
+				return
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			w.Header().Set("Content-Length", "1")
+			w.Header().Set("ETag", `"stale"`)
+			_, _ = w.Write([]byte(`<MediaContainer><Video><Media id="11" decision="directplay"><Part id="9" key="/library/parts/9/1/file" size="301" decision="directplay"/></Media></Video></MediaContainer>`))
+		}),
+		probe: &decisionMetadataProbe{
+			upstream: upstream,
+			client:   &http.Client{Timeout: time.Second},
+			maxBytes: 1 << 20,
+		},
+		service: cloudPlayback, mediaInfo: mediaInfo, coldWait: coldWait,
+		grants: playback.NewGrantStore(time.Minute, 16), logger: logger, metrics: metrics.New(),
+	}
+}
+
+func decisionProjectionRequest() *http.Request {
+	query := url.Values{
+		"path":                       {"/library/metadata/42"},
+		"mediaIndex":                 {"0"},
+		"partIndex":                  {"0"},
+		"directPlay":                 {"0"},
+		"directStream":               {"0"},
+		"X-Plex-Playback-Session-Id": {"decision-projection-session"},
+	}
+	request := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?"+query.Encode(), nil)
+	request.Header.Set("X-Plex-Token", "client-token")
+	return request
+}
 
 func TestCloudDecisionForcesDirectPlayAndContinuesThroughPartRedirect(t *testing.T) {
 	localRoot := t.TempDir()
