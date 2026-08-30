@@ -68,7 +68,7 @@ func EnrichMetadata(body []byte, contentType, ratingKey string, media mediainfo.
 	if err != nil {
 		return nil, false, err
 	}
-	changed, err := selection.enrich(media, true)
+	changed, err := selection.enrich(media, true, streamProjectionMetadata)
 	if err != nil {
 		return nil, false, err
 	}
@@ -120,7 +120,7 @@ func EnrichMetadataTargets(body []byte, contentType string, records map[string]m
 		if !ok {
 			continue
 		}
-		changed, err := selection.enrich(media, false)
+		changed, err := selection.enrich(media, false, streamProjectionMetadata)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -147,8 +147,19 @@ type projectionDocument interface {
 type projectionSelection interface {
 	target() Target
 	streamsNeedEnrichment() (bool, error)
-	enrich(mediainfo.Media, bool) (bool, error)
+	enrich(mediainfo.Media, bool, streamProjectionContext) (bool, error)
 }
+
+type streamProjectionContext uint8
+
+// Plex item metadata exposes codec details in displayTitle, while playback
+// decisions keep displayTitle concise and put codec details in the extended
+// title. Preserving both wire shapes avoids turning presentation fields into
+// client-specific policy.
+const (
+	streamProjectionMetadata streamProjectionContext = iota
+	streamProjectionDecision
+)
 
 func parseProjection(body []byte, contentType, ratingKey string) (projectionDocument, projectionSelection, error) {
 	ratingKey, err := normalizeProjectionRatingKey(ratingKey)
@@ -308,7 +319,7 @@ func partProjectionAttributes(media mediainfo.Media) []projectionAttribute {
 	return attributes
 }
 
-func streamProjectionAttributes(stream mediainfo.Stream) []projectionAttribute {
+func streamProjectionAttributes(stream mediainfo.Stream, context streamProjectionContext) []projectionAttribute {
 	attributes := make([]projectionAttribute, 0, 35)
 	if stream.Codec != "" {
 		attributes = append(attributes, textProjectionAttribute("codec", plexCodec(stream.Codec)))
@@ -380,12 +391,23 @@ func streamProjectionAttributes(stream mediainfo.Stream) []projectionAttribute {
 	if stream.Title != "" {
 		attributes = append(attributes, textProjectionAttribute("title", stream.Title))
 	}
-	if canonicalStreamType(stream.Type) == "1" {
+	switch canonicalStreamType(stream.Type) {
+	case "1":
 		if displayTitle, extendedDisplayTitle := videoDisplayTitles(stream); displayTitle != "" {
+			if context == streamProjectionMetadata && extendedDisplayTitle != "" {
+				displayTitle = extendedDisplayTitle
+			}
 			attributes = append(attributes, textProjectionAttribute("displayTitle", displayTitle))
 			if extendedDisplayTitle != "" {
 				attributes = append(attributes, textProjectionAttribute("extendedDisplayTitle", extendedDisplayTitle))
 			}
+		}
+	case "2":
+		if displayTitle := audioDisplayTitle(stream); displayTitle != "" {
+			attributes = append(attributes,
+				textProjectionAttribute("displayTitle", displayTitle),
+				textProjectionAttribute("extendedDisplayTitle", displayTitle),
+			)
 		}
 	}
 	if stream.DolbyVision != nil && canonicalStreamType(stream.Type) == "1" {
@@ -458,6 +480,9 @@ func plexCodec(value string) string {
 
 func plexLanguageCode(value string) (string, bool) {
 	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "und") {
+		return "", false
+	}
 	if len(value) != 2 && len(value) != 3 {
 		return "", false
 	}
@@ -493,6 +518,50 @@ func videoDisplayTitles(stream mediainfo.Stream) (string, string) {
 		return displayTitle, ""
 	}
 	return displayTitle, displayTitle + " (" + codecAndProfile + ")"
+}
+
+func audioDisplayTitle(stream mediainfo.Stream) string {
+	codec := plexDisplayCodec(stream.Codec)
+	if codec == "" {
+		return ""
+	}
+	name := strings.TrimSpace(stream.Title)
+	if name == "" {
+		if code, ok := plexLanguageCode(stream.Language); ok {
+			name = strings.ToUpper(code)
+		} else {
+			name = "Unknown"
+		}
+	}
+	channel := plexAudioChannelTitle(stream.Channels, stream.ChannelLayout)
+	detail := strings.TrimSpace(strings.Join([]string{codec, channel}, " "))
+	if detail == "" {
+		return name
+	}
+	return name + " (" + detail + ")"
+}
+
+func plexAudioChannelTitle(channels int, layout string) string {
+	switch strings.ToLower(strings.TrimSpace(layout)) {
+	case "mono":
+		return "Mono"
+	case "stereo":
+		return "Stereo"
+	}
+	switch channels {
+	case 1:
+		return "Mono"
+	case 2:
+		return "Stereo"
+	case 6:
+		return "5.1"
+	case 8:
+		return "7.1"
+	case 0:
+		return ""
+	default:
+		return strconv.Itoa(channels) + " ch"
+	}
 }
 
 func dolbyVisionHDR10Compatible(compatibilityID int) bool {
@@ -652,7 +721,9 @@ var dolbyVisionProjectionAttributeNames = []string{
 	"DOVIPresent", "DOVIProfile", "DOVIRPUPresent", "DOVIVersion",
 }
 
-var audioStreamProjectionAttributeNames = []string{"samplingRate", "channels", "audioChannelLayout"}
+var audioStreamProjectionAttributeNames = []string{
+	"samplingRate", "channels", "audioChannelLayout", "displayTitle", "extendedDisplayTitle",
+}
 
 type streamKey struct {
 	typeName string
@@ -664,7 +735,7 @@ type streamProjection struct {
 	attributes []projectionAttribute
 }
 
-func buildStreamProjections(media mediainfo.Media) ([]streamProjection, error) {
+func buildStreamProjections(media mediainfo.Media, context streamProjectionContext) ([]streamProjection, error) {
 	projections := make([]streamProjection, 0, len(media.Streams))
 	seen := make(map[streamKey]struct{}, len(media.Streams))
 	for _, stream := range media.Streams {
@@ -681,7 +752,7 @@ func buildStreamProjections(media mediainfo.Media) ([]streamProjection, error) {
 		seen[key] = struct{}{}
 		projections = append(projections, streamProjection{
 			key:        key,
-			attributes: streamProjectionAttributes(stream),
+			attributes: streamProjectionAttributes(stream, context),
 		})
 	}
 	return projections, nil
@@ -920,7 +991,7 @@ func (selection *xmlProjectionSelection) streamsNeedEnrichment() (bool, error) {
 	return xmlStreamsNeedEnrichment(selection.part)
 }
 
-func (selection *xmlProjectionSelection) enrich(media mediainfo.Media, projectStreams bool) (bool, error) {
+func (selection *xmlProjectionSelection) enrich(media mediainfo.Media, projectStreams bool, context streamProjectionContext) (bool, error) {
 	changed := addMissingXMLAttributes(selection.media, mediaProjectionAttributes(media))
 	changed = addMissingXMLAttributes(selection.part, partProjectionAttributes(media)) || changed
 	changed = replaceSTRMPartSizeXML(selection.part, media.Size) || changed
@@ -928,7 +999,7 @@ func (selection *xmlProjectionSelection) enrich(media mediainfo.Media, projectSt
 		return changed, nil
 	}
 	streamElements := directXMLElements(selection.part, "Stream")
-	streamProjections, err := buildStreamProjections(media)
+	streamProjections, err := buildStreamProjections(media, context)
 	if err != nil {
 		return false, err
 	}
@@ -1583,7 +1654,7 @@ func (selection *jsonProjectionSelection) streamsNeedEnrichment() (bool, error) 
 	return jsonStreamsNeedEnrichment(selection.part)
 }
 
-func (selection *jsonProjectionSelection) enrich(media mediainfo.Media, projectStreams bool) (bool, error) {
+func (selection *jsonProjectionSelection) enrich(media mediainfo.Media, projectStreams bool, context streamProjectionContext) (bool, error) {
 	changed, err := addMissingJSONAttributes(*selection.mediaItem, mediaProjectionAttributes(media))
 	if err != nil {
 		return false, err
@@ -1607,7 +1678,7 @@ func (selection *jsonProjectionSelection) enrich(media mediainfo.Media, projectS
 		return changed, nil
 	}
 	streamRaw, exists := (*selection.part)["Stream"]
-	streamProjections, err := buildStreamProjections(media)
+	streamProjections, err := buildStreamProjections(media, context)
 	if err != nil {
 		return false, err
 	}

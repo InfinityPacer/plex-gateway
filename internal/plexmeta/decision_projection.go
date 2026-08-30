@@ -56,7 +56,7 @@ func EnrichDecision(body []byte, contentType string, expected Part, media mediai
 		return nil, false, err
 	}
 
-	changed, err := selection.enrich(media, true)
+	changed, err := selection.enrich(media, true, streamProjectionDecision)
 	if err != nil {
 		return nil, false, err
 	}

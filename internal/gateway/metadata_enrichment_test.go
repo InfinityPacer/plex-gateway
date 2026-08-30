@@ -534,12 +534,12 @@ func TestMetadataEnrichmentAdmitsExistingStreamHDRAndSTRMControlSize(t *testing.
 		{
 			name: "XML", contentType: "application/xml",
 			body: []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="16:9" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="23.976" videoProfile="Main 10" audioProfile="LC"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="301" container="mkv" videoProfile="Main 10" audioProfile="LC"><Stream id="101" streamType="1" index="0" codec="hevc" profile="Main 10" level="153" bitrate="8000" languageCode="eng" title="Video" width="3840" height="2160" frameRate="23.976" refFrames="4" pixelFormat="yuv420p10le" bitDepth="10" colorSpace="bt2020nc" colorRange="tv" colorPrimaries="bt2020" colorTrc="smpte2084" chromaLocation="left" sampleAspectRatio="1:1" displayAspectRatio="16:9"/></Part></Media></Video></MediaContainer>`),
-			want: [][]byte{[]byte(`size="987654321"`), []byte(`displayTitle="4K DoVi/HDR10"`), []byte(`DOVIPresent="1"`)},
+			want: [][]byte{[]byte(`size="987654321"`), []byte(`displayTitle="4K DoVi/HDR10 (HEVC Main 10)"`), []byte(`DOVIPresent="1"`)},
 		},
 		{
 			name: "JSON", contentType: "application/json",
 			body: []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":60000,"bitrate":8000,"width":3840,"height":2160,"aspectRatio":"16:9","audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"23.976","videoProfile":"Main 10","audioProfile":"LC","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":60000,"size":301,"container":"mkv","videoProfile":"Main 10","audioProfile":"LC","Stream":[{"id":101,"streamType":1,"index":0,"codec":"hevc","profile":"Main 10","level":153,"bitrate":8000,"languageCode":"eng","title":"Video","width":3840,"height":2160,"frameRate":23.976,"refFrames":4,"pixelFormat":"yuv420p10le","bitDepth":10,"colorSpace":"bt2020nc","colorRange":"tv","colorPrimaries":"bt2020","colorTrc":"smpte2084","chromaLocation":"left","sampleAspectRatio":"1:1","displayAspectRatio":"16:9"}]}]}]}]}}`),
-			want: [][]byte{[]byte(`"size":987654321`), []byte(`"displayTitle":"4K DoVi/HDR10"`), []byte(`"DOVIPresent":true`)},
+			want: [][]byte{[]byte(`"size":987654321`), []byte(`"displayTitle":"4K DoVi/HDR10 (HEVC Main 10)"`), []byte(`"DOVIPresent":true`)},
 		},
 	}
 	for _, test := range tests {

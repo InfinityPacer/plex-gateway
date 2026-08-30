@@ -26,7 +26,9 @@ func TestEnrichDecisionProjectsMatchingDirectPlayPart(t *testing.T) {
 				if attributes["Part"]["decision"] != "directplay" || attributes["Part"]["size"] != "987654321" || attributes["Part"]["container"] != "mkv" {
 					t.Fatalf("Part attributes = %#v", attributes["Part"])
 				}
-				if attributes["Stream#1"]["codec"] != "hevc" || attributes["Stream#1"]["bitDepth"] != "10" || attributes["Stream#2"]["codec"] != "aac" {
+				if attributes["Stream#1"]["codec"] != "hevc" || attributes["Stream#1"]["bitDepth"] != "10" ||
+					attributes["Stream#1"]["displayTitle"] != "4K" ||
+					attributes["Stream#2"]["codec"] != "aac" || attributes["Stream#2"]["displayTitle"] != "English (AAC 5.1)" {
 					t.Fatalf("Stream attributes = %#v", attributes)
 				}
 				for _, fragment := range [][]byte{[]byte(`decisionExtra="preserve"`), []byte(`videoExtra="preserve"`), []byte(`mediaExtra="preserve"`), []byte(`partExtra="preserve"`)} {
@@ -56,7 +58,10 @@ func TestEnrichDecisionProjectsMatchingDirectPlayPart(t *testing.T) {
 				if part["decision"] != "directplay" || part["size"] != float64(987654321) || part["container"] != "mkv" {
 					t.Fatalf("Part fields = %#v", part)
 				}
-				if len(streams) != 2 || streams[0].(map[string]any)["codec"] != "hevc" || streams[1].(map[string]any)["codec"] != "aac" {
+				if len(streams) != 2 || streams[0].(map[string]any)["codec"] != "hevc" ||
+					streams[0].(map[string]any)["displayTitle"] != "4K" ||
+					streams[1].(map[string]any)["codec"] != "aac" ||
+					streams[1].(map[string]any)["displayTitle"] != "English (AAC 5.1)" {
 					t.Fatalf("Stream fields = %#v", streams)
 				}
 				if container["decisionExtra"] != "preserve" || item["videoExtra"] != "preserve" || mediaObject["mediaExtra"] != "preserve" || part["partExtra"] != "preserve" {

@@ -373,10 +373,10 @@ func TestEnrichMetadataCreatesDescriptiveStreamsWithoutPlexIdentity(t *testing.T
 					attrs["Part"]["size"] != "987654321" || attrs["Part"]["videoProfile"] != "main 10" {
 					t.Fatalf("projected XML units = media=%#v part=%#v", attrs["Media"], attrs["Part"])
 				}
-				if video := attrs["Stream#1"]; video["streamType"] != "1" || video["index"] != "0" || video["codec"] != "hevc" || video["width"] != "3840" {
+				if video := attrs["Stream#1"]; video["streamType"] != "1" || video["index"] != "0" || video["codec"] != "hevc" || video["width"] != "3840" || video["displayTitle"] != "4K (HEVC Main 10)" {
 					t.Fatalf("generated XML video Stream = %#v", video)
 				}
-				if audio := attrs["Stream#2"]; audio["streamType"] != "2" || audio["index"] != "1" || audio["codec"] != "aac" || audio["channels"] != "6" {
+				if audio := attrs["Stream#2"]; audio["streamType"] != "2" || audio["index"] != "1" || audio["codec"] != "aac" || audio["channels"] != "6" || audio["displayTitle"] != "English (AAC 5.1)" {
 					t.Fatalf("generated XML audio Stream = %#v", audio)
 				}
 				if subtitle := attrs["Stream#3"]; subtitle["streamType"] != "3" || subtitle["index"] != "2" || subtitle["codec"] != "pgs" || subtitle["languageCode"] != "zho" || subtitle["forced"] != "1" {
@@ -409,10 +409,10 @@ func TestEnrichMetadataCreatesDescriptiveStreamsWithoutPlexIdentity(t *testing.T
 			video := streams[0].(map[string]any)
 			audio := streams[1].(map[string]any)
 			subtitle := streams[2].(map[string]any)
-			if video["streamType"] != float64(1) || video["index"] != float64(0) || video["codec"] != "hevc" || video["width"] != float64(3840) {
+			if video["streamType"] != float64(1) || video["index"] != float64(0) || video["codec"] != "hevc" || video["width"] != float64(3840) || video["displayTitle"] != "4K (HEVC Main 10)" {
 				t.Fatalf("generated JSON video Stream = %#v", video)
 			}
-			if audio["streamType"] != float64(2) || audio["index"] != float64(1) || audio["codec"] != "aac" || audio["channels"] != float64(6) {
+			if audio["streamType"] != float64(2) || audio["index"] != float64(1) || audio["codec"] != "aac" || audio["channels"] != float64(6) || audio["displayTitle"] != "English (AAC 5.1)" {
 				t.Fatalf("generated JSON audio Stream = %#v", audio)
 			}
 			if subtitle["streamType"] != float64(3) || subtitle["index"] != float64(2) || subtitle["codec"] != "pgs" || subtitle["languageCode"] != "zho" || subtitle["forced"] != true {
@@ -473,7 +473,7 @@ func TestEnrichMetadataUsesDolbyVisionPlexFields(t *testing.T) {
 			}
 			part := document["MediaContainer"].(map[string]any)["Metadata"].([]any)[0].(map[string]any)["Media"].([]any)[0].(map[string]any)["Part"].([]any)[0].(map[string]any)
 			attrs := part["Stream"].([]any)[0].(map[string]any)
-			if attrs["codecID"] != "dvh1" || attrs["displayTitle"] != "4K DoVi/HDR10" || attrs["extendedDisplayTitle"] != "4K DoVi/HDR10 (HEVC Main 10)" ||
+			if attrs["codecID"] != "dvh1" || attrs["displayTitle"] != "4K DoVi/HDR10 (HEVC Main 10)" || attrs["extendedDisplayTitle"] != "4K DoVi/HDR10 (HEVC Main 10)" ||
 				attrs["DOVIBLCompatID"] != float64(6) || attrs["DOVIBLPresent"] != true ||
 				attrs["DOVIELPresent"] != true || attrs["DOVILevel"] != float64(6) ||
 				attrs["DOVIPresent"] != true || attrs["DOVIProfile"] != float64(7) ||
@@ -558,7 +558,7 @@ func TestEnrichMetadataProjectsPlexMediaFrameRateAndPreciseStreamRate(t *testing
 
 func assertDolbyVisionAttributes(t *testing.T, attrs map[string]string) {
 	t.Helper()
-	if attrs["displayTitle"] != "4K DoVi/HDR10" || attrs["extendedDisplayTitle"] != "4K DoVi/HDR10 (HEVC Main 10)" ||
+	if attrs["displayTitle"] != "4K DoVi/HDR10 (HEVC Main 10)" || attrs["extendedDisplayTitle"] != "4K DoVi/HDR10 (HEVC Main 10)" ||
 		attrs["DOVIBLCompatID"] != "6" || attrs["DOVIBLPresent"] != "1" || attrs["DOVIELPresent"] != "1" ||
 		attrs["DOVILevel"] != "6" || attrs["DOVIPresent"] != "1" || attrs["DOVIProfile"] != "7" ||
 		attrs["DOVIRPUPresent"] != "1" || attrs["DOVIVersion"] != "1.0" {
@@ -577,6 +577,91 @@ func TestDolbyVisionDisplayTitleDoesNotAssumeHDR10FromBaseLayer(t *testing.T) {
 	displayTitle, extendedDisplayTitle := videoDisplayTitles(stream)
 	if displayTitle != "4K DoVi" || extendedDisplayTitle != "4K DoVi (HEVC Main 10)" {
 		t.Fatalf("Dolby Vision-only titles = %q, %q", displayTitle, extendedDisplayTitle)
+	}
+}
+
+func TestAudioProjectionUsesPlexUnknownTitleWithoutUndefinedLanguage(t *testing.T) {
+	stream := mediainfo.Stream{
+		Index: 1, Type: "audio", Codec: "aac", Profile: "LC",
+		Channels: 2, ChannelLayout: "stereo", Language: "und",
+	}
+	attributes := streamProjectionAttributes(stream, streamProjectionMetadata)
+	projected := make(map[string]string, len(attributes))
+	for _, attribute := range attributes {
+		projected[attribute.name] = attribute.value
+	}
+	if projected["displayTitle"] != "Unknown (AAC Stereo)" ||
+		projected["extendedDisplayTitle"] != "Unknown (AAC Stereo)" {
+		t.Fatalf("audio titles = %#v", projected)
+	}
+	if _, exists := projected["languageCode"]; exists {
+		t.Fatalf("undefined language was projected: %#v", projected)
+	}
+	for _, name := range []string{"id", "default", "selected", "streamIdentifier"} {
+		if _, exists := projected[name]; exists {
+			t.Fatalf("audio projection contains Plex-owned %s: %#v", name, projected)
+		}
+	}
+}
+
+func TestEnrichMetadataPreservesNativeAudioTitlesAcrossMultipleTracks(t *testing.T) {
+	media := projectionTestMedia()
+	media.Streams = []mediainfo.Stream{
+		{Index: 1, Type: "audio", Codec: "aac", Profile: "LC", Channels: 2, ChannelLayout: "stereo", Language: "und"},
+		{Index: 2, Type: "audio", Codec: "eac3", Channels: 6, ChannelLayout: "5.1", Language: "zho", Title: "Chinese"},
+	}
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+		assert      func(*testing.T, []byte)
+	}{
+		{
+			name:        "XML",
+			contentType: "application/xml",
+			body: []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="7" file="/cloud/movie.strm">` +
+				`<Stream streamType="2" index="1"/><Stream streamType="2" index="2" displayTitle="Plex Native"/>` +
+				`</Part></Media></Video></MediaContainer>`),
+			assert: func(t *testing.T, result []byte) {
+				attributes := xmlProjectionAttributeSets(t, result)
+				if first := attributes["Stream#1"]; first["displayTitle"] != "Unknown (AAC Stereo)" || first["languageCode"] != "" {
+					t.Fatalf("undefined XML audio = %#v", first)
+				}
+				if second := attributes["Stream#2"]; second["displayTitle"] != "Plex Native" || second["extendedDisplayTitle"] != "Chinese (EAC3 5.1)" || second["languageCode"] != "zho" {
+					t.Fatalf("native XML audio = %#v", second)
+				}
+			},
+		},
+		{
+			name:        "JSON",
+			contentType: "application/json",
+			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"Part":[{"id":7,"file":"/cloud/movie.strm","Stream":[{"streamType":2,"index":1},{"streamType":2,"index":2,"displayTitle":"Plex Native"}]}]}]}]}}`),
+			assert: func(t *testing.T, result []byte) {
+				var document map[string]any
+				if err := json.Unmarshal(result, &document); err != nil {
+					t.Fatal(err)
+				}
+				part := document["MediaContainer"].(map[string]any)["Metadata"].([]any)[0].(map[string]any)["Media"].([]any)[0].(map[string]any)["Part"].([]any)[0].(map[string]any)
+				streams := part["Stream"].([]any)
+				first := streams[0].(map[string]any)
+				second := streams[1].(map[string]any)
+				if first["displayTitle"] != "Unknown (AAC Stereo)" || first["languageCode"] != nil {
+					t.Fatalf("undefined JSON audio = %#v", first)
+				}
+				if second["displayTitle"] != "Plex Native" || second["extendedDisplayTitle"] != "Chinese (EAC3 5.1)" || second["languageCode"] != "zho" {
+					t.Fatalf("native JSON audio = %#v", second)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, changed, err := EnrichMetadata(test.body, test.contentType, "42", media)
+			if err != nil || !changed {
+				t.Fatalf("EnrichMetadata changed=%v err=%v", changed, err)
+			}
+			test.assert(t, result)
+		})
 	}
 }
 
@@ -601,7 +686,7 @@ func TestEnrichMetadataDoesNotProjectUnknownCodecFieldsFromDolbyVisionProfile(t 
 		t.Fatalf("EnrichMetadata changed=%v err=%v", changed, err)
 	}
 	attrs := xmlProjectionAttributeSets(t, result)["Stream#1"]
-	if attrs["DOVIProfile"] != "5" || attrs["DOVIPresent"] != "1" || attrs["displayTitle"] != "4K DoVi" {
+	if attrs["DOVIProfile"] != "5" || attrs["DOVIPresent"] != "1" || attrs["displayTitle"] != "4K DoVi (HEVC)" {
 		t.Fatalf("Dolby Vision projection = %#v", attrs)
 	}
 	for _, name := range []string{"profile", "bitDepth", "pixelFormat", "colorSpace", "colorRange", "colorPrimaries", "colorTrc"} {
@@ -660,7 +745,7 @@ func TestEnrichMetadataDoesNotCreateMissingStreamsWhenPlexHasOne(t *testing.T) {
 	if _, exists := attrs["Stream#3"]; exists {
 		t.Fatalf("missing streams were created: %#v", attrs)
 	}
-	if attrs["Stream#1"]["codec"] != "existing" || attrs["Stream#1"]["displayTitle"] != "4K HDR10" {
+	if attrs["Stream#1"]["codec"] != "existing" || attrs["Stream#1"]["displayTitle"] != "4K HDR10 (HEVC Main 10)" {
 		t.Fatalf("existing stream was not conservatively enriched: %#v", attrs["Stream#1"])
 	}
 }
@@ -952,9 +1037,9 @@ func xmlProjectionAttributeSets(t *testing.T, body []byte) map[string]map[string
 }
 
 func completeProjectionXML() string {
-	return `<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="123000" bitrate="12000" width="3840" height="2160" aspectRatio="16:9" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="23.976" videoProfile="Main 10" audioProfile="LC"><Part id="7" key="/library/parts/7/1/file" file="/cloud/movie.strm" duration="123000" size="987654321" container="mkv" videoProfile="Main 10" audioProfile="LC"><Stream streamType="1" index="0" codec="hevc" profile="Main 10" level="153" bitrate="12000" width="3840" height="2160" frameRate="23.976" refFrames="4" pixelFormat="yuv420p10le" bitDepth="10" colorSpace="bt2020nc" colorRange="tv" colorPrimaries="bt2020" colorTrc="smpte2084" chromaLocation="left" sampleAspectRatio="1:1" displayAspectRatio="16:9" languageCode="eng" title="Video" displayTitle="4K HDR10" extendedDisplayTitle="4K HDR10 (HEVC Main 10)"/><Stream streamType="2" index="1" codec="aac" profile="LC" level="1" bitrate="640" languageCode="eng" title="English" samplingRate="48000" channels="6" audioChannelLayout="5.1"/></Part></Media></Video></MediaContainer>`
+	return `<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="123000" bitrate="12000" width="3840" height="2160" aspectRatio="16:9" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="23.976" videoProfile="Main 10" audioProfile="LC"><Part id="7" key="/library/parts/7/1/file" file="/cloud/movie.strm" duration="123000" size="987654321" container="mkv" videoProfile="Main 10" audioProfile="LC"><Stream streamType="1" index="0" codec="hevc" profile="Main 10" level="153" bitrate="12000" width="3840" height="2160" frameRate="23.976" refFrames="4" pixelFormat="yuv420p10le" bitDepth="10" colorSpace="bt2020nc" colorRange="tv" colorPrimaries="bt2020" colorTrc="smpte2084" chromaLocation="left" sampleAspectRatio="1:1" displayAspectRatio="16:9" languageCode="eng" title="Video" displayTitle="4K HDR10 (HEVC Main 10)" extendedDisplayTitle="4K HDR10 (HEVC Main 10)"/><Stream streamType="2" index="1" codec="aac" profile="LC" level="1" bitrate="640" languageCode="eng" title="English" samplingRate="48000" channels="6" audioChannelLayout="5.1" displayTitle="English (AAC 5.1)" extendedDisplayTitle="English (AAC 5.1)"/></Part></Media></Video></MediaContainer>`
 }
 
 func completeProjectionJSON() string {
-	return `{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":123000,"bitrate":12000,"width":3840,"height":2160,"aspectRatio":"16:9","audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"23.976","videoProfile":"Main 10","audioProfile":"LC","Part":[{"id":7,"key":"/library/parts/7/1/file","file":"/cloud/movie.strm","duration":123000,"size":987654321,"container":"mkv","videoProfile":"Main 10","audioProfile":"LC","Stream":[{"streamType":1,"index":0,"codec":"hevc","profile":"Main 10","level":153,"bitrate":12000,"width":3840,"height":2160,"frameRate":23.976,"refFrames":4,"pixelFormat":"yuv420p10le","bitDepth":10,"colorSpace":"bt2020nc","colorRange":"tv","colorPrimaries":"bt2020","colorTrc":"smpte2084","chromaLocation":"left","sampleAspectRatio":"1:1","displayAspectRatio":"16:9","languageCode":"eng","title":"Video","displayTitle":"4K HDR10","extendedDisplayTitle":"4K HDR10 (HEVC Main 10)"},{"streamType":2,"index":1,"codec":"aac","profile":"LC","level":1,"bitrate":640,"languageCode":"eng","title":"English","samplingRate":48000,"channels":6,"audioChannelLayout":"5.1"}]}]}]}]}}`
+	return `{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":123000,"bitrate":12000,"width":3840,"height":2160,"aspectRatio":"16:9","audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"23.976","videoProfile":"Main 10","audioProfile":"LC","Part":[{"id":7,"key":"/library/parts/7/1/file","file":"/cloud/movie.strm","duration":123000,"size":987654321,"container":"mkv","videoProfile":"Main 10","audioProfile":"LC","Stream":[{"streamType":1,"index":0,"codec":"hevc","profile":"Main 10","level":153,"bitrate":12000,"width":3840,"height":2160,"frameRate":23.976,"refFrames":4,"pixelFormat":"yuv420p10le","bitDepth":10,"colorSpace":"bt2020nc","colorRange":"tv","colorPrimaries":"bt2020","colorTrc":"smpte2084","chromaLocation":"left","sampleAspectRatio":"1:1","displayAspectRatio":"16:9","languageCode":"eng","title":"Video","displayTitle":"4K HDR10 (HEVC Main 10)","extendedDisplayTitle":"4K HDR10 (HEVC Main 10)"},{"streamType":2,"index":1,"codec":"aac","profile":"LC","level":1,"bitrate":640,"languageCode":"eng","title":"English","samplingRate":48000,"channels":6,"audioChannelLayout":"5.1","displayTitle":"English (AAC 5.1)","extendedDisplayTitle":"English (AAC 5.1)"}]}]}]}]}}`
 }
