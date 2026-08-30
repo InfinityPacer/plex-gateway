@@ -34,10 +34,12 @@ Plex 已返回同一 STRM Part 的 Direct Play decision、且本次 MediaInfo �
 额外探测。Apple TV 硬件支持 Profile 5，实际兼容性还受 Plex 版本、容器和片源影响，
 因此 veto 默认关闭。
 
-能够在这些路径上接受原始媒体重定向的原生客户端可以使用此链路。Plex Web 不支持
-云端播放：其浏览器播放器会将 `start.mpd` 作为 DASH manifest 获取，而重定向目标
-是原始媒体文件，且可能不允许跨源浏览器请求。为 Gateway 的重定向添加 CORS header
-无法改变最终媒体源的响应。Plex Web 中的本地媒体仍按普通 Plex 流量代理。
+能够在这些路径上接受原始媒体重定向的原生客户端可以直接使用此链路。Plex Web
+兼容层默认开启：Gateway 只在 Plex Web shell 中加载一个版本化脚本，并只对同源、
+呈 STRM Part 形态的 `/library/parts/.../file` 或 `.strm` 媒体元素移除 `crossorigin`。浏览器原生支持该容器和编码时，可以按
+普通媒体元素跟随 302 直接读取 CDN，即使最终源站没有 CORS header；媒体字节仍不经过
+Gateway。需要 DASH、转封装或转码的片源仍不支持，Gateway 不合成 manifest，也不代理
+视频流。关闭 `PLEX_WEB_DIRECT_PLAY_ENABLED` 后，Plex Web 页面恢复完全透明代理。
 
 ## 兼容性状态
 
@@ -47,7 +49,7 @@ Plex 已返回同一 STRM Part 的 Direct Play decision、且本次 MediaInfo �
 | Infuse Direct Play | 已验证 Direct Play | 使用 Plex Part 重定向路径。 |
 | Plex iOS ExperimentalPlayer | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路。 |
 | Plex for Apple TV | 已验证 Direct Play | HDR STRM 使用通用 decision/start 重定向链路。Apple TV 4K 支持 DV Profile 5 Direct Play，但 Plex 版本、容器和片源组合仍可能影响兼容性；Gateway 默认不拒绝。 |
-| Plex Web 云端播放 | 不支持 | 浏览器需要 DASH manifest，并受最终源站 CORS 限制。 |
+| Plex Web 云端 Direct Play | 已验证 Direct Play | MP4/H.264/AAC 样本已验证首播、暂停、继续和 seek，并保持 CDN 直达；其他容器与编码取决于浏览器原生能力，需要 DASH、转封装或转码的片源不支持。 |
 
 本项目是独立的社区项目，与 Plex、MediaVault、Infuse 或其各自所有者没有关联，
 也未获得其认可或赞助。
@@ -107,6 +109,7 @@ go run ./cmd/plex-gateway
 | `PART_PROBE_TIMEOUT` | `15s` | 无 body 的 Plex Part 授权 probe 超时时间。 |
 | `CLOUD_EXTENSIONS` | `.strm` | 以逗号分隔的云端控制文件扩展名。 |
 | `TRACE_ENABLED` | `true` | 启用经过脱敏的 Plex 请求顺序追踪。 |
+| `PLEX_WEB_DIRECT_PLAY_ENABLED` | `true` | 为 Plex Web shell 加载仅作用于同源 STRM Part 媒体元素的 Direct Play 兼容脚本；不代理媒体字节。 |
 | `METADATA_ANALYSIS_FILTER_ENABLED` | `true` | 从详细 metadata 读取中移除会触发 Plex 后台分析的 `asyncAugmentMetadata`；保留 `checkFiles`。 |
 | `METADATA_GUARD_ENABLED` | `true` | 限制单项详细 metadata 请求进入 Plex 的并发量。 |
 | `METADATA_GUARD_GLOBAL_CONCURRENCY` | `16` | 所有客户端共享的详细 metadata 并发上限。 |

@@ -76,6 +76,7 @@ type Config struct {
 	MetadataCoalesce       MetadataCoalesceConfig
 	MediaInfo              MediaInfoConfig
 	PlaybackVeto           bool
+	PlexWebDirectPlay      bool
 	LogLevel               string
 	TraceEnabled           bool
 	ReadHeaderTimeout      time.Duration
@@ -359,6 +360,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	plexWebDirectPlay, err := envBool("PLEX_WEB_DIRECT_PLAY_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
 
 	readHeaderTimeout, err := envDuration("READ_HEADER_TIMEOUT", defaultReadHeaderTimeout)
 	if err != nil {
@@ -423,6 +428,7 @@ func Load() (Config, error) {
 			PrewarmBefore: mediaInfoPrewarmBefore, PrewarmAfter: mediaInfoPrewarmAfter,
 		},
 		PlaybackVeto:      playbackVeto,
+		PlexWebDirectPlay: plexWebDirectPlay,
 		LogLevel:          logLevel,
 		TraceEnabled:      traceEnabled,
 		ReadHeaderTimeout: readHeaderTimeout,

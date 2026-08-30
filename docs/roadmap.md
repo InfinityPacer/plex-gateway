@@ -62,12 +62,12 @@ selection. Production playback has successfully followed this redirect path
 with Plex iOS ExperimentalPlayer and Plex for Apple TV. Other official-client
 playback paths are not supported by the current compatibility scope.
 
-Plex Web remains outside the cloud-playback compatibility gate. Its browser
-player fetches `start.mpd` as a DASH manifest; a redirect to the original media
-file can be rejected by browser CORS policy and is not itself a DASH manifest.
-Supporting that path would require a media proxy, packaging service, or client
-modification, each outside the redirect-only data plane. Local Plex Web media,
-manifest segments, and every genuine transcode request remain Plex-owned.
+Plex Web Direct Play is included for media the browser can decode natively. A
+small, default-enabled shell helper removes `crossorigin` only from same-origin
+Plex Part media elements, allowing the existing Part 302 to remain CDN-direct
+when the final origin does not emit CORS headers. The helper does not handle
+DASH, remuxing, or transcoding and does not proxy media bytes. Local Plex Web
+media, manifest segments, and every genuine transcode request remain Plex-owned.
 
 ## MediaInfo fallback and projection
 

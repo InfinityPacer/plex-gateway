@@ -26,6 +26,8 @@
 - P1/P2 在 worker 中先检查 SQLite。只有 L1 和 SQLite 都 miss 的任务才受全局远程启动
   间隔限制；SQLite 热命中不能因 CDN 风控节流额外等待 5 秒。
 - 302 响应只包含控制流。媒体字节始终由客户端直接从 CDN 读取。
+- Plex Web 兼容层只缓冲最多 2 MiB 的 Web shell，并加载可长期缓存的静态脚本；Part、
+  302、本地媒体和其他 Plex API 不缓冲响应，也不新增媒体数据面 I/O。
 
 ## 当前基准
 
@@ -92,6 +94,8 @@ Guard 尾部等待和客户端结果共同支持批量默认值 4。
 | 本地媒体透明代理 | Plex | 直连 Plex 与经 Gateway 的 p50/p95/p99、错误率、上游请求数 | 0 功能错误；Gateway 增量 p95 <= 20 ms、p99 <= 50 ms，且相对增加 <= 10%。 |
 | STRM Part 302 | Plex Part 授权、MediaVault redirect | 302 p50/p95/p99、Plex/MV 次数、响应字节 | 100% 健康样本返回 302；p95 < 2 s、p99 < 5 s；Gateway 不传输媒体字节。 |
 | universal start | Plex Part 授权、MediaVault redirect | grant 命中、上游次数、302 延迟 | 不读取 metadata、STRM 或 MediaInfo；无 grant 时透明回退。 |
+| Plex Web shell | Plex HTML、Gateway 静态脚本 | shell body、注入次数、首屏延迟、脚本缓存 | shell <= 2 MiB 时只修改一次；脚本命中长期缓存；其他 Web 静态资源和 API 不变。 |
+| Plex Web 云端 Direct Play | Plex decision/Part 授权、MediaVault redirect、CDN | 首帧、seek、Part 302、Gateway 媒体响应字节 | 浏览器原生支持的样本正常播放和 seek；Gateway 媒体响应保持 302 且不传输视频字节。 |
 | Decision，Infuse | Plex metadata 和 decision | decision 延迟、veto 结果 | veto 始终放弃判断；不增加缓存、MediaVault 或 CDN 请求。 |
 | Decision，L1 热缓存 | Plex metadata 和 decision，L1 | p50/p95/p99、SQLite/MV/CDN 次数 | 0 SQLite、0 MV、0 CDN；p95 <= 1 s、p99 <= 2 s。 |
 | SQLite 启动恢复 | 启动期 SQLite，播放期 L1 | 恢复耗时、首个 decision 延迟 | 首个请求 0 ffprobe、0 请求期 SQLite。 |

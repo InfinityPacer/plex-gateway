@@ -46,11 +46,16 @@ Part path, and starts no additional probe. Apple TV hardware supports Profile
 so the veto remains disabled by default.
 
 Native clients that accept a raw media redirect on those routes can use this
-path. Plex Web cloud playback is not supported: its browser player fetches
-`start.mpd` as a DASH manifest, while the redirect target is the original media
-file and may not permit cross-origin browser requests. Adding CORS headers to
-the gateway's redirect cannot change the final media origin's response. Local
-media in Plex Web remains ordinary proxied Plex traffic.
+path directly. The Plex Web compatibility layer is enabled by default. The
+gateway loads one versioned script in the Plex Web shell and removes
+`crossorigin` only from same-origin `/library/parts/.../file` or `.strm` media
+elements that have the shape of STRM Parts. When the
+browser natively supports the container and codecs, the element can follow the
+302 and read the CDN directly even when the final origin has no CORS header;
+media bytes still bypass the gateway. Sources that require DASH, remuxing, or
+transcoding remain unsupported. The gateway does not synthesize manifests or
+proxy video streams. Setting `PLEX_WEB_DIRECT_PLAY_ENABLED=false` restores a
+fully transparent Plex Web shell.
 
 ## Compatibility status
 
@@ -60,7 +65,7 @@ media in Plex Web remains ordinary proxied Plex traffic.
 | Infuse Direct Play | Direct Play verified | Uses the Plex Part redirect path. |
 | Plex iOS ExperimentalPlayer | Direct Play verified | STRM uses the universal decision/start redirect path. |
 | Plex for Apple TV | Direct Play verified | HDR STRM uses the universal decision/start redirect path. Apple TV 4K supports Dolby Vision Profile 5 Direct Play, while Plex version, container, and source combinations may still affect compatibility; the gateway does not reject it by default. |
-| Plex Web cloud playback | Unsupported | The browser expects a DASH manifest and enforces final-origin CORS. |
+| Plex Web cloud Direct Play | Direct Play verified | MP4/H.264/AAC was verified for initial playback, pause, resume, and seek with CDN-direct delivery. Other containers and codecs depend on native browser support; sources that require DASH, remuxing, or transcoding remain unsupported. |
 
 This is an independent community project. It is not affiliated with, endorsed
 by, or sponsored by Plex, MediaVault, Infuse, or their respective owners.
@@ -123,6 +128,7 @@ Important environment variables:
 | `PART_PROBE_TIMEOUT` | `15s` | Timeout for the bodyless Plex Part authorization probe. |
 | `CLOUD_EXTENSIONS` | `.strm` | Comma-separated cloud control-file extensions. |
 | `TRACE_ENABLED` | `true` | Enable sanitized Plex request-order tracing. |
+| `PLEX_WEB_DIRECT_PLAY_ENABLED` | `true` | Load the Plex Web Direct Play helper for same-origin STRM Part media elements without proxying media bytes. |
 | `METADATA_ANALYSIS_FILTER_ENABLED` | `true` | Remove `asyncAugmentMetadata` from detailed metadata reads to avoid Plex background analysis while preserving `checkFiles`. |
 | `METADATA_GUARD_ENABLED` | `true` | Limit single-item detailed metadata requests before they enter Plex. |
 | `METADATA_GUARD_GLOBAL_CONCURRENCY` | `16` | Shared detailed metadata concurrency limit across all clients. |

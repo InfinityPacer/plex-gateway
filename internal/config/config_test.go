@@ -26,6 +26,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("TRACE_ENABLED", "")
 	t.Setenv("METADATA_ANALYSIS_FILTER_ENABLED", "")
 	t.Setenv("METADATA_COALESCE_ENABLED", "")
+	t.Setenv("PLEX_WEB_DIRECT_PLAY_ENABLED", "")
 
 	got, err := Load()
 	if err != nil {
@@ -65,6 +66,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if got.PlaybackVeto {
 		t.Fatal("PlaybackVeto = true")
+	}
+	if !got.PlexWebDirectPlay {
+		t.Fatal("PlexWebDirectPlay = false")
 	}
 	if got.MediaVaultURL != nil || len(got.PathMappings) != 0 {
 		t.Fatalf("cloud redirect unexpectedly enabled: %#v", got)
@@ -124,6 +128,7 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	t.Setenv("MEDIAINFO_ENRICHMENT_CONCURRENCY", "3")
 	t.Setenv("MEDIAINFO_PREWARM_BEFORE", "4")
 	t.Setenv("MEDIAINFO_PREWARM_AFTER", "6")
+	t.Setenv("PLEX_WEB_DIRECT_PLAY_ENABLED", "false")
 
 	got, err := Load()
 	if err != nil {
@@ -134,6 +139,9 @@ func TestLoadCloudConfiguration(t *testing.T) {
 	}
 	if got.PlexToken != "management-token" {
 		t.Fatalf("PlexToken = %q", got.PlexToken)
+	}
+	if got.PlexWebDirectPlay {
+		t.Fatal("PlexWebDirectPlay = true")
 	}
 	if !reflect.DeepEqual(got.CloudExtensions, []string{".strm"}) {
 		t.Fatalf("CloudExtensions = %v", got.CloudExtensions)

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Plex Web can Direct Play browser-native STRM media while video remains a
+  browser-to-CDN 302 path.
+
 ## [0.1.2] - 2026-08-30
 
 ### Added
