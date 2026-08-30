@@ -50,7 +50,7 @@ func EnrichDecision(body []byte, contentType string, expected Part, media mediai
 		return nil, false, errors.New("unsupported Plex decision document")
 	}
 
-	changed, err := selection.enrich(media)
+	changed, err := selection.enrich(media, true)
 	if err != nil {
 		return nil, false, err
 	}

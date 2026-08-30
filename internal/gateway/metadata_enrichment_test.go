@@ -33,6 +33,20 @@ type fakeMediaInfoEnsurer struct {
 	getContextFn func(context.Context, mediainfo.Key) (mediainfo.Record, bool)
 }
 
+type countingControlResolver struct {
+	delegate resolver.ControlResolver
+	reads    atomic.Int64
+}
+
+func (counting *countingControlResolver) ReadTarget(strmPath string) (string, error) {
+	counting.reads.Add(1)
+	return counting.delegate.ReadTarget(strmPath)
+}
+
+func (counting *countingControlResolver) ResolveTarget(ctx context.Context, target string, playback resolver.PlaybackRequest) (resolver.DirectURL, error) {
+	return counting.delegate.ResolveTarget(ctx, target, playback)
+}
+
 func (ensurer *fakeMediaInfoEnsurer) GetMemory(key mediainfo.Key) (mediainfo.Record, bool) {
 	ensurer.memoryGets.Add(1)
 	if ensurer.memoryFn == nil {
@@ -550,23 +564,33 @@ func TestMetadataEnrichmentAdmitsExistingStreamHDRAndSTRMControlSize(t *testing.
 
 func TestMetadataEnrichmentSkipsLocalAndCompleteCloudParts(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
+	countingResolver := &countingControlResolver{delegate: fixture.resolver}
+	fixture.resolver = countingResolver
 	ensurer := &fakeMediaInfoEnsurer{}
 	tests := []struct {
-		name string
-		body []byte
+		name        string
+		contentType string
+		body        []byte
 	}{
 		{
-			name: "local Part",
-			body: []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="9" file="/media/local/movie.mkv"/></Media></Video></MediaContainer>`),
+			name:        "local Part",
+			contentType: "application/xml",
+			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="9" file="/media/local/movie.mkv"/></Media></Video></MediaContainer>`),
 		},
 		{
-			name: "complete cloud Part",
-			body: []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="16:9" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="23.976" videoProfile="Main 10" audioProfile="LC"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="2000000" container="mkv" videoProfile="Main 10" audioProfile="LC"><Stream id="101" streamType="1" index="0" codec="hevc" profile="Main 10" level="153" bitrate="8000" language="eng" title="Video" width="3840" height="2160" frameRate="23.976" refFrames="4" pixelFormat="yuv420p10le" bitDepth="10" colorSpace="bt2020nc" colorRange="tv" colorPrimaries="bt2020" colorTrc="smpte2084" chromaLocation="left" sampleAspectRatio="1:1" displayAspectRatio="16:9" displayTitle="4K HDR10" extendedDisplayTitle="4K HDR10 (HEVC Main 10)"/></Part></Media></Video></MediaContainer>`),
+			name:        "complete cloud XML",
+			contentType: "application/xml",
+			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="16:9" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="23.976" videoProfile="Main 10" audioProfile="LC"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="2000000" container="mkv" videoProfile="Main 10" audioProfile="LC"><Stream id="101" streamType="1" index="0" codec="hevc" profile="Main 10" level="153" bitrate="8000" language="eng" title="Video" width="3840" height="2160" frameRate="23.976" refFrames="4" pixelFormat="yuv420p10le" bitDepth="10" colorSpace="bt2020nc" colorRange="tv" colorPrimaries="bt2020" colorTrc="smpte2084" chromaLocation="left" sampleAspectRatio="1:1" displayAspectRatio="16:9" displayTitle="4K HDR10" extendedDisplayTitle="4K HDR10 (HEVC Main 10)"/></Part></Media></Video></MediaContainer>`),
+		},
+		{
+			name:        "complete cloud JSON",
+			contentType: "application/json",
+			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":60000,"bitrate":8000,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"24p","videoProfile":"main 10","audioProfile":"lc","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":60000,"size":2000000,"container":"mkv","videoProfile":"main 10","audioProfile":"lc","Stream":[{"id":101,"streamType":1,"index":0,"codec":"hevc","profile":"main 10","level":153,"bitrate":8000,"languageCode":"eng","title":"Video","width":3840,"height":2160,"frameRate":23.976,"refFrames":4,"pixelFormat":"yuv420p10le","bitDepth":10,"colorSpace":"bt2020nc","colorRange":"tv","colorPrimaries":"bt2020","colorTrc":"smpte2084","chromaLocation":"left","sampleAspectRatio":"1:1","displayAspectRatio":"16:9","displayTitle":"4K HDR10","extendedDisplayTitle":"4K HDR10 (HEVC Main 10)"}]}]}]}]}}`),
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(test.body, "application/xml"))
+			handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(test.body, test.contentType))
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, authenticatedMetadataRequest(http.MethodGet))
 			if !bytes.Equal(response.Body.Bytes(), test.body) || response.Header().Get("ETag") != `"plex-etag"` {
@@ -574,8 +598,81 @@ func TestMetadataEnrichmentSkipsLocalAndCompleteCloudParts(t *testing.T) {
 			}
 		})
 	}
-	if ensurer.memoryGets.Load() != 0 || len(ensurer.offers()) != 0 {
-		t.Fatalf("skipped Parts memory gets=%d offers=%d", ensurer.memoryGets.Load(), len(ensurer.offers()))
+	if countingResolver.reads.Load() != 0 || ensurer.memoryGets.Load() != 0 || ensurer.gets.Load() != 0 || len(ensurer.offers()) != 0 {
+		t.Fatalf("skipped Parts STRM reads=%d memory gets=%d store gets=%d offers=%d", countingResolver.reads.Load(), ensurer.memoryGets.Load(), ensurer.gets.Load(), len(ensurer.offers()))
+	}
+}
+
+func TestMetadataEnrichmentProjectsIncompleteItemStreamsWithCompleteMediaAndPart(t *testing.T) {
+	fixture := newMetadataEnrichmentFixture(t)
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+		want        []byte
+	}{
+		{
+			name:        "XML",
+			contentType: "application/xml",
+			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="1.78" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="24p" videoProfile="main 10" audioProfile="lc"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="2000000" container="mkv" videoProfile="main 10" audioProfile="lc"><Stream id="101" streamType="1" index="0"/></Part></Media></Video></MediaContainer>`),
+			want:        []byte(`codec="hevc"`),
+		},
+		{
+			name:        "JSON",
+			contentType: "application/json",
+			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":60000,"bitrate":8000,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"24p","videoProfile":"main 10","audioProfile":"lc","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":60000,"size":2000000,"container":"mkv","videoProfile":"main 10","audioProfile":"lc","Stream":[{"id":101,"streamType":1,"index":0}]}]}]}]}}`),
+			want:        []byte(`"codec":"hevc"`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ensurer := &fakeMediaInfoEnsurer{memoryFn: func(key mediainfo.Key) (mediainfo.Record, bool) {
+				return mediainfo.Record{Key: key, Media: completeProjectionMedia()}, true
+			}}
+			handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(test.body, test.contentType))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, authenticatedMetadataRequest(http.MethodGet))
+			if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), test.want) {
+				t.Fatalf("response = %d %s", response.Code, response.Body.Bytes())
+			}
+			if ensurer.memoryGets.Load() != 1 || ensurer.gets.Load() != 0 || len(ensurer.offers()) != 0 {
+				t.Fatalf("memory gets=%d store gets=%d offers=%d", ensurer.memoryGets.Load(), ensurer.gets.Load(), len(ensurer.offers()))
+			}
+		})
+	}
+}
+
+func TestMetadataEnrichmentCollectionIgnoresIncompleteNativeStreams(t *testing.T) {
+	fixture := newMetadataEnrichmentFixture(t)
+	ensurer := &fakeMediaInfoEnsurer{}
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+	}{
+		{
+			name:        "XML",
+			contentType: "application/xml",
+			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="1.78" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="24p" videoProfile="main 10" audioProfile="lc"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="2000000" container="mkv" videoProfile="main 10" audioProfile="lc"><Stream streamType="1" index="0" marker="plex-native"/></Part></Media></Video></MediaContainer>`),
+		},
+		{
+			name:        "JSON",
+			contentType: "application/json",
+			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":60000,"bitrate":8000,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"24p","videoProfile":"main 10","audioProfile":"lc","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":60000,"size":2000000,"container":"mkv","videoProfile":"main 10","audioProfile":"lc","Stream":[{"streamType":1,"index":0,"marker":"plex-native"}]}]}]}]}}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(test.body, test.contentType))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, authenticatedRequest(http.MethodGet, "/library/metadata/41/children"))
+			if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), test.body) || response.Header().Get("ETag") != `"plex-etag"` {
+				t.Fatalf("response changed: status=%d headers=%#v body=%s", response.Code, response.Header(), response.Body.Bytes())
+			}
+		})
+	}
+	if ensurer.memoryGets.Load() != 0 || ensurer.gets.Load() != 0 || len(ensurer.offers()) != 0 {
+		t.Fatalf("collection touched MediaInfo cache: memory gets=%d store gets=%d offers=%d", ensurer.memoryGets.Load(), ensurer.gets.Load(), len(ensurer.offers()))
 	}
 }
 
