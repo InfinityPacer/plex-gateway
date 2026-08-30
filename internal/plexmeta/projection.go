@@ -34,6 +34,10 @@ func SelectEnrichmentTarget(body []byte, contentType, ratingKey string) (Target,
 	if err != nil {
 		return Target{}, err
 	}
+	return enrichmentTarget(selection)
+}
+
+func enrichmentTarget(selection projectionSelection) (Target, error) {
 	target := selection.target()
 	streamNeedsEnrichment, err := selection.streamsNeedEnrichment()
 	if err != nil {
@@ -1061,6 +1065,13 @@ func xmlStreamsNeedEnrichment(part *xmlProjectionElement) (bool, error) {
 	if len(streams) == 0 {
 		return true, nil
 	}
+	plexMaterialized, err := xmlStreamsArePlexMaterialized(streams)
+	if err != nil {
+		return false, err
+	}
+	if plexMaterialized {
+		return false, nil
+	}
 	for _, stream := range streams {
 		key, present, err := xmlStreamIdentity(stream)
 		if err != nil {
@@ -1089,6 +1100,29 @@ func xmlStreamsNeedEnrichment(part *xmlProjectionElement) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// xmlStreamsArePlexMaterialized recognizes Stream rows backed by the Plex data
+// model. Positive database IDs are authority markers; optional descriptive
+// fields such as language and title may legitimately be absent and must not
+// trigger a second STRM probe.
+func xmlStreamsArePlexMaterialized(streams []*xmlProjectionElement) (bool, error) {
+	for _, stream := range streams {
+		if _, present, err := xmlStreamIdentity(stream); err != nil {
+			return false, err
+		} else if !present {
+			return false, nil
+		}
+		id, present, err := xmlAttribute(stream.start.Attr, "id")
+		if err != nil {
+			return false, err
+		}
+		parsed, parseErr := strconv.ParseInt(strings.TrimSpace(id), 10, 64)
+		if !present || parseErr != nil || parsed <= 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func xmlSTRMPartSizeNeedsCorrection(part *xmlProjectionElement) (bool, error) {
@@ -1820,6 +1854,9 @@ func jsonStreamsNeedEnrichment(part *jsonObject) (bool, error) {
 	if _, err := indexJSONStreams(streams.items); err != nil {
 		return false, err
 	}
+	if jsonStreamsArePlexMaterialized(streams.items) {
+		return false, nil
+	}
 	for _, stream := range streams.items {
 		key, present, err := jsonStreamIdentity(*stream)
 		if err != nil {
@@ -1838,6 +1875,27 @@ func jsonStreamsNeedEnrichment(part *jsonObject) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// jsonStreamsArePlexMaterialized is the JSON counterpart of
+// xmlStreamsArePlexMaterialized. Generated Gateway Stream projections
+// deliberately omit Plex IDs, so they remain eligible for later cache-backed
+// enrichment.
+func jsonStreamsArePlexMaterialized(streams []*jsonObject) bool {
+	for _, stream := range streams {
+		if _, present, err := jsonStreamIdentity(*stream); err != nil || !present {
+			return false
+		}
+		rawID, present := (*stream)["id"]
+		if !present {
+			return false
+		}
+		id, valid := jsonRawInt64(rawID)
+		if !valid || id <= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func jsonSTRMPartSizeNeedsCorrection(part jsonObject) bool {

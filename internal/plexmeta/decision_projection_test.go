@@ -118,3 +118,54 @@ func TestEnrichDecisionRejectsNonMatchingOrAmbiguousPart(t *testing.T) {
 		})
 	}
 }
+
+func TestDecisionNeedsEnrichmentTrustsMaterializedStreams(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		want        bool
+	}{
+		{
+			name:        "XML materialized",
+			contentType: "application/xml",
+			body:        `<MediaContainer><Video><Media container="mp4" duration="1414016" bitrate="3730" width="3840" height="2160" aspectRatio="1.78" audioChannels="2" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="PAL" videoProfile="main" audioProfile="lc" decision="directplay"><Part id="9" key="/library/parts/9/1/file" file="/media/cloud/episode.strm" duration="1414016" size="659294933" container="mp4" videoProfile="main" audioProfile="lc" decision="directplay"><Stream id="101" streamType="1" index="0" codec="hevc"/><Stream id="102" streamType="2" index="1" codec="aac"/></Part></Media></Video></MediaContainer>`,
+		},
+		{
+			name:        "JSON materialized",
+			contentType: "application/json",
+			body:        `{"MediaContainer":{"Metadata":[{"Media":[{"container":"mp4","duration":1414016,"bitrate":3730,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":2,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"PAL","videoProfile":"main","audioProfile":"lc","decision":"directplay","Part":[{"id":9,"key":"/library/parts/9/1/file","file":"/media/cloud/episode.strm","duration":1414016,"size":659294933,"container":"mp4","videoProfile":"main","audioProfile":"lc","decision":"directplay","Stream":[{"id":101,"streamType":1,"index":0,"codec":"hevc"},{"id":102,"streamType":2,"index":1,"codec":"aac"}]}]}]}]}}`,
+		},
+		{
+			name:        "XML projected",
+			contentType: "application/xml",
+			body:        `<MediaContainer><Video><Media container="mp4" duration="1414016" bitrate="3730" width="3840" height="2160" aspectRatio="1.78" audioChannels="2" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="PAL" videoProfile="main" audioProfile="lc" decision="directplay"><Part id="9" key="/library/parts/9/1/file" file="/media/cloud/episode.strm" duration="1414016" size="659294933" container="mp4" videoProfile="main" audioProfile="lc" decision="directplay"><Stream streamType="1" index="0" codec="hevc"/></Part></Media></Video></MediaContainer>`,
+			want:        true,
+		},
+		{
+			name:        "JSON projected",
+			contentType: "application/json",
+			body:        `{"MediaContainer":{"Metadata":[{"Media":[{"container":"mp4","duration":1414016,"bitrate":3730,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":2,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"PAL","videoProfile":"main","audioProfile":"lc","decision":"directplay","Part":[{"id":9,"key":"/library/parts/9/1/file","file":"/media/cloud/episode.strm","duration":1414016,"size":659294933,"container":"mp4","videoProfile":"main","audioProfile":"lc","decision":"directplay","Stream":[{"streamType":1,"index":0,"codec":"hevc"}]}]}]}]}}`,
+			want:        true,
+		},
+	}
+	expected := Part{ID: "9", Key: "/library/parts/9/1/file", File: "/media/cloud/episode.strm"}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := DecisionNeedsEnrichment([]byte(test.body), test.contentType, expected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("DecisionNeedsEnrichment=%v, want %v", got, test.want)
+			}
+			result, changed, err := EnrichDecision([]byte(test.body), test.contentType, expected, projectionTestMedia())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !test.want && (changed || !bytes.Equal(result, []byte(test.body))) {
+				t.Fatalf("materialized decision changed=%v result=%s", changed, result)
+			}
+		})
+	}
+}

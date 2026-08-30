@@ -694,6 +694,61 @@ func TestEnrichMetadataNoOpReturnsOriginalBytes(t *testing.T) {
 	}
 }
 
+func TestSelectEnrichmentTargetDistinguishesMaterializedAndProjectedStreams(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		want        bool
+	}{
+		{
+			name:        "XML materialized streams allow optional omissions",
+			contentType: "application/xml",
+			body:        `<MediaContainer><Video ratingKey="42"><Media container="mp4" duration="1414016" bitrate="3730" width="3840" height="2160" aspectRatio="1.78" audioChannels="2" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="PAL" videoProfile="main" audioProfile="lc"><Part id="9" file="/media/cloud/episode.strm" duration="1414016" size="659294933" container="mp4" videoProfile="main" audioProfile="lc"><Stream id="101" streamType="1" index="0" codec="hevc"/><Stream id="102" streamType="2" index="1" codec="aac"/></Part></Media></Video></MediaContainer>`,
+		},
+		{
+			name:        "JSON materialized streams allow optional omissions",
+			contentType: "application/json",
+			body:        `{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mp4","duration":1414016,"bitrate":3730,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":2,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"PAL","videoProfile":"main","audioProfile":"lc","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":1414016,"size":659294933,"container":"mp4","videoProfile":"main","audioProfile":"lc","Stream":[{"id":101,"streamType":1,"index":0,"codec":"hevc"},{"id":102,"streamType":2,"index":1,"codec":"aac"}]}]}]}]}}`,
+		},
+		{
+			name:        "XML projected stream remains eligible",
+			contentType: "application/xml",
+			body:        `<MediaContainer><Video ratingKey="42"><Media container="mp4" duration="1414016" bitrate="3730" width="3840" height="2160" aspectRatio="1.78" audioChannels="2" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="PAL" videoProfile="main" audioProfile="lc"><Part id="9" file="/media/cloud/episode.strm" duration="1414016" size="659294933" container="mp4" videoProfile="main" audioProfile="lc"><Stream streamType="1" index="0" codec="hevc"/></Part></Media></Video></MediaContainer>`,
+			want:        true,
+		},
+		{
+			name:        "JSON projected stream remains eligible",
+			contentType: "application/json",
+			body:        `{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mp4","duration":1414016,"bitrate":3730,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":2,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"PAL","videoProfile":"main","audioProfile":"lc","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":1414016,"size":659294933,"container":"mp4","videoProfile":"main","audioProfile":"lc","Stream":[{"streamType":1,"index":0,"codec":"hevc"}]}]}]}]}}`,
+			want:        true,
+		},
+		{
+			name:        "XML materialized stream does not hide missing Media core",
+			contentType: "application/xml",
+			body:        `<MediaContainer><Video ratingKey="42"><Media container="mp4" duration="1414016" bitrate="3730" width="3840" height="2160" aspectRatio="1.78" audioChannels="2" audioCodec="aac" videoResolution="4k" videoFrameRate="PAL" videoProfile="main" audioProfile="lc"><Part id="9" file="/media/cloud/episode.strm" duration="1414016" size="659294933" container="mp4" videoProfile="main" audioProfile="lc"><Stream id="101" streamType="1" index="0" codec="hevc"/></Part></Media></Video></MediaContainer>`,
+			want:        true,
+		},
+		{
+			name:        "JSON materialized stream does not hide missing Media core",
+			contentType: "application/json",
+			body:        `{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mp4","duration":1414016,"bitrate":3730,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":2,"audioCodec":"aac","videoResolution":"4k","videoFrameRate":"PAL","videoProfile":"main","audioProfile":"lc","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":1414016,"size":659294933,"container":"mp4","videoProfile":"main","audioProfile":"lc","Stream":[{"id":101,"streamType":1,"index":0,"codec":"hevc"}]}]}]}]}}`,
+			want:        true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target, err := SelectEnrichmentTarget([]byte(test.body), test.contentType, "42")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target.NeedsEnrichment != test.want {
+				t.Fatalf("NeedsEnrichment=%v, want %v", target.NeedsEnrichment, test.want)
+			}
+		})
+	}
+}
+
 func TestEnrichMetadataRejectsAmbiguousStructureWithoutInputMutation(t *testing.T) {
 	tests := []struct {
 		name        string

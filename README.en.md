@@ -201,8 +201,16 @@ are used to create descriptive video, audio, and subtitle Streams with fields
 such as HDR10, Dolby Vision, bit depth, codec, codecID, bitrate, channel layout, and
 language code. Generated Streams never contain Plex Stream IDs or playback
 selection fields such as `selected`, `default`, or `decision`. When Plex already
-has Streams, only missing fields on identity-matched Streams are filled. Missing
-sibling Streams are not created and existing Plex values are not overwritten.
+has descriptive Streams that are not materialized in its database, only missing
+fields on identity-matched Streams are filled. Missing sibling Streams are not
+created and existing Plex values are not overwritten. When a STRM Media/Part
+shape is complete, the Part carries the real media size, and every Stream has a
+positive ID assigned by the Plex data model, the Plex response is technically
+authoritative. Metadata and Direct Play decisions are returned byte-for-byte
+without reading the STRM, consulting the MediaInfo cache, or admitting ffprobe.
+Missing optional descriptions such as `language` or `title` do not revoke that
+authority. Non-STRM local Parts always remain outside this decision and are
+passed through unchanged.
 This release writes fallback probe results only to the gateway's SQLite store and
 does not write to the Plex DB. Production Plex DB writes are a next-stage
 evaluation after coverage, compatibility, backup, and rollback validation.

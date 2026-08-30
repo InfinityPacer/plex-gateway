@@ -173,7 +173,12 @@ Media、Part 和 Stream 技术字段。若 Plex 的 Part 完全没有 Stream，G
 ffprobe 的流类型和源索引创建描述性的视频、音频和字幕 Stream，并投影 HDR10、Dolby
 Vision、bit depth、codec、codecID、bitrate、声道布局和语言码等字段。合成 Stream 不包含 Plex
 Stream ID，也不生成 `selected`、`default` 或 `decision` 等播放选择字段。Plex 已经存在
-Stream 时只补充身份匹配 Stream 的缺失字段，不创建缺少的其他流，也不覆盖 Plex 值。
+但尚未物化到数据库的描述性 Stream 时，只补充身份匹配 Stream 的缺失字段，不创建缺少
+的其他流，也不覆盖 Plex 值。若 STRM 的 Media/Part 技术字段完整、Part 已具有真实媒体
+大小，且所有 Stream 都带有 Plex 数据模型分配的正数 ID，Plex 响应即为技术权威；Gateway
+会原样返回 metadata 和 Direct Play decision，不读取 STRM、不查询 MediaInfo 缓存，也不
+发起 ffprobe。`language`、`title` 等可选描述字段缺失不会解除该权威。本地非 STRM Part
+始终完全透传，不进入上述判断。
 当前版本只将兜底探测结果写入 Gateway SQLite，不写入 Plex DB。Plex DB 生产写入属于下一
 阶段评估内容，需先完成覆盖率、兼容性、备份和回滚验证。
 

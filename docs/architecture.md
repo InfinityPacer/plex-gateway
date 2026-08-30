@@ -203,6 +203,16 @@ the bounded P2 scheduler while the original Plex response is returned
 immediately. Successful worker results populate L1 and SQLite for later
 responses.
 
+Projection authority is derived only from the current Plex response, not from
+the identity of a database writer. Local non-STRM Parts bypass MediaInfo logic.
+For a STRM Part, complete Media/Part technical fields, a real media size, and
+positive IDs on every Stream prove that the Stream rows are materialized in the
+Plex data model. Such item metadata and Direct Play decisions are preserved
+byte-for-byte and do not read the STRM, cache, resolver, or probe worker.
+Gateway-generated descriptive Streams intentionally omit Plex IDs, so they
+remain distinguishable from that authoritative shape. Optional descriptions
+such as language and title are not authority requirements.
+
 ## MediaInfo scheduling contract
 
 The in-memory scheduler owns all remote-probe admission. It has three fixed

@@ -115,6 +115,26 @@ func TestCloudDecisionMediaInfoTimeoutFailsOpen(t *testing.T) {
 	}
 }
 
+func TestCloudDecisionPassesThroughPlexMaterializedMediaInfoWithoutCacheIO(t *testing.T) {
+	mediaInfo := &decisionMediaInfoStub{}
+	handler := newDecisionProjectionHandler(t, mediaInfo, 100*time.Millisecond, nil).(*decisionHandler)
+	body := []byte(`<MediaContainer><Video><Media container="mp4" duration="1414016" bitrate="3730" width="3840" height="2160" aspectRatio="1.78" audioChannels="2" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="PAL" videoProfile="main" audioProfile="lc" decision="directplay"><Part id="9" key="/library/parts/9/1/file" file="/media/cloud/episode.strm" duration="1414016" size="659294933" container="mp4" videoProfile="main" audioProfile="lc" decision="directplay"><Stream id="101" streamType="1" index="0" codec="hevc" default="1" streamIdentifier="1"/><Stream id="102" streamType="2" index="1" codec="aac" default="1" streamIdentifier="2"/></Part></Media></Video></MediaContainer>`)
+	handler.plex = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.Header().Set("ETag", `"plex-native"`)
+		_, _ = w.Write(body)
+	})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, decisionProjectionRequest())
+
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), body) || response.Header().Get("ETag") != `"plex-native"` {
+		t.Fatalf("status=%d headers=%#v body=%s", response.Code, response.Header(), response.Body.Bytes())
+	}
+	if mediaInfo.memoryCalls != 0 || mediaInfo.ensureCalls != 0 {
+		t.Fatalf("materialized decision touched MediaInfo: memory=%d ensure=%d", mediaInfo.memoryCalls, mediaInfo.ensureCalls)
+	}
+}
+
 func TestWriteIncompatibleDecisionClearsRepresentationHeadersAndHonorsHEAD(t *testing.T) {
 	for _, test := range []struct {
 		name   string
