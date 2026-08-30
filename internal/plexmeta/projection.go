@@ -14,15 +14,15 @@ import (
 	"github.com/InfinityPacer/plex-gateway/internal/mediainfo"
 )
 
-// Target identifies the single Plex item and reports whether the response is
-// missing a whitelisted technical field that a MediaInfo record can project.
-// A Part with no Stream elements is eligible for descriptive Stream creation
-// because ffprobe supplies the stable stream type and source index.
+// Target identifies one Plex item and reports whether the endpoint-specific
+// native response shape is missing a whitelisted technical field. A missing
+// Stream in item metadata is projectable, but generated Stream elements never
+// claim Plex-owned IDs or playback-selection state.
 type Target struct {
 	RatingKey string
 	Part      Part
-	// NeedsEnrichment is true when a whitelisted field is absent from the
-	// selected Media, Part, or matchable existing Stream elements.
+	// NeedsEnrichment follows the endpoint contract: collection targets consider
+	// Media/Part only, while item targets also consider descriptive Stream data.
 	NeedsEnrichment bool
 }
 
@@ -34,7 +34,13 @@ func SelectEnrichmentTarget(body []byte, contentType, ratingKey string) (Target,
 	if err != nil {
 		return Target{}, err
 	}
-	return selection.target(), nil
+	target := selection.target()
+	streamNeedsEnrichment, err := selection.streamsNeedEnrichment()
+	if err != nil {
+		return Target{}, err
+	}
+	target.NeedsEnrichment = target.NeedsEnrichment || streamNeedsEnrichment
+	return target, nil
 }
 
 // SelectEnrichmentPart is the strict Part-only form of
@@ -49,16 +55,16 @@ func SelectEnrichmentPart(body []byte, contentType, ratingKey string) (Part, err
 }
 
 // EnrichMetadata fills only absent whitelisted Media, Part, and matching
-// Stream attributes. When a Part has no Stream elements, it creates
-// descriptive video, audio, and subtitle elements from the probe record. The
-// input body is never modified in place. When no field is filled, the
+// Stream attributes. When item metadata has no Stream elements, descriptive
+// elements are created without Plex-owned IDs or playback-selection state.
+// The input body is never modified in place. When no field is filled, the
 // original bytes are returned unchanged.
 func EnrichMetadata(body []byte, contentType, ratingKey string, media mediainfo.Media) ([]byte, bool, error) {
 	document, selection, err := parseProjection(body, contentType, ratingKey)
 	if err != nil {
 		return nil, false, err
 	}
-	changed, err := selection.enrich(media)
+	changed, err := selection.enrich(media, true)
 	if err != nil {
 		return nil, false, err
 	}
@@ -91,8 +97,10 @@ func SelectEnrichmentTargets(body []byte, contentType string) ([]Target, error) 
 	return targets, nil
 }
 
-// EnrichMetadataTargets projects cached MediaInfo into matching items of one
-// collection response. Missing records leave their items unchanged.
+// EnrichMetadataTargets projects cached MediaInfo summaries into matching
+// items of one collection response. Plex collection responses normally omit
+// Stream elements, so collection projection never reads, creates, or changes
+// them. Existing Stream elements retain Plex's native representation.
 func EnrichMetadataTargets(body []byte, contentType string, records map[string]mediainfo.Media) ([]byte, int, error) {
 	document, err := parseProjectionDocument(body, contentType)
 	if err != nil {
@@ -108,7 +116,7 @@ func EnrichMetadataTargets(body []byte, contentType string, records map[string]m
 		if !ok {
 			continue
 		}
-		changed, err := selection.enrich(media)
+		changed, err := selection.enrich(media, false)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -134,7 +142,8 @@ type projectionDocument interface {
 
 type projectionSelection interface {
 	target() Target
-	enrich(mediainfo.Media) (bool, error)
+	streamsNeedEnrichment() (bool, error)
+	enrich(mediainfo.Media, bool) (bool, error)
 }
 
 func parseProjection(body []byte, contentType, ratingKey string) (projectionDocument, projectionSelection, error) {
@@ -204,6 +213,10 @@ func integerProjectionAttribute(name string, value int64) projectionAttribute {
 	return projectionAttribute{name: name, value: strconv.FormatInt(value, 10), number: true}
 }
 
+func numberProjectionAttribute(name, value string) projectionAttribute {
+	return projectionAttribute{name: name, value: value, number: true}
+}
+
 func booleanProjectionAttribute(name string, value bool) projectionAttribute {
 	if value {
 		return projectionAttribute{name: name, value: "1", boolean: true}
@@ -244,8 +257,8 @@ func mediaProjectionAttributes(media mediainfo.Media) []projectionAttribute {
 	if media.Height > 0 {
 		attributes = append(attributes, integerProjectionAttribute("height", int64(media.Height)))
 	}
-	if media.AspectRatio != "" {
-		attributes = append(attributes, textProjectionAttribute("aspectRatio", media.AspectRatio))
+	if aspectRatio := plexAspectRatio(media.AspectRatio); aspectRatio != "" {
+		attributes = append(attributes, numberProjectionAttribute("aspectRatio", aspectRatio))
 	}
 	if media.AudioChannels > 0 {
 		attributes = append(attributes, integerProjectionAttribute("audioChannels", int64(media.AudioChannels)))
@@ -262,11 +275,11 @@ func mediaProjectionAttributes(media mediainfo.Media) []projectionAttribute {
 	if frameRate := plexMediaFrameRate(media.FrameRate); frameRate != "" {
 		attributes = append(attributes, textProjectionAttribute("videoFrameRate", frameRate))
 	}
-	if media.VideoProfile != "" {
-		attributes = append(attributes, textProjectionAttribute("videoProfile", media.VideoProfile))
+	if profile := plexProfile(media.VideoProfile); profile != "" {
+		attributes = append(attributes, textProjectionAttribute("videoProfile", profile))
 	}
-	if media.AudioProfile != "" {
-		attributes = append(attributes, textProjectionAttribute("audioProfile", media.AudioProfile))
+	if profile := plexProfile(media.AudioProfile); profile != "" {
+		attributes = append(attributes, textProjectionAttribute("audioProfile", profile))
 	}
 	return attributes
 }
@@ -282,11 +295,11 @@ func partProjectionAttributes(media mediainfo.Media) []projectionAttribute {
 	if media.Container != "" {
 		attributes = append(attributes, textProjectionAttribute("container", media.Container))
 	}
-	if media.VideoProfile != "" {
-		attributes = append(attributes, textProjectionAttribute("videoProfile", media.VideoProfile))
+	if profile := plexProfile(media.VideoProfile); profile != "" {
+		attributes = append(attributes, textProjectionAttribute("videoProfile", profile))
 	}
-	if media.AudioProfile != "" {
-		attributes = append(attributes, textProjectionAttribute("audioProfile", media.AudioProfile))
+	if profile := plexProfile(media.AudioProfile); profile != "" {
+		attributes = append(attributes, textProjectionAttribute("audioProfile", profile))
 	}
 	return attributes
 }
@@ -299,8 +312,8 @@ func streamProjectionAttributes(stream mediainfo.Stream) []projectionAttribute {
 	if codecID := plexCodecID(stream.CodecTag); codecID != "" {
 		attributes = append(attributes, textProjectionAttribute("codecID", codecID))
 	}
-	if stream.Profile != "" {
-		attributes = append(attributes, textProjectionAttribute("profile", stream.Profile))
+	if profile := plexProfile(stream.Profile); profile != "" {
+		attributes = append(attributes, textProjectionAttribute("profile", profile))
 	}
 	if stream.Level > 0 {
 		attributes = append(attributes, integerProjectionAttribute("level", int64(stream.Level)))
@@ -389,6 +402,39 @@ func plexCodecID(value string) string {
 		}
 	}
 	return value
+}
+
+// plexProfile follows the lowercase profile vocabulary emitted by Plex for
+// Media, Part, and Stream technical fields. Display titles retain ffprobe's
+// presentation casing independently.
+func plexProfile(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+// plexAspectRatio converts ffprobe ratios to Plex's two-decimal numeric Media
+// representation. Stream displayAspectRatio remains the original ratio text.
+func plexAspectRatio(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	numerator, denominator, ratio := strings.Cut(value, ":")
+	if !ratio {
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil || parsed <= 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return ""
+		}
+		return strconv.FormatFloat(parsed, 'f', 2, 64)
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(numerator), 64)
+	if err != nil || n <= 0 {
+		return ""
+	}
+	d, err := strconv.ParseFloat(strings.TrimSpace(denominator), 64)
+	if err != nil || d <= 0 {
+		return ""
+	}
+	return strconv.FormatFloat(n/d, 'f', 2, 64)
 }
 
 // plexCodec keeps the normalized codec vocabulary expected by Plex clients.
@@ -489,6 +535,9 @@ func plexMediaFrameRate(value string) string {
 	fps, err := strconv.ParseFloat(decimal, 64)
 	if err != nil || fps <= 0 || math.IsNaN(fps) || math.IsInf(fps, 0) {
 		return ""
+	}
+	if math.Abs(fps-25) < 0.01 {
+		return "PAL"
 	}
 	nominal := math.Round(fps)
 	if nominal <= 0 || math.IsInf(nominal, 0) {
@@ -842,7 +891,7 @@ func xmlProjectionSelectionFromItem(item *xmlProjectionElement) (*xmlProjectionS
 	if err != nil {
 		return nil, err
 	}
-	needs, err := xmlTargetNeedsEnrichment(mediaItems[0], parts[0])
+	needs, err := xmlMediaPartNeedsEnrichment(mediaItems[0], parts[0])
 	if err != nil {
 		return nil, err
 	}
@@ -863,15 +912,22 @@ func (selection *xmlProjectionSelection) target() Target {
 	return selection.value
 }
 
-func (selection *xmlProjectionSelection) enrich(media mediainfo.Media) (bool, error) {
+func (selection *xmlProjectionSelection) streamsNeedEnrichment() (bool, error) {
+	return xmlStreamsNeedEnrichment(selection.part)
+}
+
+func (selection *xmlProjectionSelection) enrich(media mediainfo.Media, projectStreams bool) (bool, error) {
+	changed := addMissingXMLAttributes(selection.media, mediaProjectionAttributes(media))
+	changed = addMissingXMLAttributes(selection.part, partProjectionAttributes(media)) || changed
+	changed = replaceSTRMPartSizeXML(selection.part, media.Size) || changed
+	if !projectStreams {
+		return changed, nil
+	}
+	streamElements := directXMLElements(selection.part, "Stream")
 	streamProjections, err := buildStreamProjections(media)
 	if err != nil {
 		return false, err
 	}
-	changed := addMissingXMLAttributes(selection.media, mediaProjectionAttributes(media))
-	changed = addMissingXMLAttributes(selection.part, partProjectionAttributes(media)) || changed
-	changed = replaceSTRMPartSizeXML(selection.part, media.Size) || changed
-	streamElements := directXMLElements(selection.part, "Stream")
 	streamIndex, err := indexXMLStreams(streamElements)
 	if err != nil {
 		return false, err
@@ -969,7 +1025,7 @@ func xmlAttribute(attributes []xml.Attr, localName string) (string, bool, error)
 	return value, present, nil
 }
 
-func xmlTargetNeedsEnrichment(media, part *xmlProjectionElement) (bool, error) {
+func xmlMediaPartNeedsEnrichment(media, part *xmlProjectionElement) (bool, error) {
 	needs := false
 	for _, name := range mediaProjectionAttributeNames {
 		_, present, err := xmlAttribute(media.start.Attr, name)
@@ -994,6 +1050,10 @@ func xmlTargetNeedsEnrichment(media, part *xmlProjectionElement) (bool, error) {
 	} else if correction {
 		needs = true
 	}
+	return needs, nil
+}
+
+func xmlStreamsNeedEnrichment(part *xmlProjectionElement) (bool, error) {
 	streams := directXMLElements(part, "Stream")
 	if _, err := indexXMLStreams(streams); err != nil {
 		return false, err
@@ -1015,7 +1075,7 @@ func xmlTargetNeedsEnrichment(media, part *xmlProjectionElement) (bool, error) {
 				return false, err
 			}
 			if !present {
-				needs = true
+				return true, nil
 			}
 		}
 		if key.typeName == "1" {
@@ -1023,10 +1083,12 @@ func xmlTargetNeedsEnrichment(media, part *xmlProjectionElement) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			needs = needs || incomplete
+			if incomplete {
+				return true, nil
+			}
 		}
 	}
-	return needs, nil
+	return false, nil
 }
 
 func xmlSTRMPartSizeNeedsCorrection(part *xmlProjectionElement) (bool, error) {
@@ -1450,7 +1512,7 @@ func jsonProjectionSelectionFromItem(
 	if err != nil {
 		return nil, err
 	}
-	needs, err := jsonTargetNeedsEnrichment(mediaItem, partItem)
+	needs, err := jsonMediaPartNeedsEnrichment(mediaItem, partItem)
 	if err != nil {
 		return nil, err
 	}
@@ -1483,11 +1545,11 @@ func (selection *jsonProjectionSelection) target() Target {
 	return selection.value
 }
 
-func (selection *jsonProjectionSelection) enrich(media mediainfo.Media) (bool, error) {
-	streamProjections, err := buildStreamProjections(media)
-	if err != nil {
-		return false, err
-	}
+func (selection *jsonProjectionSelection) streamsNeedEnrichment() (bool, error) {
+	return jsonStreamsNeedEnrichment(selection.part)
+}
+
+func (selection *jsonProjectionSelection) enrich(media mediainfo.Media, projectStreams bool) (bool, error) {
 	changed, err := addMissingJSONAttributes(*selection.mediaItem, mediaProjectionAttributes(media))
 	if err != nil {
 		return false, err
@@ -1502,7 +1564,19 @@ func (selection *jsonProjectionSelection) enrich(media mediainfo.Media) (bool, e
 		return false, err
 	}
 	changed = changed || partSizeChanged
+	if !projectStreams {
+		if changed {
+			if err := selection.commit(); err != nil {
+				return false, err
+			}
+		}
+		return changed, nil
+	}
 	streamRaw, exists := (*selection.part)["Stream"]
+	streamProjections, err := buildStreamProjections(media)
+	if err != nil {
+		return false, err
+	}
 	if !exists {
 		if len(streamProjections) > 0 {
 			if err := setGeneratedJSONStreams(*selection.part, streamProjections); err != nil {
@@ -1713,7 +1787,7 @@ func jsonRawScalarString(raw json.RawMessage) (string, bool) {
 	return stringValue(value)
 }
 
-func jsonTargetNeedsEnrichment(media, part *jsonObject) (bool, error) {
+func jsonMediaPartNeedsEnrichment(media, part *jsonObject) (bool, error) {
 	needs := false
 	for _, name := range mediaProjectionAttributeNames {
 		if _, present := (*media)[name]; !present {
@@ -1728,6 +1802,10 @@ func jsonTargetNeedsEnrichment(media, part *jsonObject) (bool, error) {
 	if jsonSTRMPartSizeNeedsCorrection(*part) {
 		needs = true
 	}
+	return needs, nil
+}
+
+func jsonStreamsNeedEnrichment(part *jsonObject) (bool, error) {
 	streamRaw, exists := (*part)["Stream"]
 	if !exists {
 		return true, nil
@@ -1752,14 +1830,14 @@ func jsonTargetNeedsEnrichment(media, part *jsonObject) (bool, error) {
 		}
 		for _, name := range streamProjectionAttributeNames(key.typeName) {
 			if !jsonProjectionAttributePresent(*stream, name) {
-				needs = true
+				return true, nil
 			}
 		}
 		if key.typeName == "1" && jsonDolbyVisionFieldsIncomplete(*stream) {
-			needs = true
+			return true, nil
 		}
 	}
-	return needs, nil
+	return false, nil
 }
 
 func jsonSTRMPartSizeNeedsCorrection(part jsonObject) bool {

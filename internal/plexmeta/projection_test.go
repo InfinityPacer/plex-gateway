@@ -41,6 +41,18 @@ func TestSelectEnrichmentTargetStrictlySelectsJSONItem(t *testing.T) {
 	}
 }
 
+func TestSelectEnrichmentTargetTreatsMissingItemStreamsAsIncomplete(t *testing.T) {
+	body := []byte(`<MediaContainer><Video ratingKey="42"><Media container="mp4" duration="1175000" bitrate="8892" width="3840" height="2160" aspectRatio="1.78" audioChannels="2" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="PAL" videoProfile="main 10" audioProfile="lc"><Part id="7" file="/cloud/movie.strm" duration="1175000" size="1305975598" container="mp4" videoProfile="main 10" audioProfile="lc"/></Media></Video></MediaContainer>`)
+
+	target, err := SelectEnrichmentTarget(body, "application/xml", "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !target.NeedsEnrichment {
+		t.Fatal("item metadata without native Stream details unexpectedly bypassed enrichment")
+	}
+}
+
 func TestEnrichMetadataTargetsProjectsOnlyMappedCollectionItems(t *testing.T) {
 	media := projectionStreamMedia()
 	tests := []struct {
@@ -81,8 +93,69 @@ func TestEnrichMetadataTargetsProjectsOnlyMappedCollectionItems(t *testing.T) {
 			if changed != 1 || !bytes.Contains(enriched, test.wantCloud) || !bytes.Contains(enriched, test.wantLocal) {
 				t.Fatalf("changed=%d body=%s", changed, enriched)
 			}
-			if !bytes.Contains(enriched, []byte("HDR10")) || bytes.Count(enriched, []byte("HDR10")) != 2 {
-				t.Fatalf("HDR projection did not stay on the cached item: %s", enriched)
+			if bytes.Contains(enriched, []byte("Stream")) || bytes.Contains(enriched, []byte("HDR10")) {
+				t.Fatalf("collection projection created non-native Stream details: %s", enriched)
+			}
+		})
+	}
+}
+
+func TestCollectionProjectionIgnoresExistingStreams(t *testing.T) {
+	media := projectionStreamMedia()
+	tests := []struct {
+		name         string
+		contentType  string
+		completeBody []byte
+		partialBody  []byte
+	}{
+		{
+			name:         "XML",
+			contentType:  "application/xml",
+			completeBody: []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="123000" bitrate="29430119" width="3840" height="2160" aspectRatio="1.78" audioChannels="8" audioCodec="truehd" videoCodec="hevc" videoResolution="4k" videoFrameRate="24p" videoProfile="main 10" audioProfile="dolby truehd + dolby atmos"><Part id="7" file="/cloud/a.strm" duration="123000" size="987654321" container="mkv" videoProfile="main 10" audioProfile="dolby truehd + dolby atmos"><Stream streamType="1" index="0" marker="keep"/></Part></Media></Video></MediaContainer>`),
+			partialBody:  []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="7" file="/cloud/a.strm" size="301"><Stream streamType="1" index="0" marker="keep"/></Part></Media></Video></MediaContainer>`),
+		},
+		{
+			name:         "JSON",
+			contentType:  "application/json",
+			completeBody: []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":123000,"bitrate":29430119,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":8,"audioCodec":"truehd","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"24p","videoProfile":"main 10","audioProfile":"dolby truehd + dolby atmos","Part":[{"id":7,"file":"/cloud/a.strm","duration":123000,"size":987654321,"container":"mkv","videoProfile":"main 10","audioProfile":"dolby truehd + dolby atmos","Stream":[{"streamType":1,"index":0,"marker":"keep"}]}]}]}]}}`),
+			partialBody:  []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"Part":[{"id":7,"file":"/cloud/a.strm","size":301,"Stream":[{"streamType":1,"index":0,"marker":"keep"}]}]}]}]}}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name+" complete Media and Part", func(t *testing.T) {
+			targets, err := SelectEnrichmentTargets(test.completeBody, test.contentType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(targets) != 1 || targets[0].NeedsEnrichment {
+				t.Fatalf("targets = %#v", targets)
+			}
+			result, changed, err := EnrichMetadataTargets(test.completeBody, test.contentType, map[string]mediainfo.Media{"42": media})
+			if err != nil || changed != 0 || !bytes.Equal(result, test.completeBody) {
+				t.Fatalf("changed=%d err=%v body=%s", changed, err, result)
+			}
+		})
+		t.Run(test.name+" partial Media and Part", func(t *testing.T) {
+			result, changed, err := EnrichMetadataTargets(test.partialBody, test.contentType, map[string]mediainfo.Media{"42": media})
+			if err != nil || changed != 1 {
+				t.Fatalf("changed=%d err=%v body=%s", changed, err, result)
+			}
+			if test.contentType == "application/xml" {
+				stream := xmlProjectionAttributeSets(t, result)["Stream#1"]
+				want := map[string]string{"streamType": "1", "index": "0", "marker": "keep"}
+				if !reflect.DeepEqual(stream, want) {
+					t.Fatalf("collection Stream changed: got=%#v want=%#v", stream, want)
+				}
+				return
+			}
+			var document map[string]any
+			if err := json.Unmarshal(result, &document); err != nil {
+				t.Fatal(err)
+			}
+			stream := document["MediaContainer"].(map[string]any)["Metadata"].([]any)[0].(map[string]any)["Media"].([]any)[0].(map[string]any)["Part"].([]any)[0].(map[string]any)["Stream"].([]any)[0].(map[string]any)
+			want := map[string]any{"streamType": float64(1), "index": float64(0), "marker": "keep"}
+			if !reflect.DeepEqual(stream, want) {
+				t.Fatalf("collection Stream changed: got=%#v want=%#v", stream, want)
 			}
 		})
 	}
@@ -123,7 +196,7 @@ func TestEnrichMetadataTargetsSkipsAmbiguousCollectionItems(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if changed != 1 || bytes.Count(enriched, []byte("HDR10")) != 2 {
+			if changed != 1 || bytes.Contains(enriched, []byte("Stream")) || bytes.Contains(enriched, []byte("HDR10")) {
 				t.Fatalf("changed=%d body=%s", changed, enriched)
 			}
 			if bytes.Contains(enriched, []byte(`ratingKey="43"`)) && bytes.Contains(enriched, []byte(`ratingKey="43"><Media container="mkv"`)) {
@@ -197,7 +270,7 @@ func TestEnrichMetadataXMLFillsOnlyMissingSafeFields(t *testing.T) {
 	if part["id"] != "7" || part["file"] != "/cloud/movie.strm" || part["duration"] != "999" || part["size"] != "987654321" || part["container"] != "mkv" {
 		t.Fatalf("Part attributes = %#v", part)
 	}
-	if videoStream["id"] != "plex-stream-id" || videoStream["codec"] != "plex-stream-codec" || videoStream["profile"] != "Main 10" || videoStream["width"] != "3840" || videoStream["bitDepth"] != "10" {
+	if videoStream["id"] != "plex-stream-id" || videoStream["codec"] != "plex-stream-codec" || videoStream["profile"] != "main 10" || videoStream["width"] != "3840" || videoStream["bitDepth"] != "10" {
 		t.Fatalf("video Stream attributes = %#v", videoStream)
 	}
 	if audioStream["codec"] != "aac" || audioStream["channels"] != "6" || audioStream["samplingRate"] != "48000" {
@@ -248,7 +321,7 @@ func TestEnrichMetadataJSONFillsOnlyMissingSafeFields(t *testing.T) {
 	if part["id"] != float64(7) || part["file"] != "/cloud/movie.strm" || part["duration"] != float64(999) || part["size"] != float64(987654321) || part["container"] != "mkv" {
 		t.Fatalf("Part fields = %#v", part)
 	}
-	if videoStream["id"] != "plex-stream-id" || videoStream["codec"] != "plex-stream-codec" || videoStream["profile"] != "Main 10" || videoStream["width"] != float64(3840) || videoStream["bitDepth"] != float64(10) {
+	if videoStream["id"] != "plex-stream-id" || videoStream["codec"] != "plex-stream-codec" || videoStream["profile"] != "main 10" || videoStream["width"] != float64(3840) || videoStream["bitDepth"] != float64(10) {
 		t.Fatalf("video Stream fields = %#v", videoStream)
 	}
 	if audioStream["codec"] != "aac" || audioStream["channels"] != float64(6) || audioStream["samplingRate"] != float64(48000) {
@@ -262,8 +335,12 @@ func TestEnrichMetadataJSONFillsOnlyMissingSafeFields(t *testing.T) {
 	}
 }
 
-func TestEnrichMetadataCreatesStreamsWhenPartHasNone(t *testing.T) {
-	media := projectionStreamMedia()
+func TestEnrichMetadataCreatesDescriptiveStreamsWithoutPlexIdentity(t *testing.T) {
+	media := projectionTestMedia()
+	media.Streams = append(media.Streams, mediainfo.Stream{
+		Index: 2, Type: "subtitle", Codec: "hdmv_pgs_subtitle", Language: "zho", Title: "Chinese",
+		Disposition: mediainfo.Disposition{Forced: true},
+	})
 	tests := []struct {
 		name        string
 		contentType string
@@ -287,36 +364,30 @@ func TestEnrichMetadataCreatesStreamsWhenPartHasNone(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !changed || !bytes.Contains(result, []byte("Stream")) {
-				t.Fatalf("result = %s, want generated Stream elements", result)
+				t.Fatalf("result = %s, want generated descriptive Stream elements", result)
 			}
 			if test.contentType == "application/xml" {
 				attrs := xmlProjectionAttributeSets(t, result)
-				if attrs["Media"]["bitrate"] != "29430" || attrs["Part"]["size"] != "987654321" {
+				if attrs["Media"]["aspectRatio"] != "1.78" || attrs["Media"]["videoFrameRate"] != "24p" ||
+					attrs["Media"]["videoProfile"] != "main 10" || attrs["Media"]["audioProfile"] != "lc" ||
+					attrs["Part"]["size"] != "987654321" || attrs["Part"]["videoProfile"] != "main 10" {
 					t.Fatalf("projected XML units = media=%#v part=%#v", attrs["Media"], attrs["Part"])
 				}
-				if attrs["Stream#1"]["streamType"] != "1" || attrs["Stream#1"]["index"] != "0" ||
-					attrs["Stream#2"]["streamType"] != "2" || attrs["Stream#2"]["index"] != "1" ||
-					attrs["Stream#3"]["streamType"] != "3" || attrs["Stream#3"]["index"] != "2" {
-					t.Fatalf("generated XML stream identities = %#v", attrs)
+				if video := attrs["Stream#1"]; video["streamType"] != "1" || video["index"] != "0" || video["codec"] != "hevc" || video["width"] != "3840" {
+					t.Fatalf("generated XML video Stream = %#v", video)
 				}
-				if attrs["Stream#1"]["bitrate"] != "29430" || attrs["Stream#1"]["frameRate"] != "23.976" ||
-					attrs["Stream#1"]["displayTitle"] != "4K HDR10" ||
-					attrs["Stream#1"]["extendedDisplayTitle"] != "4K HDR10 (HEVC Main 10)" ||
-					attrs["Stream#1"]["colorTrc"] != "smpte2084" {
-					t.Fatalf("generated HDR10 attributes = %#v", attrs["Stream#1"])
+				if audio := attrs["Stream#2"]; audio["streamType"] != "2" || audio["index"] != "1" || audio["codec"] != "aac" || audio["channels"] != "6" {
+					t.Fatalf("generated XML audio Stream = %#v", audio)
 				}
-				if attrs["Stream#2"]["bitrate"] != "5000" || attrs["Stream#2"]["audioChannelLayout"] != "7.1" {
-					t.Fatalf("generated audio attributes = %#v", attrs["Stream#2"])
+				if subtitle := attrs["Stream#3"]; subtitle["streamType"] != "3" || subtitle["index"] != "2" || subtitle["codec"] != "pgs" || subtitle["languageCode"] != "zho" || subtitle["forced"] != "1" {
+					t.Fatalf("generated XML subtitle Stream = %#v", subtitle)
 				}
-				for _, name := range []string{"id", "selected", "default", "decision"} {
-					for _, streamName := range []string{"Stream#1", "Stream#2", "Stream#3"} {
-						if _, present := attrs[streamName][name]; present {
-							t.Fatalf("generated XML Stream contains forbidden field %q: %#v", name, attrs[streamName])
+				for _, streamName := range []string{"Stream#1", "Stream#2", "Stream#3"} {
+					for _, field := range []string{"id", "selected", "default", "decision"} {
+						if _, exists := attrs[streamName][field]; exists {
+							t.Fatalf("generated XML %s contains Plex-owned %s: %#v", streamName, field, attrs[streamName])
 						}
 					}
-				}
-				if attrs["Stream#3"]["codec"] != "pgs" || attrs["Stream#3"]["languageCode"] != "zho" || attrs["Stream#3"]["forced"] != "1" {
-					t.Fatalf("generated subtitle attributes = %#v", attrs["Stream#3"])
 				}
 				return
 			}
@@ -326,37 +397,34 @@ func TestEnrichMetadataCreatesStreamsWhenPartHasNone(t *testing.T) {
 			}
 			part := document["MediaContainer"].(map[string]any)["Metadata"].([]any)[0].(map[string]any)["Media"].([]any)[0].(map[string]any)["Part"].([]any)[0].(map[string]any)
 			mediaObject := document["MediaContainer"].(map[string]any)["Metadata"].([]any)[0].(map[string]any)["Media"].([]any)[0].(map[string]any)
-			if mediaObject["bitrate"] != float64(29430) || part["size"] != float64(987654321) {
+			if mediaObject["aspectRatio"] != 1.78 || mediaObject["videoFrameRate"] != "24p" ||
+				mediaObject["videoProfile"] != "main 10" || mediaObject["audioProfile"] != "lc" ||
+				part["size"] != float64(987654321) || part["videoProfile"] != "main 10" {
 				t.Fatalf("projected JSON units = media=%#v part=%#v", mediaObject, part)
 			}
 			streams := part["Stream"].([]any)
 			if len(streams) != 3 {
 				t.Fatalf("generated JSON streams = %#v", streams)
 			}
+			video := streams[0].(map[string]any)
+			audio := streams[1].(map[string]any)
+			subtitle := streams[2].(map[string]any)
+			if video["streamType"] != float64(1) || video["index"] != float64(0) || video["codec"] != "hevc" || video["width"] != float64(3840) {
+				t.Fatalf("generated JSON video Stream = %#v", video)
+			}
+			if audio["streamType"] != float64(2) || audio["index"] != float64(1) || audio["codec"] != "aac" || audio["channels"] != float64(6) {
+				t.Fatalf("generated JSON audio Stream = %#v", audio)
+			}
+			if subtitle["streamType"] != float64(3) || subtitle["index"] != float64(2) || subtitle["codec"] != "pgs" || subtitle["languageCode"] != "zho" || subtitle["forced"] != true {
+				t.Fatalf("generated JSON subtitle Stream = %#v", subtitle)
+			}
 			for _, rawStream := range streams {
 				stream := rawStream.(map[string]any)
-				for _, name := range []string{"id", "selected", "default", "decision"} {
-					if _, present := stream[name]; present {
-						t.Fatalf("generated JSON Stream contains forbidden field %q: %#v", name, stream)
+				for _, field := range []string{"id", "selected", "default", "decision"} {
+					if _, exists := stream[field]; exists {
+						t.Fatalf("generated JSON Stream contains Plex-owned %s: %#v", field, stream)
 					}
 				}
-			}
-			if streams[0].(map[string]any)["streamType"] != float64(1) || streams[0].(map[string]any)["index"] != float64(0) ||
-				streams[1].(map[string]any)["streamType"] != float64(2) || streams[1].(map[string]any)["index"] != float64(1) ||
-				streams[2].(map[string]any)["streamType"] != float64(3) || streams[2].(map[string]any)["index"] != float64(2) {
-				t.Fatalf("generated JSON stream identities = %#v", streams)
-			}
-			if streams[2].(map[string]any)["codec"] != "pgs" || streams[2].(map[string]any)["languageCode"] != "zho" || streams[2].(map[string]any)["forced"] != true {
-				t.Fatalf("generated JSON subtitle attributes = %#v", streams[2])
-			}
-			if streams[0].(map[string]any)["bitrate"] != float64(29430) || streams[0].(map[string]any)["frameRate"] != 23.976 ||
-				streams[0].(map[string]any)["displayTitle"] != "4K HDR10" ||
-				streams[0].(map[string]any)["extendedDisplayTitle"] != "4K HDR10 (HEVC Main 10)" ||
-				streams[0].(map[string]any)["colorTrc"] != "smpte2084" {
-				t.Fatalf("generated JSON HDR10 attributes = %#v", streams[0])
-			}
-			if streams[1].(map[string]any)["bitrate"] != float64(5000) || streams[1].(map[string]any)["audioChannelLayout"] != "7.1" {
-				t.Fatalf("generated JSON audio attributes = %#v", streams[1])
 			}
 		})
 	}
@@ -378,12 +446,12 @@ func TestEnrichMetadataUsesDolbyVisionPlexFields(t *testing.T) {
 		{
 			name:        "XML",
 			contentType: "application/xml",
-			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="7" file="/cloud/movie.strm"/></Media></Video></MediaContainer>`),
+			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="7" file="/cloud/movie.strm"><Stream id="101" streamType="1" index="0"/></Part></Media></Video></MediaContainer>`),
 		},
 		{
 			name:        "JSON",
 			contentType: "application/json",
-			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"Part":[{"id":7,"file":"/cloud/movie.strm"}]}]}]}}`),
+			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"Part":[{"id":7,"file":"/cloud/movie.strm","Stream":[{"id":101,"streamType":1,"index":0}]}]}]}]}}`),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -438,7 +506,7 @@ func TestEnrichMetadataProjectsPlexMediaFrameRateAndPreciseStreamRate(t *testing
 	}{
 		{name: "film rate", input: "24000/1001", want: "24p"},
 		{name: "ntsc rate", input: "30000/1001", want: "30p"},
-		{name: "pal rate", input: "25/1", want: "25p"},
+		{name: "pal rate", input: "25/1", want: "PAL"},
 	}
 	for _, format := range []struct {
 		name        string
@@ -526,7 +594,7 @@ func TestEnrichMetadataDoesNotProjectUnknownCodecFieldsFromDolbyVisionProfile(t 
 			},
 		},
 	}
-	body := []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="7" file="/cloud/movie.strm"/></Media></Video></MediaContainer>`)
+	body := []byte(`<MediaContainer><Video ratingKey="42"><Media><Part id="7" file="/cloud/movie.strm"><Stream id="101" streamType="1" index="0"/></Part></Media></Video></MediaContainer>`)
 
 	result, changed, err := EnrichMetadata(body, "application/xml", "42", media)
 	if err != nil || !changed {
