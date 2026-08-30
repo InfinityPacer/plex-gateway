@@ -10,47 +10,53 @@ import (
 	"github.com/InfinityPacer/plex-gateway/internal/mediainfo"
 )
 
+// DecisionNeedsEnrichment reports whether the matching Direct Play Part lacks
+// the same MediaInfo authority required by item metadata projection. The
+// decision remains untouched when Plex returns materialized Stream rows and a
+// complete Media/Part shape.
+func DecisionNeedsEnrichment(body []byte, contentType string, expected Part) (bool, error) {
+	_, selection, err := selectDecisionProjection(body, contentType, expected)
+	if err != nil {
+		return false, err
+	}
+	target, err := enrichmentTarget(selection)
+	if err != nil {
+		return false, err
+	}
+	return target.NeedsEnrichment, nil
+}
+
 // EnrichDecision fills descriptive Media, Part, and Stream fields for the one
 // Direct Play Part already selected by Plex. It preserves every Plex-owned
 // decision, identifier, session, and unknown field. A missing, ambiguous, or
 // non-Direct-Play Part is rejected without modifying the input bytes.
 func EnrichDecision(body []byte, contentType string, expected Part, media mediainfo.Media) ([]byte, bool, error) {
-	if expected.ID == "" && expected.Key == "" {
-		return nil, false, errors.New("expected Plex Part identity is empty")
+	document, selection, err := selectDecisionProjection(body, contentType, expected)
+	if err != nil {
+		return nil, false, err
 	}
-	document, err := parseProjectionDocument(body, contentType)
+	target, err := enrichmentTarget(selection)
+	if err != nil {
+		return nil, false, err
+	}
+	if !target.NeedsEnrichment {
+		return append([]byte(nil), body...), false, nil
+	}
+
+	var sizeChanged bool
+	switch typed := selection.(type) {
+	case *xmlProjectionSelection:
+		sizeChanged, err = replaceDecisionPartSizeXML(typed.part, media.Size)
+	case *jsonProjectionSelection:
+		sizeChanged, err = replaceDecisionPartSizeJSON(*typed.part, media.Size)
+	default:
+		return nil, false, errors.New("unsupported Plex decision selection")
+	}
 	if err != nil {
 		return nil, false, err
 	}
 
-	var selection projectionSelection
-	var sizeChanged bool
-	switch typed := document.(type) {
-	case *xmlProjectionDocument:
-		xmlSelection, err := typed.selectDecisionPart(expected)
-		if err != nil {
-			return nil, false, err
-		}
-		selection = xmlSelection
-		sizeChanged, err = replaceDecisionPartSizeXML(xmlSelection.part, media.Size)
-		if err != nil {
-			return nil, false, err
-		}
-	case *jsonProjectionDocument:
-		jsonSelection, err := typed.selectDecisionPart(expected)
-		if err != nil {
-			return nil, false, err
-		}
-		selection = jsonSelection
-		sizeChanged, err = replaceDecisionPartSizeJSON(*jsonSelection.part, media.Size)
-		if err != nil {
-			return nil, false, err
-		}
-	default:
-		return nil, false, errors.New("unsupported Plex decision document")
-	}
-
-	changed, err := selection.enrich(media, true)
+	changed, err := selection.enrich(media, true, streamProjectionDecision)
 	if err != nil {
 		return nil, false, err
 	}
@@ -69,6 +75,35 @@ func EnrichDecision(body []byte, contentType string, expected Part, media mediai
 		return nil, false, err
 	}
 	return result, true, nil
+}
+
+func selectDecisionProjection(body []byte, contentType string, expected Part) (projectionDocument, projectionSelection, error) {
+	if expected.ID == "" && expected.Key == "" {
+		return nil, nil, errors.New("expected Plex Part identity is empty")
+	}
+	document, err := parseProjectionDocument(body, contentType)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var selection projectionSelection
+	switch typed := document.(type) {
+	case *xmlProjectionDocument:
+		xmlSelection, err := typed.selectDecisionPart(expected)
+		if err != nil {
+			return nil, nil, err
+		}
+		selection = xmlSelection
+	case *jsonProjectionDocument:
+		jsonSelection, err := typed.selectDecisionPart(expected)
+		if err != nil {
+			return nil, nil, err
+		}
+		selection = jsonSelection
+	default:
+		return nil, nil, errors.New("unsupported Plex decision document")
+	}
+	return document, selection, nil
 }
 
 func (document *xmlProjectionDocument) selectDecisionPart(expected Part) (*xmlProjectionSelection, error) {
@@ -98,8 +133,12 @@ func (document *xmlProjectionDocument) selectDecisionPart(expected Part) (*xmlPr
 				if selected != nil {
 					return nil, errors.New("Plex XML decision has an ambiguous Direct Play Part")
 				}
+				needs, err := xmlMediaPartNeedsEnrichment(media, part)
+				if err != nil {
+					return nil, err
+				}
 				selected = &xmlProjectionSelection{
-					value: Target{Part: expected, NeedsEnrichment: true},
+					value: Target{Part: expected, NeedsEnrichment: needs},
 					media: media,
 					part:  part,
 				}
@@ -155,8 +194,12 @@ func (document *jsonProjectionDocument) selectDecisionPart(expected Part) (*json
 				if selected != nil {
 					return nil, errors.New("Plex JSON decision has an ambiguous Direct Play Part")
 				}
+				needs, err := jsonMediaPartNeedsEnrichment(mediaItem, part)
+				if err != nil {
+					return nil, err
+				}
 				selected = &jsonProjectionSelection{
-					value:        Target{Part: expected, NeedsEnrichment: true},
+					value:        Target{Part: expected, NeedsEnrichment: needs},
 					document:     document,
 					container:    container,
 					metadata:     metadata,

@@ -74,22 +74,27 @@ func (h *decisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if capture.successful() {
 		body := capture.body()
 		if plexmeta.IsDirectPlayDecision(body, capture.Header().Get("Content-Type"), selection.Part) {
-			if record, found := h.mediaInfoForDecision(r, selection); found {
-				enriched, changed, err := plexmeta.EnrichDecision(body, capture.Header().Get("Content-Type"), selection.Part, record.Media)
-				if err != nil {
-					h.logger.Warn("decision_mediainfo_fail_open", "part", selection.Part.ID, "error_kind", errorKind(err))
-				} else if changed {
-					if h.veto != nil && record.Fresh(time.Now().UTC()) {
-						if reason, reject := h.veto(r, record.Media); reject {
-							h.logger.Info("playback_veto", "part", selection.Part.ID, "reason", reason)
-							writeIncompatibleDecision(w, r)
-							return
-						}
-					}
-					if err := capture.replaceDecodedBody(enriched); err != nil {
+			needsEnrichment, err := plexmeta.DecisionNeedsEnrichment(body, capture.Header().Get("Content-Type"), selection.Part)
+			if err != nil {
+				h.logger.Warn("decision_mediainfo_fail_open", "part", selection.Part.ID, "error_kind", errorKind(err))
+			} else if needsEnrichment {
+				if record, found := h.mediaInfoForDecision(r, selection); found {
+					enriched, changed, err := plexmeta.EnrichDecision(body, capture.Header().Get("Content-Type"), selection.Part, record.Media)
+					if err != nil {
 						h.logger.Warn("decision_mediainfo_fail_open", "part", selection.Part.ID, "error_kind", errorKind(err))
-					} else if h.metrics != nil {
-						h.metrics.IncMediaInfoEnriched()
+					} else if changed {
+						if h.veto != nil && record.Fresh(time.Now().UTC()) {
+							if reason, reject := h.veto(r, record.Media); reject {
+								h.logger.Info("playback_veto", "part", selection.Part.ID, "reason", reason)
+								writeIncompatibleDecision(w, r)
+								return
+							}
+						}
+						if err := capture.replaceDecodedBody(enriched); err != nil {
+							h.logger.Warn("decision_mediainfo_fail_open", "part", selection.Part.ID, "error_kind", errorKind(err))
+						} else if h.metrics != nil {
+							h.metrics.IncMediaInfoEnriched()
+						}
 					}
 				}
 			}

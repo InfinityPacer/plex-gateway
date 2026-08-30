@@ -534,12 +534,12 @@ func TestMetadataEnrichmentAdmitsExistingStreamHDRAndSTRMControlSize(t *testing.
 		{
 			name: "XML", contentType: "application/xml",
 			body: []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="16:9" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="23.976" videoProfile="Main 10" audioProfile="LC"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="301" container="mkv" videoProfile="Main 10" audioProfile="LC"><Stream id="101" streamType="1" index="0" codec="hevc" profile="Main 10" level="153" bitrate="8000" languageCode="eng" title="Video" width="3840" height="2160" frameRate="23.976" refFrames="4" pixelFormat="yuv420p10le" bitDepth="10" colorSpace="bt2020nc" colorRange="tv" colorPrimaries="bt2020" colorTrc="smpte2084" chromaLocation="left" sampleAspectRatio="1:1" displayAspectRatio="16:9"/></Part></Media></Video></MediaContainer>`),
-			want: [][]byte{[]byte(`size="987654321"`), []byte(`displayTitle="4K DoVi/HDR10"`), []byte(`DOVIPresent="1"`)},
+			want: [][]byte{[]byte(`size="987654321"`), []byte(`displayTitle="4K DoVi/HDR10 (HEVC Main 10)"`), []byte(`DOVIPresent="1"`)},
 		},
 		{
 			name: "JSON", contentType: "application/json",
 			body: []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":60000,"bitrate":8000,"width":3840,"height":2160,"aspectRatio":"16:9","audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"23.976","videoProfile":"Main 10","audioProfile":"LC","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":60000,"size":301,"container":"mkv","videoProfile":"Main 10","audioProfile":"LC","Stream":[{"id":101,"streamType":1,"index":0,"codec":"hevc","profile":"Main 10","level":153,"bitrate":8000,"languageCode":"eng","title":"Video","width":3840,"height":2160,"frameRate":23.976,"refFrames":4,"pixelFormat":"yuv420p10le","bitDepth":10,"colorSpace":"bt2020nc","colorRange":"tv","colorPrimaries":"bt2020","colorTrc":"smpte2084","chromaLocation":"left","sampleAspectRatio":"1:1","displayAspectRatio":"16:9"}]}]}]}]}}`),
-			want: [][]byte{[]byte(`"size":987654321`), []byte(`"displayTitle":"4K DoVi/HDR10"`), []byte(`"DOVIPresent":true`)},
+			want: [][]byte{[]byte(`"size":987654321`), []byte(`"displayTitle":"4K DoVi/HDR10 (HEVC Main 10)"`), []byte(`"DOVIPresent":true`)},
 		},
 	}
 	for _, test := range tests {
@@ -603,7 +603,7 @@ func TestMetadataEnrichmentSkipsLocalAndCompleteCloudParts(t *testing.T) {
 	}
 }
 
-func TestMetadataEnrichmentProjectsIncompleteItemStreamsWithCompleteMediaAndPart(t *testing.T) {
+func TestMetadataEnrichmentProjectsGeneratedItemStreamsWithCompleteMediaAndPart(t *testing.T) {
 	fixture := newMetadataEnrichmentFixture(t)
 	tests := []struct {
 		name        string
@@ -614,13 +614,13 @@ func TestMetadataEnrichmentProjectsIncompleteItemStreamsWithCompleteMediaAndPart
 		{
 			name:        "XML",
 			contentType: "application/xml",
-			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="1.78" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="24p" videoProfile="main 10" audioProfile="lc"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="2000000" container="mkv" videoProfile="main 10" audioProfile="lc"><Stream id="101" streamType="1" index="0"/></Part></Media></Video></MediaContainer>`),
+			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media container="mkv" duration="60000" bitrate="8000" width="3840" height="2160" aspectRatio="1.78" audioChannels="6" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="24p" videoProfile="main 10" audioProfile="lc"><Part id="9" file="/media/cloud/episode.strm" duration="60000" size="2000000" container="mkv" videoProfile="main 10" audioProfile="lc"><Stream streamType="1" index="0"/></Part></Media></Video></MediaContainer>`),
 			want:        []byte(`codec="hevc"`),
 		},
 		{
 			name:        "JSON",
 			contentType: "application/json",
-			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":60000,"bitrate":8000,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"24p","videoProfile":"main 10","audioProfile":"lc","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":60000,"size":2000000,"container":"mkv","videoProfile":"main 10","audioProfile":"lc","Stream":[{"id":101,"streamType":1,"index":0}]}]}]}]}}`),
+			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mkv","duration":60000,"bitrate":8000,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":6,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"24p","videoProfile":"main 10","audioProfile":"lc","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":60000,"size":2000000,"container":"mkv","videoProfile":"main 10","audioProfile":"lc","Stream":[{"streamType":1,"index":0}]}]}]}]}}`),
 			want:        []byte(`"codec":"hevc"`),
 		},
 	}
@@ -639,6 +639,40 @@ func TestMetadataEnrichmentProjectsIncompleteItemStreamsWithCompleteMediaAndPart
 				t.Fatalf("memory gets=%d store gets=%d offers=%d", ensurer.memoryGets.Load(), ensurer.gets.Load(), len(ensurer.offers()))
 			}
 		})
+	}
+}
+
+func TestMetadataEnrichmentTrustsPlexMaterializedStreamsWithOptionalFieldsAbsent(t *testing.T) {
+	fixture := newMetadataEnrichmentFixture(t)
+	ensurer := &fakeMediaInfoEnsurer{}
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+	}{
+		{
+			name:        "XML",
+			contentType: "application/xml",
+			body:        []byte(`<MediaContainer><Video ratingKey="42"><Media container="mp4" duration="1414016" bitrate="3730" width="3840" height="2160" aspectRatio="1.78" audioChannels="2" audioCodec="aac" videoCodec="hevc" videoResolution="4k" videoFrameRate="PAL" videoProfile="main" audioProfile="lc"><Part id="9" file="/media/cloud/episode.strm" duration="1414016" size="659294933" container="mp4" videoProfile="main" audioProfile="lc"><Stream id="101" streamType="1" index="0" codec="hevc" profile="main" level="150" bitrate="3598" width="3840" height="2160" frameRate="25.0" bitDepth="8" default="1" streamIdentifier="1"/><Stream id="102" streamType="2" index="1" codec="aac" profile="lc" bitrate="125" channels="2" default="1" streamIdentifier="2"/></Part></Media></Video></MediaContainer>`),
+		},
+		{
+			name:        "JSON",
+			contentType: "application/json",
+			body:        []byte(`{"MediaContainer":{"Metadata":[{"ratingKey":"42","Media":[{"container":"mp4","duration":1414016,"bitrate":3730,"width":3840,"height":2160,"aspectRatio":1.78,"audioChannels":2,"audioCodec":"aac","videoCodec":"hevc","videoResolution":"4k","videoFrameRate":"PAL","videoProfile":"main","audioProfile":"lc","Part":[{"id":9,"file":"/media/cloud/episode.strm","duration":1414016,"size":659294933,"container":"mp4","videoProfile":"main","audioProfile":"lc","Stream":[{"id":101,"streamType":1,"index":0,"codec":"hevc","profile":"main","level":150,"bitrate":3598,"width":3840,"height":2160,"frameRate":25.0,"bitDepth":8,"default":true,"streamIdentifier":"1"},{"id":102,"streamType":2,"index":1,"codec":"aac","profile":"lc","bitrate":125,"channels":2,"default":true,"streamIdentifier":"2"}]}]}]}]}}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := fixture.handler(ensurer, metrics.New(), metadataBodyHandler(test.body, test.contentType))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, authenticatedMetadataRequest(http.MethodGet))
+			if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), test.body) || response.Header().Get("ETag") != `"plex-etag"` {
+				t.Fatalf("response changed: status=%d headers=%#v body=%s", response.Code, response.Header(), response.Body.Bytes())
+			}
+		})
+	}
+	if ensurer.memoryGets.Load() != 0 || ensurer.gets.Load() != 0 || len(ensurer.offers()) != 0 {
+		t.Fatalf("native streams touched MediaInfo cache: memory gets=%d store gets=%d offers=%d", ensurer.memoryGets.Load(), ensurer.gets.Load(), len(ensurer.offers()))
 	}
 }
 

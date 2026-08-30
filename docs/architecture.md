@@ -203,6 +203,25 @@ the bounded P2 scheduler while the original Plex response is returned
 immediately. Successful worker results populate L1 and SQLite for later
 responses.
 
+Projection bypass is derived only from the current Plex response, not from the
+identity of a database writer. Local non-STRM Parts bypass MediaInfo logic. For a
+STRM Part, complete Media/Part technical fields, a real media size, and positive
+IDs on every Stream prove that the Stream rows are materialized in the Plex data
+model. Such item metadata and Direct Play decisions are preserved byte-for-byte
+and do not read the STRM, cache, resolver, or probe worker. Optional descriptions
+such as language and title are not bypass requirements.
+
+Gateway-generated descriptive Streams intentionally omit Plex IDs and playback
+selection state. They can project codec, resolution, HDR/Dolby Vision, bitrate,
+channel, and language facts, but they are not equivalent to materialized Plex
+Stream rows. Real-client A/B showed that the official iOS client may display the
+Media-level 4K and HEVC labels while still showing no audio or omitting a
+playback-page technical badge. IDs are not synthesized because clients may use
+them for track selection. A single-item offline Plex DB proof of concept restored
+the native Stream shape and made the Gateway choose byte-for-byte passthrough;
+this is evidence for a future isolated writer, not a production write path in
+this release.
+
 ## MediaInfo scheduling contract
 
 The in-memory scheduler owns all remote-probe admission. It has three fixed
@@ -288,8 +307,11 @@ and helper endpoint.
 This compatibility path does not expand the media data plane. The browser still
 downloads bytes directly from the final CDN. It only supports containers and
 codecs the browser can Direct Play. If Plex Web needs DASH, remuxing, or video
-transcoding, an ordinary MP4 or MKV response is not a manifest and this helper
-cannot make that path playable. The gateway does not proxy media, package
+or audio transcoding, an ordinary MP4 or MKV response is not a manifest and this
+helper cannot make that path playable. A real A/B confirmed this boundary: Plex
+served a local item through DASH with copied video and transcoded audio, while a
+STRM `start.mpd` redirect exposed the original MP4 where the browser expected a
+DASH manifest and ended with `s1002`. The gateway does not proxy media, package
 segments, or synthesize manifests. Local media retains Plex's normal Web
 compatibility.
 
@@ -322,11 +344,13 @@ is accepted, the body is not consumed, and every error preserves the other
 probe fields. This fallback remains inside the MediaInfo worker and never enters
 the synchronous 302 path.
 A stable MediaVault or MoviePilot provider can replace remote probing without
-changing playback. Plex DB production writing is a next-stage evaluation only,
-covering an official API, another supported PMS interface, and an isolated
-database helper with explicit coverage, backup, and rollback tests. This release
-does not select or enable a Plex DB write path. Intro and credits work starts
-with an isolated Plex marker API probe. See
+changing playback. A production Plex projection writer remains an explicit
+evaluation across an official API, another supported PMS interface, and an
+isolated database helper with coverage, version/schema allowlists, consistent
+backup, rollback, compare-and-set identity checks, and API readback. The
+single-item offline database proof of concept establishes client value and the
+Gateway bypass contract only; this release does not select or enable a writer.
+Intro and credits work starts with an isolated Plex marker API probe. See
 [media-lifecycle-architecture.md](media-lifecycle-architecture.md).
 
 Performance acceptance and reproducible microbenchmarks are defined in

@@ -7,9 +7,17 @@
 
 ## [未发布]
 
+## [0.1.3] - 2026-08-30
+
 ### 新增
 
-- 支持 Plex Web 直接播放浏览器原生兼容的 STRM，视频仍由浏览器通过 302 直连 CDN。
+- 支持 Plex Web 直接播放浏览器原生兼容的 STRM，已验证播放、暂停、继续和拖动进度。
+  需要 DASH、转封装或音视频转码的片源仍不支持。
+
+### 改进
+
+- 改善 Plex iOS 打开 STRM 媒体库、剧集和详情页的稳定性，修复错误的“正片”标识。
+- 改善 STRM 的 4K、HEVC、HDR、Dolby Vision 和音频技术标签显示，并保留 Plex 已有信息。
 
 ## [0.1.2] - 2026-08-30
 
@@ -63,7 +71,8 @@
 - Gateway 返回云端播放重定向前，由 Plex 使用当前客户端凭据授权对应 Part。
 - 日志和指标不包含 Plex Token 或完整的签名媒体 URL。
 
-[未发布]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.2...HEAD
+[未发布]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/InfinityPacer/plex-gateway/releases/tag/v0.1.0
