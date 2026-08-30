@@ -7,10 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-30
+
 ### Added
 
-- Plex Web can Direct Play browser-native STRM media while video remains a
-  browser-to-CDN 302 path.
+- Plex Web can now Direct Play browser-native STRM media. Playback, pause,
+  resume, and seek are verified. Sources that require DASH, remuxing, or
+  audio/video transcoding remain unsupported.
+
+### Improved
+
+- Improved Plex iOS stability when opening STRM libraries, seasons, and item
+  details, and removed an incorrect main-feature label.
+- Improved 4K, HEVC, HDR, Dolby Vision, and audio technical labels for STRM
+  media while preserving information already provided by Plex.
 
 ## [0.1.2] - 2026-08-30
 
@@ -75,7 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway redirects playback.
 - Logs and metrics exclude Plex tokens and complete signed media URLs.
 
-[Unreleased]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/InfinityPacer/plex-gateway/releases/tag/v0.1.0

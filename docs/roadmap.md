@@ -111,6 +111,14 @@ D prioritizes the Gateway fallback while preserving the broader lifecycle design
 6. add Redis or replace SQLite with PostgreSQL only after measured
    multi-instance or capacity requirements exist.
 
+Response projection and its bypass contract are now validated. Descriptive
+Gateway Streams improve technical labels but do not replace native Plex Stream
+IDs or track-selection state. A single-item offline Plex DB proof of concept
+restored the official iOS audio and technical presentation; the resulting Plex
+response was passed through byte-for-byte without another STRM/cache/probe path.
+This evidence keeps an isolated production writer on the roadmap, but no writer
+is included or enabled in this release.
+
 The performance matrix in [performance-matrix.md](performance-matrix.md) is a
 delivery gate for this work. Local media must remain transparent, Part and
 universal-start routes must remain free of analysis I/O, an L1 hit must not

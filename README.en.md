@@ -63,7 +63,7 @@ fully transparent Plex Web shell.
 | --- | --- | --- |
 | Local Plex media | Supported by transparent proxy | The gateway does not rewrite local Parts. |
 | Infuse Direct Play | Direct Play verified | Uses the Plex Part redirect path. |
-| Plex iOS ExperimentalPlayer | Direct Play verified | STRM uses the universal decision/start redirect path. |
+| Plex iOS ExperimentalPlayer | Direct Play verified | STRM uses the universal decision/start redirect path. Descriptive Gateway Streams can provide 4K, HEVC, HDR/DV, and related technical fields; audio state or playback badges may remain incomplete until Plex has materialized native Stream rows. |
 | Plex for Apple TV | Direct Play verified | HDR STRM uses the universal decision/start redirect path. Apple TV 4K supports Dolby Vision Profile 5 Direct Play, while Plex version, container, and source combinations may still affect compatibility; the gateway does not reject it by default. |
 | Plex Web cloud Direct Play | Direct Play verified | MP4/H.264/AAC was verified for initial playback, pause, resume, and seek with CDN-direct delivery. Other containers and codecs depend on native browser support; sources that require DASH, remuxing, or transcoding remain unsupported. |
 
@@ -203,17 +203,27 @@ language code. Generated Streams never contain Plex Stream IDs or playback
 selection fields such as `selected`, `default`, or `decision`. When Plex already
 has descriptive Streams that are not materialized in its database, only missing
 fields on identity-matched Streams are filled. Missing sibling Streams are not
-created and existing Plex values are not overwritten. When a STRM Media/Part
-shape is complete, the Part carries the real media size, and every Stream has a
-positive ID assigned by the Plex data model, the Plex response is technically
-authoritative. Metadata and Direct Play decisions are returned byte-for-byte
-without reading the STRM, consulting the MediaInfo cache, or admitting ffprobe.
-Missing optional descriptions such as `language` or `title` do not revoke that
-authority. Non-STRM local Parts always remain outside this decision and are
-passed through unchanged.
-This release writes fallback probe results only to the gateway's SQLite store and
-does not write to the Plex DB. Production Plex DB writes are a next-stage
-evaluation after coverage, compatibility, backup, and rollback validation.
+created and existing Plex values are not overwritten.
+
+Descriptive Streams provide technical labels but cannot replace native Stream
+rows in the Plex data model. Real-client A/B testing confirmed that the official
+iOS client can display fields such as 4K and HEVC without Plex Stream IDs and
+playback-selection state, while audio may still appear absent and playback-page
+technical badges may remain incomplete. Synthesizing IDs is unsafe because
+clients may use them to select tracks. When a STRM Media/Part shape is complete,
+the Part carries the real media size, and every Stream has a positive ID assigned
+by Plex, no further Gateway projection is required. Metadata and Direct Play
+decisions are returned byte-for-byte without reading the STRM, consulting the
+MediaInfo cache, or admitting ffprobe. Missing optional descriptions such as
+`language` or `title` do not change that decision. Non-STRM local Parts always
+remain outside this path and are passed through unchanged.
+
+This release writes fallback probe results only to the gateway's SQLite store
+and does not include a Plex DB writer. A single-item offline proof of concept
+confirmed that native Plex Stream rows restore complete audio and technical
+presentation in the official iOS client and automatically select the Gateway's
+byte-for-byte passthrough path. Production writes still require coverage,
+PMS/schema compatibility, backup, and rollback validation.
 
 The L1 hot path returns without synchronously reading SQLite for the request.
 Access renewal may touch SQLite asynchronously, so persistence I/O stays out of

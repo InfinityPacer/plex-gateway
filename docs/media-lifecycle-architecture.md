@@ -582,6 +582,14 @@ ffprobe。
 Dolby Vision 映射必须使用同一片源的本地文件与 STRM Plex response 建立 fixture，不能
 仅按 ffprobe 字段名猜测。
 
+描述性 Stream 与 Plex 原生 Stream 行不是同一能力。真实客户端 A/B 已确认，只有
+Gateway 描述性字段时，官方 iOS 客户端可以消费 Media 层的 4K、HEVC 等标签，但音轨状态
+和播放页技术徽标仍可能不完整。Gateway 不能伪造 Stream ID，因为客户端可能使用它选择
+音轨。当前 Plex response 已包含完整 Media/Part、真实文件大小，并且每个 Stream 都有
+正数 ID 时，Gateway 必须将其视为“无需继续投影”，字节级透传并跳过 STRM、缓存和探测。
+单样本离线写库 PoC 已验证原生 Stream 行可以恢复官方客户端完整展示，并触发该纯透传
+路径；这只证明方案价值，不代表生产 Helper 已完成。
+
 ## 12. Gateway 边界
 
 Gateway 对所有来源使用同一播放契约：
@@ -781,6 +789,8 @@ provider、目标 backing、decision revision、人工确认或策略依据，�
 - 比较 Plex 官方 API、其他受支持 PMS 接口和独立 Plex Helper，不提前固定写入方案；
 - Helper 候选只在 Plex 停止或经过验证的维护窗口执行；
 - 测试库验证一致性备份与 restore、schema allowlist、CAS、写入和 API 回读；
+- 保留单样本离线写库 PoC 结论：Plex 原生 Stream 行恢复官方客户端音轨和技术展示，
+  Gateway 自动停止重复投影和探测；不得把该结论扩大为生产写入已交付；
 - 验证刷新、Analyze、PMS 重启和升级后的保持/恢复；
 - 验证 Apple TV 和其他目标客户端是否消费 Gateway enrichment 或 Plex 持久字段。
 

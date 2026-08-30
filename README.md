@@ -47,7 +47,7 @@ Gateway。需要 DASH、转封装或转码的片源仍不支持，Gateway 不合
 | --- | --- | --- |
 | Plex 本地媒体 | 透明代理支持 | Gateway 不会重写本地 Part。 |
 | Infuse Direct Play | 已验证 Direct Play | 使用 Plex Part 重定向路径。 |
-| Plex iOS ExperimentalPlayer | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路。 |
+| Plex iOS ExperimentalPlayer | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路。Gateway 描述性 Stream 可补充 4K、HEVC、HDR/DV 等技术字段；Plex 尚未物化原生 Stream 行时，音轨状态或播放页徽标仍可能不完整。 |
 | Plex for Apple TV | 已验证 Direct Play | HDR STRM 使用通用 decision/start 重定向链路。Apple TV 4K 支持 DV Profile 5 Direct Play，但 Plex 版本、容器和片源组合仍可能影响兼容性；Gateway 默认不拒绝。 |
 | Plex Web 云端 Direct Play | 已验证 Direct Play | MP4/H.264/AAC 样本已验证首播、暂停、继续和 seek，并保持 CDN 直达；其他容器与编码取决于浏览器原生能力，需要 DASH、转封装或转码的片源不支持。 |
 
@@ -174,13 +174,21 @@ ffprobe 的流类型和源索引创建描述性的视频、音频和字幕 Strea
 Vision、bit depth、codec、codecID、bitrate、声道布局和语言码等字段。合成 Stream 不包含 Plex
 Stream ID，也不生成 `selected`、`default` 或 `decision` 等播放选择字段。Plex 已经存在
 但尚未物化到数据库的描述性 Stream 时，只补充身份匹配 Stream 的缺失字段，不创建缺少
-的其他流，也不覆盖 Plex 值。若 STRM 的 Media/Part 技术字段完整、Part 已具有真实媒体
-大小，且所有 Stream 都带有 Plex 数据模型分配的正数 ID，Plex 响应即为技术权威；Gateway
-会原样返回 metadata 和 Direct Play decision，不读取 STRM、不查询 MediaInfo 缓存，也不
-发起 ffprobe。`language`、`title` 等可选描述字段缺失不会解除该权威。本地非 STRM Part
-始终完全透传，不进入上述判断。
-当前版本只将兜底探测结果写入 Gateway SQLite，不写入 Plex DB。Plex DB 生产写入属于下一
-阶段评估内容，需先完成覆盖率、兼容性、备份和回滚验证。
+的其他流，也不覆盖 Plex 值。
+
+描述性 Stream 能提供技术标签，但不能代替 Plex 数据模型中的原生 Stream 行。真实客户端
+A/B 已确认：没有 Plex Stream ID 和播放选择状态时，官方 iOS 客户端可以显示 4K、HEVC 等
+部分标签，但音频可能显示为“无”，播放页技术徽标也可能缺失；这不是继续伪造 ID 能安全
+解决的问题，因为客户端会使用这些 ID 选择音轨。若 STRM 的 Media/Part 技术字段完整、Part
+已具有真实媒体大小，且所有 Stream 都带有 Plex 数据模型分配的正数 ID，则无需继续执行
+Gateway 投影。metadata 和 Direct Play decision 会字节级原样返回，不读取 STRM、不查询
+MediaInfo 缓存，也不发起 ffprobe；`language`、`title` 等可选描述字段缺失不会改变该判断。
+本地非 STRM Part 始终完全透传，不进入上述判断。
+
+当前版本只将兜底探测结果写入 Gateway SQLite，不写入 Plex DB。单样本离线 PoC 已确认，
+Plex 持有原生 Stream 行后，官方 iOS 客户端可恢复完整音轨和技术展示，Gateway 也会自动
+进入上述纯透传路径。生产写入仍需完成覆盖率、PMS/schema 兼容、备份和回滚验证，本版本
+不包含 Plex DB 写入器。
 
 L1 热路径直接返回，不会为了本次请求同步读取 SQLite。访问续期可能异步 touch SQLite，
 不会把持久化 I/O 放进请求关键路径。热缓存投影可以并发执行；metadata 浏览冷 miss 立即
