@@ -27,7 +27,7 @@
   上限；P0 实际播放优先于 P1/P2 排队任务，但不能抢占正在运行的后台 probe。
 - P1/P2 在 worker 中先检查 SQLite。只有 L1 和 SQLite 都 miss 的任务才受全局远程启动
   间隔限制；SQLite 热命中不能因 CDN 风控节流额外等待 5 秒。
-- 302 响应只包含控制流。媒体字节始终由客户端直接从 CDN 读取。
+- 302 与 `control-v1` 的 204 响应只包含控制流。媒体字节始终由客户端直接从 CDN 读取。
 - Plex Web 兼容层只缓冲最多 2 MiB 的 Web shell，并加载可长期缓存的静态脚本；Part、
   302、本地媒体和其他 Plex API 不缓冲响应，也不新增媒体数据面 I/O。
 
@@ -51,6 +51,9 @@
 | Metadata 分析过滤器，移除目标参数 | 377.3-386.3 ns/op | 768 B, 7 allocs | 克隆请求 URL，其他 query 字节不变。 |
 | 32 项 metadata 直接内存 handler | 76.87-78.02 us/op | 约 219.5 KiB, 929 allocs | 仅作为微批代码增量对照，不包含 Plex 网络或数据库。 |
 | 32 项 metadata 微批、拆分与 fan-out | 422.9-448.4 us/op | 约 577.1 KiB, 4856-4857 allocs | 相对直接 handler 增加约 0.35-0.37 ms，包含 goroutine、JSON 拆分及 32 个响应。 |
+| control ticket 同 attempt 复用 | 689.7-729.7 ns/op | 688 B, 8 allocs | 只衡量内存 ticket 更新，不包含 Plex 或 MediaVault。 |
+| control ticket 单次 lease | 289.3-293.7 ns/op | 432 B, 3 allocs | 包含 idle TTL 续期和请求上下文复制。 |
+| control ticket 并行 lease | 413.7-417.3 ns/op | 432 B, 3 allocs | 同一 ticket 的并行锁竞争下限，不包含 HTTP 或解析。 |
 
 真实 MediaVault/CDN 抽样为 5/5 成功：MediaVault redirect p50 141 ms、范围
 109-533 ms；受限 CDN ffprobe p50 601 ms、范围 403-674 ms；合计 p50 761 ms、范围
@@ -95,10 +98,13 @@ Guard 尾部等待和客户端结果共同支持批量默认值 4。
 | --- | --- | --- | --- |
 | 本地媒体透明代理 | Plex | 直连 Plex 与经 Gateway 的 p50/p95/p99、错误率、上游请求数 | 0 功能错误；Gateway 增量 p95 <= 20 ms、p99 <= 50 ms，且相对增加 <= 10%。 |
 | STRM Part 302 | Plex Part 授权、MediaVault redirect | 302 p50/p95/p99、Plex/MV 次数、响应字节 | 100% 健康样本返回 302；p95 < 2 s、p99 < 5 s；Gateway 不传输媒体字节。 |
-| universal start | Plex Part 授权、MediaVault redirect | grant 命中、上游次数、302 延迟 | 不读取 metadata、STRM 或 MediaInfo；无 grant 时透明回退。 |
+| 普通 universal start | Plex Part 授权、MediaVault redirect | grant 命中、上游次数、302 延迟 | 不读取 metadata、STRM 或 MediaInfo；无 grant 时透明回退。 |
+| ShimWeave control-v1 start | Plex Part 授权 | 204 descriptor、Plex/MV 次数、响应字节 | 原始 manifest 请求止于 204；创建描述时 0 MV、0 媒体字节；无 grant 或协商无效时透明回退。 |
+| ShimWeave control-v1 Range | MediaVault redirect | 控制 p50/p95/p99、Range/控制/MV 次数、错误率 | 正常路径每个未命中 Range 解析一次临时 URL；CDN 403 恢复最多再解析一次。Gateway 只返回 204 header，不跟随 CDN、不传媒体字节。 |
 | Plex Web shell | Plex HTML、Gateway 静态脚本 | shell body、注入次数、首屏延迟、脚本缓存 | shell <= 2 MiB 时只修改一次；脚本命中长期缓存；其他 Web 静态资源和 API 不变。 |
 | Plex Web 云端 Direct Play | Plex decision/Part 授权、MediaVault redirect、CDN | 首帧、seek、Part 302、Gateway 媒体响应字节 | 浏览器原生支持的样本正常播放和 seek；Gateway 媒体响应保持 302 且不传输视频字节。 |
-| Plex Web 需要 DASH/转码 | Plex | decision、start manifest、Gateway redirect | 明确保持不支持；不得把原始 MP4/MKV 作为 `start.mpd` manifest 宣称成功，也不得让媒体字节进入 Gateway。 |
+| Plex Web 需要 DASH/转码且无 ShimWeave | Plex | decision、start manifest、Gateway redirect | 内置薄层明确保持不支持；不得把原始 MP4/MKV 作为 `start.mpd` manifest 宣称成功，也不得让媒体字节进入 Gateway。 |
+| Plex Web + ShimWeave 转封装 | Plex、MediaVault、CDN | 首帧、Seek、持续缓冲、Range/控制/MV 次数 | manifest 请求止于 control-v1；转封装在浏览器完成；Gateway 媒体响应字节为 0。 |
 | Plex 已物化 STRM MediaInfo | Plex | response 字节、STRM/L1/SQLite/probe 次数 | metadata 与 decision 字节级透传；0 STRM、0 L1、0 SQLite、0 ffprobe。 |
 | Decision，Infuse | Plex metadata 和 decision | decision 延迟、veto 结果 | veto 始终放弃判断；不增加缓存、MediaVault 或 CDN 请求。 |
 | Decision，L1 热缓存 | Plex metadata 和 decision，L1 | p50/p95/p99、SQLite/MV/CDN 次数 | 0 SQLite、0 MV、0 CDN；p95 <= 1 s、p99 <= 2 s。 |
@@ -130,6 +136,9 @@ go test -run '^$' -bench '^BenchmarkMetadataAnalysisFilter$' \
   -benchmem -count=5 ./internal/gateway
 
 go test -run '^$' -bench '^BenchmarkMetadataCoalescerBurst32$' \
+  -benchmem -count=5 ./internal/gateway
+
+go test -run '^$' -bench '^BenchmarkControlTicketStore$' \
   -benchmem -count=5 ./internal/gateway
 ```
 
