@@ -176,7 +176,13 @@ func New(options Options) http.Handler {
 			maxBytes: defaultDecisionMetadataMaxBytes,
 		},
 	}
-	universalStart := &universalStartHandler{grants: decision.grants, playback: partPlayback}
+	controlTickets := newControlTicketStore(0, 0, 0)
+	universalStart := &universalStartHandler{
+		grants: decision.grants, playback: partPlayback, tickets: controlTickets,
+	}
+	shimWeaveControl := &shimWeaveControlHandler{
+		store: controlTickets, service: cloudPlayback, metrics: registry, logger: logger,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -221,6 +227,8 @@ func New(options Options) http.Handler {
 		mux.Handle("GET "+route, universalStart)
 		mux.Handle("HEAD "+route, universalStart)
 	}
+	mux.Handle("GET "+shimWeaveControlPath, shimWeaveControl)
+	mux.Handle("HEAD "+shimWeaveControlPath, shimWeaveControl)
 	mux.Handle("GET /library/parts/{partID}/{rest...}", partPlayback)
 	mux.Handle("HEAD /library/parts/{partID}/{rest...}", partPlayback)
 	metadataCoalesce := options.MetadataCoalesce

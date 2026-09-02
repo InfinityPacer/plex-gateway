@@ -68,7 +68,7 @@ func TestNormalizePlaybackAttemptUsesStableSessionIdentity(t *testing.T) {
 	setGrantTestQuery(start, "session", "auxiliary-start")
 	startAttempt, _, ok := normalizePlaybackAttempt(start)
 	if !ok || startAttempt != attempt {
-		t.Fatal("stable playback identity did not survive auxiliary session changes")
+		t.Fatal("stable request identity did not survive auxiliary session changes")
 	}
 
 	conflict := grantTestRequest("query-session")

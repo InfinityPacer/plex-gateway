@@ -73,6 +73,15 @@ gateway; the isolated analysis worker may read a bounded amount for probing.
   to the final CDN URL. The start path does not repeat the metadata lookup or
   STRM read. Local media and every uncertain selection remain ordinary Plex
   traffic.
+- A `start.mpd` request that declares ShimWeave `control-v1` is terminated with
+  a bodyless control descriptor only after the same Grant and Plex Part
+  authorization succeed. The descriptor separates stable content identity, a
+  fixed same-origin control path, and a high-entropy bearer carried only in a
+  request header. Each controlled Range request may
+  overlay only its single `Range` header onto the immutable client context,
+  resolves one ephemeral MediaVault URL, and receives that URL in a bodyless
+  response header. The browser then creates a separate credential-free CDN
+  request. The gateway never follows the URL or handles media bytes.
 - Timeline, scrobble, sessions, playlists, subtitles, images, transcode
   segments, and every unrecognized endpoint remain ordinary Plex traffic.
 - When Plex Web compatibility is enabled, only successful `GET /web/` and
@@ -107,7 +116,8 @@ control-file and metadata readers.
 | Technical MediaInfo | A validated producer record, or Gateway SQLite for fallback-probed media; Plex fields and response enrichment are projections. Plex DB production writes are not enabled in this release. | Source or STRM fingerprint change, schema change, or freshness policy. |
 | Part cache | Derived by metadata observation or an authenticated playback selection, keyed by `Part.id`. | Configured TTL or process restart. |
 | Direct Play grant | Published only after a complete Plex decision explicitly accepts the exact Part; a new related decision revokes the previous grant first. | Five-minute TTL, bounded eviction, or explicit revocation. |
-| MediaVault direct URL | Produced for the active authorized request and copied only to `Location`. | Never persisted or reused by the gateway. |
+| ShimWeave control ticket | In-memory bearer issued only after a live Direct Play grant and repeated Plex Part authorization. The attempt key is stored as a digest and retained client headers are bounded. | Thirty-minute idle TTL, 24-hour absolute TTL, bounded eviction, or process restart. |
+| MediaVault direct URL | Produced for the active authorized request and copied to `Location`, or to the bodyless `control-v1` response header. | Never persisted or reused by the gateway. |
 
 ## Multi-volume path mapping
 
@@ -151,14 +161,17 @@ an HTTP(S) `Location` becomes one `302 Found` response from the gateway. The
 full redirect URL, query values, Plex tokens, cookies, and API keys are never
 logged.
 
-The complete client request header set is cloned onto every MediaVault
+The complete client request header set is cloned onto the initial MediaVault
 `/redirect` request, including bounded internal redirect hops. Query-carried
 `X-Plex-*` context is promoted to headers when the client did not already send
-the corresponding header. Direct-link resolution is always an internal `GET`
-control request, so a client `HEAD` can still receive the same gateway 302 even
-when MediaVault does not implement `HEAD`. Because Plex credentials and cookies
-are included, the configured MediaVault origin is a trusted upstream and must
-not point to an untrusted service.
+the corresponding header. A ShimWeave control ticket retains that authorized
+snapshot within a 64 KiB limit; later calls may replace only one non-empty
+`Range` header and cannot replace Plex Token, Cookie, Authorization, or other
+identity context. Direct-link resolution is always an internal `GET` control
+request, so a client `HEAD` can still receive the same result when MediaVault
+does not implement `HEAD`. Because Plex credentials and cookies are included,
+the configured MediaVault origin is a trusted upstream and must not point to an
+untrusted service.
 
 ## Failure policy
 

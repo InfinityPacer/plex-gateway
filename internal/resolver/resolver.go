@@ -44,15 +44,15 @@ var (
 	errUnsupportedTargetURL = errors.New("STRM target URL scheme is unsupported")
 )
 
-// DirectURL is the final URL a Plex client should play directly.
+// DirectURL is the final URL a client should play directly.
 //
 // It intentionally contains no response metadata. A caller must not use the
-// gateway as a media proxy; the URL is only copied to an HTTP Location header.
+// Gateway as a media proxy or retain the URL beyond a bounded control exchange.
 type DirectURL struct {
 	URL string
 }
 
-// String returns the URL in the same form that should be sent in Location.
+// String returns the URL in the form supplied by the trusted resolver.
 func (u DirectURL) String() string {
 	return u.URL
 }
