@@ -7,6 +7,27 @@
 
 ## [未发布]
 
+## [0.1.4] - 2026-09-04
+
+### 新增
+
+- Plex Web 可与 [ShimWeave](https://github.com/InfinityPacer/ShimWeave) 配合播放更多需要
+  浏览器端转封装或音频兼容处理的 STRM，媒体仍由 CDN 直接发送到浏览器，不占用 NAS
+  媒体带宽。
+
+### 改进
+
+- 已验证 MKV、HEVC、AAC 的起播、长进度拖动和关闭播放。本地媒体、普通客户端及未启用
+  ShimWeave 的请求继续保持原有 Plex 行为。
+- 播放期间可按需刷新临时直链，避免长时间播放或拖动进度依赖已经过期的 CDN 地址。
+
+### 已知限制
+
+- 实际格式支持取决于 ShimWeave、浏览器、操作系统和硬件解码能力。本版本不在 Gateway
+  或 NAS 上转码，也不承诺支持所有 MKV、4K、HDR、Dolby Vision 或音频组合。
+- 当前验收环境中的一组 4K HEVC Main 10 + EAC3 片源仍由 ShimWeave 0.0.1 明确报告为
+  不支持格式；其他同类片源仍需按实际浏览器和硬件验证。
+
 ## [0.1.3] - 2026-08-30
 
 ### 新增
@@ -71,7 +92,8 @@
 - Gateway 返回云端播放重定向前，由 Plex 使用当前客户端凭据授权对应 Part。
 - 日志和指标不包含 Plex Token 或完整的签名媒体 URL。
 
-[未发布]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.3...HEAD
+[未发布]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.0...v0.1.1

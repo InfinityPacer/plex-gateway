@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-04
+
+### Added
+
+- Plex Web can now work with
+  [ShimWeave](https://github.com/InfinityPacer/ShimWeave) for more STRM sources
+  that need browser-side remuxing or audio compatibility handling. Media still
+  travels directly from the CDN to the browser without consuming NAS media
+  bandwidth.
+
+### Improved
+
+- Initial playback, long seeks, and clean shutdown were verified with MKV,
+  HEVC, and AAC. Local media, ordinary clients, and requests without ShimWeave
+  keep their existing Plex behavior.
+- Temporary direct URLs can be refreshed during playback, so long sessions and
+  seeks do not depend on an expired CDN URL.
+
+### Known limitations
+
+- Actual format support depends on ShimWeave, the browser, the operating system,
+  and hardware decoding. This release does not transcode on the Gateway or NAS
+  and does not promise every MKV, 4K, HDR, Dolby Vision, or audio combination.
+- In the acceptance environment, one 4K HEVC Main 10 with EAC3 source is still
+  explicitly reported as unsupported by ShimWeave 0.0.1. Similar sources must
+  be verified against the actual browser and hardware.
+
 ## [0.1.3] - 2026-08-30
 
 ### Added
@@ -85,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway redirects playback.
 - Logs and metrics exclude Plex tokens and complete signed media URLs.
 
-[Unreleased]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/InfinityPacer/plex-gateway/compare/v0.1.0...v0.1.1

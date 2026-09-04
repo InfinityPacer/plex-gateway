@@ -62,8 +62,11 @@ without repeating metadata selection. Ordinary clients receive the final CDN
 descriptor and uses the fixed control endpoint to resolve one ephemeral CDN URL
 per uncached Range on the normal success path. A CDN 403 may repeat that exchange
 once for the affected Range. Production playback has successfully followed the
-redirect path with Plex iOS ExperimentalPlayer and Plex for Apple TV; the browser
-control path remains under end-to-end validation.
+redirect path with Plex iOS ExperimentalPlayer and Plex for Apple TV. The
+browser control path has passed its initial end-to-end gate with ShimWeave
+0.0.1: MKV/HEVC/AAC playback, a long seek, playback shutdown, and local-media
+bypass were all verified. Additional format combinations remain ShimWeave and
+browser compatibility work rather than Gateway protocol scope.
 
 Plex Web Direct Play is included for media the browser can decode natively. A
 small, default-enabled shell helper removes `crossorigin` only from same-origin

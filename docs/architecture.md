@@ -297,6 +297,14 @@ The redirect plane requires a client that can consume the final raw media URL.
 Native players are not subject to browser cross-origin fetch enforcement and
 may accept redirects from either Part or eligible universal start routes.
 
+ShimWeave integration is negotiated per request and remains outside the normal
+redirect path. The gateway owns Plex authorization and temporary URL exchange;
+the extension owns browser capability checks, media reads, remuxing, and audio
+compatibility handling. Requests without a valid `control-v1` negotiation,
+including local media and browser-native playback, retain Plex's original
+behavior. Gateway protocol support therefore does not imply that every media
+format is playable in a particular browser or device.
+
 Plex Web sets `crossorigin=anonymous` on its HTML media element. When a cloud
 Part redirects from the Gateway origin to a CDN without CORS headers, the
 browser rejects an otherwise natively playable file before Plex Web falls back
