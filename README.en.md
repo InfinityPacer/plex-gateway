@@ -13,7 +13,9 @@
 STRM-backed cloud media. Plex remains the metadata, authentication, library,
 and watch-state authority. The gateway observes Plex metadata, resolves an
 eligible STRM through MediaVault, and returns one HTTP 302 response so the
-client downloads media directly from the cloud CDN.
+client downloads media directly from the cloud CDN. A browser extension that
+negotiates `control-v1` can instead use bodyless control exchanges while media
+still travels directly from the CDN to the browser.
 
 Local Plex media is never rewritten. Cache misses, mapping failures, invalid
 STRM files, MediaVault failures, and every unsupported endpoint fall back to
@@ -32,8 +34,9 @@ short-lived grant is created only after Plex explicitly marks the same Part as
 Direct Play. If the client then requests universal `start`,
 `start.mpd`, or `start.m3u8`, the gateway requires that grant from the same
 playback session and exact Media/Part, authorizes the Part again, and returns
-the same CDN redirect without starting Plex Transcoder or synthesizing Plex
-metadata.
+control information to ShimWeave or the CDN redirect to an ordinary client.
+Neither path starts Plex Transcoder, synthesizes Plex metadata, or sends media
+bytes through the gateway.
 
 The gateway applies the same MediaInfo projection rules to every client. A
 disabled-by-default experimental playback veto checks the Plex for Apple TV,
@@ -53,9 +56,13 @@ elements that have the shape of STRM Parts. When the
 browser natively supports the container and codecs, the element can follow the
 302 and read the CDN directly even when the final origin has no CORS header;
 media bytes still bypass the gateway. Sources that require DASH, remuxing, or
-transcoding remain unsupported. The gateway does not synthesize manifests or
-proxy video streams. Setting `PLEX_WEB_DIRECT_PLAY_ENABLED=false` restores a
-fully transparent Plex Web shell.
+audio transcoding remain unsupported by the built-in helper.
+[ShimWeave](https://github.com/InfinityPacer/ShimWeave) can negotiate
+`control-v1` for these sources and perform browser-side remuxing or necessary
+audio compatibility handling. The gateway still does not synthesize manifests
+or proxy video streams. Setting `PLEX_WEB_DIRECT_PLAY_ENABLED=false` restores a
+fully transparent Plex Web shell without disabling the separate extension
+protocol.
 
 ## Compatibility status
 
@@ -66,9 +73,26 @@ fully transparent Plex Web shell.
 | Plex iOS ExperimentalPlayer | Direct Play verified | STRM uses the universal decision/start redirect path. Descriptive Gateway Streams can provide 4K, HEVC, HDR/DV, and related technical fields; audio state or playback badges may remain incomplete until Plex has materialized native Stream rows. |
 | Plex for Apple TV | Direct Play verified | HDR STRM uses the universal decision/start redirect path. Apple TV 4K supports Dolby Vision Profile 5 Direct Play, while Plex version, container, and source combinations may still affect compatibility; the gateway does not reject it by default. |
 | Plex Web cloud Direct Play | Direct Play verified | MP4/H.264/AAC was verified for initial playback, pause, resume, and seek with CDN-direct delivery. Other containers and codecs depend on native browser support; sources that require DASH, remuxing, or transcoding remain unsupported. |
+| Plex Web with ShimWeave | Basic integration verified | Initial playback and long seeks were verified with MKV, HEVC, and AAC. The extension reads media from the CDN and handles it in the browser. One tested 4K HEVC Main 10 with EAC3 source remains explicitly unsupported; additional 4K, HDR/DV, and audio combinations depend on ShimWeave, the browser, operating system, and hardware. |
 
 This is an independent community project. It is not affiliated with, endorsed
 by, or sponsored by Plex, MediaVault, Infuse, or their respective owners.
+
+## Using ShimWeave
+
+`plex-gateway 0.1.4` and later include the ShimWeave `control-v1` protocol with
+no additional environment variable. After installing
+[ShimWeave 0.0.1 or later](https://github.com/InfinityPacer/ShimWeave/releases),
+the extension takes over only when Plex Web cannot play the source natively,
+Plex has authorized the exact STRM Part for Direct Play, and both sides complete
+protocol negotiation. Existing Plex behavior remains unchanged without the
+extension, after a failed negotiation, for local media, and for browser-native
+sources.
+
+The gateway returns only control information and the current temporary media
+address. The browser requests Range data directly from the CDN, so media bytes
+never traverse the gateway or NAS. See the ShimWeave README for installation,
+supported formats, and current limitations.
 
 ## Container image
 

@@ -8,9 +8,10 @@
 > **状态：** 实验性。透明代理和 STRM 重定向链路已经实现，但客户端兼容性仍然有限，必须针对每个 Plex 客户端和播放模式分别验证。
 
 `plex-gateway` 是一个面向 STRM 云端媒体 Direct Play 的故障回退型 Plex
-协议适配器。Plex 仍然是元数据、身份认证、媒体库和观看状态的权威来源。Gateway
-观察 Plex 元数据，通过 MediaVault 解析符合条件的 STRM，并返回一次 HTTP 302，
-让客户端直接从云端 CDN 下载媒体。
+协议适配器。Plex 仍然是元数据、身份认证、媒体库和观看状态的权威来源。普通客户端播放时，
+Gateway 观察 Plex 元数据，通过 MediaVault 解析符合条件的 STRM，并返回 HTTP 302，让客户端
+直接从云端 CDN 下载媒体。支持 `control-v1` 的浏览器扩展可改用无媒体 body 的控制交换；媒体
+仍由浏览器直接从 CDN 读取。
 
 本地 Plex 媒体不会被重写。缓存未命中、路径映射失败、STRM 文件无效、MediaVault
 失败以及所有不支持的 endpoint 都会无条件回退到原始 Plex 请求。
@@ -24,8 +25,9 @@ Part。Part 缓存未命中时，请求会原样发送给 Plex；Gateway 不会�
 响应的前提下，请求 Plex 将该播放选择为 Direct Play。只有当该完整响应明确将同一个
 Part 标记为 Direct Play 后，Gateway 才会创建短期授权。如果客户端随后请求通用的
 `start`、`start.mpd` 或 `start.m3u8`，Gateway 会要求该播放会话及精确 Media/Part
-对应的授权，再次为 Part 请求授权，并返回同一个 CDN 重定向，而不会启动 Plex
-Transcoder 或合成 Plex 元数据。
+对应的授权，再次为 Part 请求授权。普通客户端收到 CDN 重定向；声明 `control-v1` 的请求收到
+固定控制端点和短期 bearer，浏览器随后为每个 Range 换取临时 CDN URL。两条路径都不会启动
+Plex Transcoder、合成 Plex 元数据或让媒体字节经过 Gateway。
 
 Gateway 对所有客户端使用同一套 MediaInfo 投影规则。默认关闭的实验性播放 veto 只在
 Plex 已返回同一 STRM Part 的 Direct Play decision、且本次 MediaInfo 增强已经取得新鲜
@@ -34,12 +36,14 @@ Plex 已返回同一 STRM Part 的 Direct Play decision、且本次 MediaInfo �
 额外探测。Apple TV 硬件支持 Profile 5，实际兼容性还受 Plex 版本、容器和片源影响，
 因此 veto 默认关闭。
 
-能够在这些路径上接受原始媒体重定向的原生客户端可以直接使用此链路。Plex Web
-兼容层默认开启：Gateway 只在 Plex Web shell 中加载一个版本化脚本，并只对同源、
+能够在这些路径上接受原始媒体重定向的原生客户端可以直接使用此链路。未安装 ShimWeave 时，
+默认启用的 Plex Web 兼容层只在 Plex Web shell 中加载一个版本化脚本，并只对同源、
 呈 STRM Part 形态的 `/library/parts/.../file` 或 `.strm` 媒体元素移除 `crossorigin`。浏览器原生支持该容器和编码时，可以按
 普通媒体元素跟随 302 直接读取 CDN，即使最终源站没有 CORS header；媒体字节仍不经过
-Gateway。需要 DASH、转封装或转码的片源仍不支持，Gateway 不合成 manifest，也不代理
-视频流。关闭 `PLEX_WEB_DIRECT_PLAY_ENABLED` 后，Plex Web 页面恢复完全透明代理。
+Gateway。需要 DASH、转封装或音频转码的片源仍无法由该内置薄层处理。[ShimWeave](https://github.com/InfinityPacer/ShimWeave)
+可通过 `control-v1` 接管这类播放，并在浏览器内完成转封装或必要的音频兼容处理；Gateway 仍不合成
+manifest、不代理视频流。关闭 `PLEX_WEB_DIRECT_PLAY_ENABLED` 后，内置薄层恢复完全透明代理，
+不影响扩展的独立协商协议。
 
 ## 兼容性状态
 
@@ -50,9 +54,21 @@ Gateway。需要 DASH、转封装或转码的片源仍不支持，Gateway 不合
 | Plex iOS ExperimentalPlayer | 已验证 Direct Play | STRM 使用通用 decision/start 重定向链路。Gateway 描述性 Stream 可补充 4K、HEVC、HDR/DV 等技术字段；Plex 尚未物化原生 Stream 行时，音轨状态或播放页徽标仍可能不完整。 |
 | Plex for Apple TV | 已验证 Direct Play | HDR STRM 使用通用 decision/start 重定向链路。Apple TV 4K 支持 DV Profile 5 Direct Play，但 Plex 版本、容器和片源组合仍可能影响兼容性；Gateway 默认不拒绝。 |
 | Plex Web 云端 Direct Play | 已验证 Direct Play | MP4/H.264/AAC 样本已验证首播、暂停、继续和 seek，并保持 CDN 直达；其他容器与编码取决于浏览器原生能力，需要 DASH、转封装或转码的片源不支持。 |
+| Plex Web + ShimWeave | 已验证基础联动 | MKV、HEVC、AAC 已验证起播和长进度拖动。媒体由扩展从 CDN 读取并在浏览器内处理；当前一组 4K HEVC Main 10 + EAC3 样本仍明确不支持，更多 4K、HDR/DV 和音频组合取决于 ShimWeave、浏览器、系统及硬件能力。 |
 
 本项目是独立的社区项目，与 Plex、MediaVault、Infuse 或其各自所有者没有关联，
 也未获得其认可或赞助。
+
+## 与 ShimWeave 配合
+
+`plex-gateway 0.1.4` 起内置 ShimWeave `control-v1` 协议，无需增加环境变量。安装
+[ShimWeave 0.0.1 或更高版本](https://github.com/InfinityPacer/ShimWeave/releases) 后，
+扩展只会在 Plex Web 无法原生播放、Plex 已为准确 STRM Part 建立 Direct Play 授权且双方完成
+协议协商时接管播放。未安装扩展、协商失败、本地媒体或浏览器原生可播内容继续使用原有 Plex
+路径。
+
+Gateway 只返回控制信息和当前有效的临时媒体地址。媒体 Range 数据始终由浏览器直接请求 CDN，
+不会经过 Gateway 或 NAS。ShimWeave 的安装方法、支持格式和已知限制以其项目 README 为准。
 
 ## 容器镜像
 

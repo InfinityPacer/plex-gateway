@@ -3,6 +3,7 @@
 package playback
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"path"
@@ -205,19 +206,38 @@ func (s *Service) Remember(part PreparedPart) {
 // Play authorizes the prepared target through Plex, then resolves it through
 // MediaVault. It never follows or downloads the returned media URL.
 func (s *Service) Play(input PlayInput) (PlayResult, error) {
-	if s == nil || s.authorizePart == nil || s.resolver == nil || input.Request == nil {
-		return PlayResult{}, &Failure{Kind: FailureAuthorization, Err: errors.New("playback service is unavailable")}
+	if err := s.Authorize(input); err != nil {
+		return PlayResult{}, err
+	}
+	return s.Resolve(input.Request.Context(), input.Part, ResolverRequest(input.Request))
+}
+
+// Authorize validates that one client may access the exact Plex Part and STRM
+// target before any direct URL is resolved or reusable control capability is
+// created for that playback.
+func (s *Service) Authorize(input PlayInput) error {
+	if s == nil || s.authorizePart == nil || input.Request == nil {
+		return &Failure{Kind: FailureAuthorization, Err: errors.New("playback service is unavailable")}
 	}
 	authorized, err := s.authorizePart(input.Request, input.PartReference, input.Part.Target)
 	if err != nil || !authorized {
-		return PlayResult{}, &Failure{Kind: FailureAuthorization, Err: err}
+		return &Failure{Kind: FailureAuthorization, Err: err}
 	}
 	if input.RefreshCacheOnAuthorize {
 		s.Remember(input.Part)
 	}
+	return nil
+}
 
+// Resolve exchanges one already-authorized STRM control target for a direct
+// URL. Callers must keep the returned URL ephemeral and must not proxy media
+// bytes through the Gateway.
+func (s *Service) Resolve(ctx context.Context, part PreparedPart, request resolver.PlaybackRequest) (PlayResult, error) {
+	if s == nil || s.resolver == nil {
+		return PlayResult{}, &Failure{Kind: FailureResolver, Err: errors.New("playback service is unavailable")}
+	}
 	started := time.Now()
-	directURL, err := s.resolver.ResolveTarget(input.Request.Context(), input.Part.Target, resolverRequest(input.Request))
+	directURL, err := s.resolver.ResolveTarget(ctx, part.Target, request)
 	result := PlayResult{DirectURL: directURL, ResolverLatency: time.Since(started)}
 	if err != nil {
 		return result, &Failure{Kind: FailureResolver, Err: err}
@@ -233,10 +253,11 @@ func (s *Service) enabled() bool {
 		s.preparer.resolver != nil && s.resolver != nil && s.authorizePart != nil
 }
 
-// resolverRequest preserves every client header and promotes query-carried
-// Plex context for the trusted MediaVault control request. Resolving a direct
-// link is always GET, including for client HEAD requests.
-func resolverRequest(request *http.Request) resolver.PlaybackRequest {
+// ResolverRequest snapshots the active client semantics for a trusted control
+// request, including query-carried Plex context. The returned headers are
+// independent from the caller and may be retained for a bounded playback
+// capability; direct-link resolution always uses GET.
+func ResolverRequest(request *http.Request) resolver.PlaybackRequest {
 	header := request.Header.Clone()
 	for name, values := range request.URL.Query() {
 		headerName, ok := plexContextHeaderName(name)

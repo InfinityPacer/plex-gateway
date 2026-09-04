@@ -56,18 +56,27 @@ The compatibility adapter therefore:
 Official mobile and Plex Web traces then demonstrated that a successful Direct
 Play decision can still be followed by `start.mpd` or `start.m3u8` because STRM
 metadata has no media streams. The start adapter selects and authorizes the
-exact Part captured by the same session's confirmed Direct Play decision grant,
-resolves MediaVault, and returns the final CDN 302 without repeating metadata
-selection. Production playback has successfully followed this redirect path
-with Plex iOS ExperimentalPlayer and Plex for Apple TV. Other official-client
-playback paths are not supported by the current compatibility scope.
+exact Part captured by the same session's confirmed Direct Play decision grant
+without repeating metadata selection. Ordinary clients receive the final CDN
+302. A request that declares ShimWeave `control-v1` instead receives a bodyless
+descriptor and uses the fixed control endpoint to resolve one ephemeral CDN URL
+per uncached Range on the normal success path. A CDN 403 may repeat that exchange
+once for the affected Range. Production playback has successfully followed the
+redirect path with Plex iOS ExperimentalPlayer and Plex for Apple TV. The
+browser control path has passed its initial end-to-end gate with ShimWeave
+0.0.1: MKV/HEVC/AAC playback, a long seek, playback shutdown, and local-media
+bypass were all verified. Additional format combinations remain ShimWeave and
+browser compatibility work rather than Gateway protocol scope.
 
 Plex Web Direct Play is included for media the browser can decode natively. A
 small, default-enabled shell helper removes `crossorigin` only from same-origin
 Plex Part media elements, allowing the existing Part 302 to remain CDN-direct
 when the final origin does not emit CORS headers. The helper does not handle
-DASH, remuxing, or transcoding and does not proxy media bytes. Local Plex Web
-media, manifest segments, and every genuine transcode request remain Plex-owned.
+DASH, remuxing, or transcoding and does not proxy media bytes. The separate
+ShimWeave protocol may terminate an eligible manifest request and perform remux
+or required audio transcoding in the browser while media bytes remain CDN-direct.
+Local Plex Web media and every request without a valid negotiation remain
+Plex-owned.
 
 ## MediaInfo fallback and projection
 

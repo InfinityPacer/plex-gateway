@@ -8,16 +8,16 @@ import (
 	"time"
 )
 
-// SessionIdentity is the first stable Plex playback-session identifier shared
-// by a decision and its corresponding universal start request.
+// SessionIdentity is the first stable Plex request identifier shared by one
+// decision and its corresponding universal start request.
 type SessionIdentity struct {
 	Name  string
 	Value string
 }
 
-// Attempt is the normalized identity of one Plex Media/Part playback attempt.
-// Client-specific omission rules belong in the protocol adapter that constructs
-// this value, not in grant storage.
+// Attempt correlates one Plex decision/start pair for an exact Media/Part. It
+// does not represent the user's complete playback intent because Plex may use
+// another session value for a Direct Stream or Transcode fallback.
 type Attempt struct {
 	MetadataPath string
 	MediaIndex   int
